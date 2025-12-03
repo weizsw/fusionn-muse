@@ -18,10 +18,11 @@ whisper:
   # Provider: "local" or "openai"
   provider: "local"
 
-  # Model:
-  #   local  = "base", "small", "medium", "large" (bundled: medium)
+  # Model (downloaded automatically if not present):
+  #   local  = "tiny", "base", "small", "medium", "large-v2", "large-v3"
   #   openai = "whisper-1"
-  model: "medium"
+  # Note: First run with a new model will download it (~1-3GB depending on size)
+  model: "large-v2"
 
   # API key (required for openai provider)
   api_key: ""
@@ -65,6 +66,10 @@ translate:
   # Requests per minute (0 = no limit)
   # Useful for avoiding rate limit errors or controlling costs
   rate_limit_rpm: 0
+
+  # Custom instruction for the LLM translator (optional)
+  # Example: "Preserve Japanese honorifics like -san, -kun, -chan"
+  instruction: ""
 
   # Additional arguments for llm-subtrans (optional)
   args: []

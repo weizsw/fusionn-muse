@@ -38,6 +38,11 @@ func (w *Whisper) Transcribe(ctx context.Context, videoPath string) (string, err
 	}
 }
 
+const (
+	modelsDir    = "/app/models"
+	modelBaseURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+)
+
 // transcribeLocal uses whisper.cpp binary.
 func (w *Whisper) transcribeLocal(ctx context.Context, videoPath string) (string, error) {
 	outputDir := filepath.Dir(videoPath)
@@ -45,7 +50,7 @@ func (w *Whisper) transcribeLocal(ctx context.Context, videoPath string) (string
 
 	model := w.cfg.Model
 	if model == "" {
-		model = "medium"
+		model = "large-v2"
 	}
 
 	lang := w.cfg.Language
@@ -53,10 +58,16 @@ func (w *Whisper) transcribeLocal(ctx context.Context, videoPath string) (string
 		lang = "auto"
 	}
 
+	// Ensure model is downloaded
+	modelPath := filepath.Join(modelsDir, fmt.Sprintf("ggml-%s.bin", model))
+	if err := w.ensureModel(ctx, model, modelPath); err != nil {
+		return "", fmt.Errorf("model setup failed: %w", err)
+	}
+
 	// whisper.cpp CLI: whisper-cpp -m <model> -l <lang> -osrt -of <output> <input>
 	outputBase := filepath.Join(outputDir, baseName)
 	args := []string{
-		"-m", fmt.Sprintf("/app/models/ggml-%s.bin", model),
+		"-m", modelPath,
 		"-osrt",
 		"-of", outputBase,
 	}
@@ -77,6 +88,61 @@ func (w *Whisper) transcribeLocal(ctx context.Context, videoPath string) (string
 	srtPath := outputBase + ".srt"
 	logger.Infof("✅ Transcription complete: %s", filepath.Base(srtPath))
 	return srtPath, nil
+}
+
+// ensureModel downloads the whisper model if it doesn't exist.
+func (w *Whisper) ensureModel(ctx context.Context, model, modelPath string) error {
+	// Check if model already exists
+	if _, err := os.Stat(modelPath); err == nil {
+		return nil
+	}
+
+	logger.Infof("📥 Downloading whisper model: %s (this may take a while...)", model)
+
+	// Ensure models directory exists
+	if err := os.MkdirAll(modelsDir, 0755); err != nil {
+		return fmt.Errorf("create models dir: %w", err)
+	}
+
+	// Download model from Hugging Face
+	url := fmt.Sprintf("%s/ggml-%s.bin", modelBaseURL, model)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Minute} // Large models take time
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("download request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed: %s (status %d)", url, resp.StatusCode)
+	}
+
+	// Write to temp file first, then rename (atomic)
+	tmpPath := modelPath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+
+	written, err := io.Copy(f, resp.Body)
+	f.Close()
+	if err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("write model: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, modelPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename model: %w", err)
+	}
+
+	logger.Infof("✅ Model downloaded: %s (%.1f GB)", model, float64(written)/1024/1024/1024)
+	return nil
 }
 
 // transcribeOpenAI uses OpenAI Whisper API.
