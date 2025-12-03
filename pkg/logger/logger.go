@@ -54,7 +54,7 @@ func customTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 
 func Sync() {
 	if Log != nil {
-		_ = Log.Sync()
+		_ = Log.Sync() //nolint:errcheck // Sync can fail on stdout/stderr, safe to ignore
 	}
 }
 

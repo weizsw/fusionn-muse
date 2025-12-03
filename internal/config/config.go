@@ -91,12 +91,12 @@ type AppriseConfig struct {
 }
 
 type QueueConfig struct {
-	MaxRetries   int `mapstructure:"max_retries"`   // Max retries per job
+	MaxRetries   int `mapstructure:"max_retries"`    // Max retries per job
 	RetryDelayMs int `mapstructure:"retry_delay_ms"` // Delay between retries
 }
 
 // ChangeCallback is called when config changes.
-type ChangeCallback func(old, new *Config)
+type ChangeCallback func(old, updated *Config)
 
 // Manager handles config loading and hot-reload.
 type Manager struct {

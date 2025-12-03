@@ -16,38 +16,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o fusionn-muse ./cmd/fusionn-muse
 
 # ════════════════════════════════════════════════════════════════════════════
-# STAGE 2: Build whisper.cpp (Alpine with static linking)
-# ════════════════════════════════════════════════════════════════════════════
-FROM alpine:3.19 AS whisper-builder
-
-# Optional: bundle a model at build time (empty = download at runtime)
-# Build with: docker build --build-arg WHISPER_MODEL=large-v2 -t fusionn-muse .
-ARG WHISPER_MODEL=""
-
-RUN apk add --no-cache git cmake make g++ wget
-
-WORKDIR /build
-RUN git clone https://github.com/ggerganov/whisper.cpp.git --depth 1
-
-WORKDIR /build/whisper.cpp
-# Build with static linking for portability across distros
-RUN cmake -B build \
-    -DGGML_NATIVE=OFF \
-    -DGGML_STATIC=ON \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++" && \
-    cmake --build build --config Release -j$(nproc)
-
-# Optionally download model at build time (faster startup, larger image)
-# Creates a placeholder to ensure the models dir exists for COPY
-RUN mkdir -p /build/whisper.cpp/models && \
-    touch /build/whisper.cpp/models/.keep && \
-    if [ -n "${WHISPER_MODEL}" ]; then \
-        ./models/download-ggml-model.sh ${WHISPER_MODEL}; \
-    fi
-
-# ════════════════════════════════════════════════════════════════════════════
-# STAGE 3: Final image
+# STAGE 2: Final image
 # ════════════════════════════════════════════════════════════════════════════
 FROM python:3.11-slim
 
@@ -61,31 +30,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy whisper.cpp binary
-COPY --from=whisper-builder /build/whisper.cpp/build/bin/main /usr/local/bin/whisper-cpp
-# Copy models dir (may contain bundled model or just placeholder - runtime download supported)
-COPY --from=whisper-builder /build/whisper.cpp/models/ /app/models/
+# Install faster-whisper (CPU version - much faster than whisper.cpp)
+RUN pip install --no-cache-dir faster-whisper
 
-# Clone and setup llm-subtrans
-RUN pip install --no-cache-dir \
-    openai \
-    anthropic \
-    google-generativeai \
-    httpx \
-    srt \
-    pysubs2 \
-    regex \
-    requests
+# Clone and install llm-subtrans
+RUN apt-get update && apt-get install -y --no-install-recommends git && \
+    git clone https://github.com/machinewrapped/llm-subtrans.git /app/llm-subtrans --depth 1 && \
+    cd /app/llm-subtrans && pip install --no-cache-dir -e ".[openai,gemini,claude]" && \
+    apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
-RUN git clone https://github.com/machinewrapped/llm-subtrans.git /app/llm-subtrans --depth 1 || \
-    (apt-get update && apt-get install -y git && \
-     git clone https://github.com/machinewrapped/llm-subtrans.git /app/llm-subtrans --depth 1)
+# Setup instructions directory (llm-subtrans expects /app/instructions/instructions.txt)
+RUN ln -s /app/llm-subtrans/instructions /app/instructions
+
+# Copy transcription script
+COPY scripts/transcribe.py /app/scripts/transcribe.py
 
 # Copy Go binary
 COPY --from=go-builder /app/fusionn-muse .
 
-# Create data directories
-RUN mkdir -p /data/input /data/staging /data/processing /data/finished /data/subtitles /data/failed
+# Create data directories and models cache
+RUN mkdir -p /data/input /data/staging /data/processing /data/finished /data/subtitles /data/failed /app/models
 
 ENV ENV=production
 ENV CONFIG_PATH=/app/config/config.yaml
