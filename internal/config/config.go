@@ -50,7 +50,7 @@ type FoldersConfig struct {
 type WhisperConfig struct {
 	// Provider: "local" (whisper.cpp) or "openai" (API)
 	Provider string `mapstructure:"provider"`
-	// Model: for local = "base", "small", "medium", "large"
+	// Model: for local = "base", "small", "medium", "large-v2", "large-v3"
 	//        for openai = "whisper-1"
 	Model string `mapstructure:"model"`
 	// APIKey: required if provider is "openai"
@@ -75,6 +75,9 @@ type TranslateConfig struct {
 
 	// Rate limiting
 	RateLimitRPM int `mapstructure:"rate_limit_rpm"` // Requests per minute (0 = no limit)
+
+	// Instruction: custom instruction for the LLM translator
+	Instruction string `mapstructure:"instruction"`
 
 	// Additional CLI args for llm-subtrans
 	Args []string `mapstructure:"args"`

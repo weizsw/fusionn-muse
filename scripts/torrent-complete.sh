@@ -12,11 +12,22 @@
 #   %N = Torrent name
 #   %L = Category
 #
+# Environment variables:
+#   MUSE_URL           - fusionn-muse API URL (default: http://localhost:8080)
+#   LOG_FILE           - Log file path (default: /tmp/torrent-complete.log)
+#   HOST_INPUT_PATH    - Host downloads folder (e.g., /home/user/downloads)
+#   CONTAINER_INPUT_PATH - Container input folder (default: /data/input)
+#
 # ════════════════════════════════════════════════════════════════════════════
 
 # Configuration
 MUSE_URL="${MUSE_URL:-http://localhost:8080}"
 LOG_FILE="${LOG_FILE:-/tmp/torrent-complete.log}"
+
+# Path mapping (host downloads → container input)
+# Required when fusionn-muse runs in Docker
+HOST_INPUT_PATH="${HOST_INPUT_PATH:-}"
+CONTAINER_INPUT_PATH="${CONTAINER_INPUT_PATH:-/data/input}"
 
 # Parameters
 CONTENT_PATH="$1"
@@ -28,9 +39,19 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
+# Translate host path to container path if mapping is configured
+ORIGINAL_PATH="$CONTENT_PATH"
+if [[ -n "$HOST_INPUT_PATH" ]]; then
+    CONTENT_PATH="${CONTENT_PATH/#$HOST_INPUT_PATH/$CONTAINER_INPUT_PATH}"
+fi
+
 # Main
 log "Torrent complete: $TORRENT_NAME"
-log "  Path: $CONTENT_PATH"
+if [[ "$ORIGINAL_PATH" != "$CONTENT_PATH" ]]; then
+    log "  Path: $ORIGINAL_PATH → $CONTENT_PATH"
+else
+    log "  Path: $CONTENT_PATH"
+fi
 log "  Category: $CATEGORY"
 
 # Send webhook to fusionn-muse

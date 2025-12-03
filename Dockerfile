@@ -16,21 +16,35 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o fusionn-muse ./cmd/fusionn-muse
 
 # ════════════════════════════════════════════════════════════════════════════
-# STAGE 2: Build whisper.cpp
+# STAGE 2: Build whisper.cpp (Alpine with static linking)
 # ════════════════════════════════════════════════════════════════════════════
 FROM alpine:3.19 AS whisper-builder
 
-RUN apk add --no-cache git cmake make g++ sdl2-dev
+# Optional: bundle a model at build time (empty = download at runtime)
+# Build with: docker build --build-arg WHISPER_MODEL=large-v2 -t fusionn-muse .
+ARG WHISPER_MODEL=""
+
+RUN apk add --no-cache git cmake make g++ wget
 
 WORKDIR /build
 RUN git clone https://github.com/ggerganov/whisper.cpp.git --depth 1
 
 WORKDIR /build/whisper.cpp
-RUN cmake -B build && \
+# Build with static linking for portability across distros
+RUN cmake -B build \
+    -DGGML_NATIVE=OFF \
+    -DGGML_STATIC=ON \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++" && \
     cmake --build build --config Release -j$(nproc)
 
-# Download medium model (good balance of speed/quality)
-RUN ./models/download-ggml-model.sh medium
+# Optionally download model at build time (faster startup, larger image)
+# Creates a placeholder to ensure the models dir exists for COPY
+RUN mkdir -p /build/whisper.cpp/models && \
+    touch /build/whisper.cpp/models/.keep && \
+    if [ -n "${WHISPER_MODEL}" ]; then \
+        ./models/download-ggml-model.sh ${WHISPER_MODEL}; \
+    fi
 
 # ════════════════════════════════════════════════════════════════════════════
 # STAGE 3: Final image
@@ -47,9 +61,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy whisper.cpp binary and model
+# Copy whisper.cpp binary
 COPY --from=whisper-builder /build/whisper.cpp/build/bin/main /usr/local/bin/whisper-cpp
-COPY --from=whisper-builder /build/whisper.cpp/models/ggml-medium.bin /app/models/ggml-medium.bin
+# Copy models dir (may contain bundled model or just placeholder - runtime download supported)
+COPY --from=whisper-builder /build/whisper.cpp/models/ /app/models/
 
 # Clone and setup llm-subtrans
 RUN pip install --no-cache-dir \

@@ -1,16 +1,26 @@
 package executor
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 
+	"golang.org/x/time/rate"
+
 	"github.com/fusionn-muse/internal/config"
 	"github.com/fusionn-muse/pkg/logger"
-	"golang.org/x/time/rate"
+)
+
+const (
+	dimStart = "\033[2m"
+	dimEnd   = "\033[0m"
 )
 
 // Translator handles subtitle translation via llm-subtrans.
@@ -61,25 +71,38 @@ func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string
 
 	cmd := exec.CommandContext(ctx, "python3", args...)
 
-	// Set timeout for long translations
-	done := make(chan error, 1)
-	go func() {
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			done <- fmt.Errorf("translator failed: %w\nOutput: %s", err, string(output))
-			return
-		}
-		done <- nil
-	}()
+	// Pipe stdout and stderr for real-time logging
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("stderr pipe: %w", err)
+	}
 
-	select {
-	case <-ctx.Done():
-		_ = cmd.Process.Kill()
-		return "", ctx.Err()
-	case err := <-done:
-		if err != nil {
-			return "", err
+	var stdoutBuf, stderrBuf bytes.Buffer
+	var wg sync.WaitGroup
+
+	// Stream output in dim/grey (like Docker build logs)
+	wg.Add(2)
+	go streamDimmed(&wg, stdoutPipe, &stdoutBuf)
+	go streamDimmed(&wg, stderrPipe, &stderrBuf)
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start cmd: %w", err)
+	}
+
+	// Wait for output streaming to complete
+	wg.Wait()
+
+	// Wait for command to finish
+	if err := cmd.Wait(); err != nil {
+		stderrStr := strings.TrimSpace(stderrBuf.String())
+		if stderrStr != "" {
+			logger.Errorf("Script stderr: %s", stderrStr)
 		}
+		return "", fmt.Errorf("translator failed: %w", err)
 	}
 
 	logger.Infof("✅ Translation complete: %s", filepath.Base(translatedPath))
@@ -89,7 +112,7 @@ func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string
 func (t *Translator) buildArgs(inputPath, outputPath string) []string {
 	// Base: /app/llm-subtrans/gpt-subtrans.py <input> --target_language <lang>
 	args := []string{
-		"/app/llm-subtrans/gpt-subtrans.py",
+		"/app/llm-subtrans/scripts/llm-subtrans.py",
 		inputPath,
 		"--target_language", t.cfg.TargetLang,
 		"-o", outputPath,
@@ -118,6 +141,11 @@ func (t *Translator) buildArgs(inputPath, outputPath string) []string {
 	// API key
 	if t.cfg.APIKey != "" {
 		args = append(args, "--apikey", t.cfg.APIKey)
+	}
+
+	// Custom instruction
+	if t.cfg.Instruction != "" {
+		args = append(args, "--instruction", t.cfg.Instruction)
 	}
 
 	// Additional custom args
@@ -167,4 +195,25 @@ func (t *Translator) WaitForRateLimit(ctx context.Context) error {
 		return nil
 	}
 	return t.limiter.Wait(ctx)
+}
+
+// streamDimmed reads from r, writes to buf for capture, and prints dimmed to stderr.
+// This creates a Docker-build-like experience where script output is visible but greyed out.
+func streamDimmed(wg *sync.WaitGroup, r io.Reader, buf *bytes.Buffer) {
+	defer wg.Done()
+	scanner := bufio.NewScanner(r)
+	// Increase buffer for potentially long lines
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+		// Print dimmed to stderr (doesn't interfere with structured logs)
+		fmt.Fprintf(os.Stderr, "%s  │ %s%s\n", dimStart, line, dimEnd)
+	}
+
+	if err := scanner.Err(); err != nil {
+		logger.Debugf("Scanner error (may be normal): %v", err)
+	}
 }

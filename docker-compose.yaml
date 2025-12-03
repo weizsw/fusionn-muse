@@ -16,6 +16,11 @@ services:
       - /path/to/finished:/data/finished # Processed videos
       - /path/to/subtitles:/data/subtitles # Translated subtitles
 
+      # ─── Optional: persist whisper models ───
+      # Models are downloaded automatically on first use
+      # Mount to persist across container rebuilds (saves ~3GB re-download)
+      # - ./models:/app/models
+
       # ─── Optional: persist queue across restarts ───
       # Without these, queued jobs are lost on container restart
       # - ./data/staging:/data/staging
