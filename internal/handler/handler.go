@@ -1,0 +1,315 @@
+package handler
+
+import (
+	"fmt"
+	"net/http"
+	"path/filepath"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+
+	"github.com/fusionn-muse/internal/config"
+	"github.com/fusionn-muse/internal/fileops"
+	"github.com/fusionn-muse/internal/queue"
+	"github.com/fusionn-muse/internal/service/processor"
+	"github.com/fusionn-muse/internal/version"
+	"github.com/fusionn-muse/pkg/logger"
+)
+
+// Handler handles HTTP requests.
+type Handler struct {
+	queue     *queue.Queue
+	processor *processor.Service
+	folders   config.FoldersConfig
+}
+
+// New creates a new Handler.
+func New(q *queue.Queue, proc *processor.Service) *Handler {
+	return &Handler{
+		queue:     q,
+		processor: proc,
+		folders:   config.Folders(),
+	}
+}
+
+// RegisterRoutes registers all API routes.
+func (h *Handler) RegisterRoutes(r *gin.Engine) {
+	api := r.Group("/api/v1")
+	{
+		api.GET("/health", h.Health)
+		api.GET("/version", h.Version)
+
+		// Webhook endpoint for qBittorrent
+		api.POST("/webhook/torrent", h.TorrentComplete)
+
+		// Queue management
+		api.GET("/queue", h.GetQueue)
+		api.GET("/queue/stats", h.GetQueueStats)
+		api.GET("/queue/:id", h.GetJob)
+
+		// Retry endpoints
+		api.POST("/retry/staging", h.RetryStaging)      // Re-queue all staging files
+		api.POST("/retry/failed", h.RetryFailed)        // Move all failed → staging and queue
+		api.POST("/retry/failed/:name", h.RetryOneFailed) // Move one failed file → staging
+
+		// File listing
+		api.GET("/files/staging", h.ListStagingFiles)
+		api.GET("/files/failed", h.ListFailedFiles)
+	}
+}
+
+// Health returns service health status.
+func (h *Handler) Health(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// Version returns service version.
+func (h *Handler) Version(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"version": version.Version})
+}
+
+// TorrentCompleteRequest is the request body from qBittorrent webhook.
+type TorrentCompleteRequest struct {
+	Path     string `json:"path" binding:"required"`
+	Name     string `json:"name"`
+	Category string `json:"category"`
+}
+
+// TorrentComplete handles the webhook when a torrent finishes downloading.
+func (h *Handler) TorrentComplete(c *gin.Context) {
+	var req TorrentCompleteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	logger.Infof("📥 Webhook received: %s", req.Path)
+
+	var videoFiles []string
+
+	if fileops.IsVideoFile(req.Path) {
+		videoFiles = append(videoFiles, req.Path)
+	} else if fileops.Exists(req.Path) {
+		files, err := fileops.FindVideoFiles(req.Path)
+		if err != nil {
+			logger.Errorf("❌ Failed to scan directory: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to scan directory"})
+			return
+		}
+		videoFiles = files
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "path does not exist"})
+		return
+	}
+
+	if len(videoFiles) == 0 {
+		logger.Warnf("⚠️ No video files found in: %s", req.Path)
+		c.JSON(http.StatusOK, gin.H{
+			"message": "no video files found",
+			"jobs":    []string{},
+		})
+		return
+	}
+
+	var jobIDs []string
+	for _, videoPath := range videoFiles {
+		jobID := uuid.New().String()[:8]
+		fileName := filepath.Base(videoPath)
+
+		job := queue.NewJob(jobID, videoPath, fileName, req.Name, req.Category)
+		h.queue.Enqueue(job)
+		jobIDs = append(jobIDs, jobID)
+
+		logger.Infof("📥 Queued: %s (job: %s)", fileName, jobID)
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"message": "jobs queued",
+		"jobs":    jobIDs,
+		"count":   len(jobIDs),
+	})
+}
+
+// GetQueue returns all jobs in the queue.
+func (h *Handler) GetQueue(c *gin.Context) {
+	jobs := h.queue.GetAllJobs()
+	c.JSON(http.StatusOK, jobs)
+}
+
+// GetQueueStats returns queue statistics.
+func (h *Handler) GetQueueStats(c *gin.Context) {
+	stats := h.queue.GetQueueStats()
+	c.JSON(http.StatusOK, stats)
+}
+
+// GetJob returns a specific job by ID.
+func (h *Handler) GetJob(c *gin.Context) {
+	id := c.Param("id")
+	job := h.queue.GetJob(id)
+
+	if job == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, job)
+}
+
+// RetryStaging re-queues all video files currently in staging folder.
+func (h *Handler) RetryStaging(c *gin.Context) {
+	files, err := h.processor.GetStagingFiles()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if len(files) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "no files in staging",
+			"count":   0,
+		})
+		return
+	}
+
+	var jobIDs []string
+	for _, filePath := range files {
+		jobID := uuid.New().String()[:8]
+		fileName := filepath.Base(filePath)
+
+		// For staging files, source path is the staging path itself
+		job := queue.NewJob(jobID, filePath, fileName, "", "")
+		job.StagingPath = filePath // Already in staging
+		h.queue.Enqueue(job)
+		jobIDs = append(jobIDs, jobID)
+
+		logger.Infof("📥 Re-queued from staging: %s (job: %s)", fileName, jobID)
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"message": "staging files re-queued",
+		"jobs":    jobIDs,
+		"count":   len(jobIDs),
+	})
+}
+
+// RetryFailed moves all failed files back to staging and queues them.
+func (h *Handler) RetryFailed(c *gin.Context) {
+	files, err := h.processor.GetFailedFiles()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if len(files) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "no files in failed folder",
+			"count":   0,
+		})
+		return
+	}
+
+	var jobIDs []string
+	var errors []string
+
+	for _, filePath := range files {
+		fileName := filepath.Base(filePath)
+
+		// Move from failed to staging
+		if err := h.processor.MoveToStagingForRetry(fileName); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", fileName, err))
+			continue
+		}
+
+		// Queue the job
+		jobID := uuid.New().String()[:8]
+		stagingPath := filepath.Join(h.folders.Staging, fileName)
+		job := queue.NewJob(jobID, stagingPath, fileName, "", "")
+		job.StagingPath = stagingPath
+		h.queue.Enqueue(job)
+		jobIDs = append(jobIDs, jobID)
+
+		logger.Infof("📥 Re-queued from failed: %s (job: %s)", fileName, jobID)
+	}
+
+	response := gin.H{
+		"message": "failed files re-queued",
+		"jobs":    jobIDs,
+		"count":   len(jobIDs),
+	}
+
+	if len(errors) > 0 {
+		response["errors"] = errors
+	}
+
+	c.JSON(http.StatusAccepted, response)
+}
+
+// RetryOneFailed moves a single failed file back to staging and queues it.
+func (h *Handler) RetryOneFailed(c *gin.Context) {
+	fileName := c.Param("name")
+	if fileName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file name required"})
+		return
+	}
+
+	// Move from failed to staging
+	if err := h.processor.MoveToStagingForRetry(fileName); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Queue the job
+	jobID := uuid.New().String()[:8]
+	stagingPath := filepath.Join(h.folders.Staging, fileName)
+	job := queue.NewJob(jobID, stagingPath, fileName, "", "")
+	job.StagingPath = stagingPath
+	h.queue.Enqueue(job)
+
+	logger.Infof("📥 Re-queued from failed: %s (job: %s)", fileName, jobID)
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"message": "file re-queued",
+		"job":     jobID,
+	})
+}
+
+// ListStagingFiles returns all files in staging folder.
+func (h *Handler) ListStagingFiles(c *gin.Context) {
+	files, err := h.processor.GetStagingFiles()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	var fileNames []string
+	for _, f := range files {
+		fileNames = append(fileNames, filepath.Base(f))
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"folder": "staging",
+		"files":  fileNames,
+		"count":  len(fileNames),
+	})
+}
+
+// ListFailedFiles returns all files in failed folder.
+func (h *Handler) ListFailedFiles(c *gin.Context) {
+	files, err := h.processor.GetFailedFiles()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	var fileNames []string
+	for _, f := range files {
+		fileNames = append(fileNames, filepath.Base(f))
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"folder": "failed",
+		"files":  fileNames,
+		"count":  len(fileNames),
+	})
+}
+

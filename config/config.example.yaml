@@ -1,0 +1,135 @@
+# ════════════════════════════════════════════════════════════════════════════
+# FUSIONN-MUSE CONFIGURATION
+# ════════════════════════════════════════════════════════════════════════════
+# Subtitle transcription and translation pipeline for qBittorrent
+
+server:
+  port: 8080
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WHISPER (Transcription)
+# ─────────────────────────────────────────────────────────────────────────────
+# Transcribe video audio to subtitles.
+#
+# Providers:
+#   - "local"  : Uses whisper.cpp (bundled in Docker image)
+#   - "openai" : Uses OpenAI Whisper API (requires api_key)
+whisper:
+  # Provider: "local" or "openai"
+  provider: "local"
+
+  # Model:
+  #   local  = "base", "small", "medium", "large" (bundled: medium)
+  #   openai = "whisper-1"
+  model: "medium"
+
+  # API key (required for openai provider)
+  api_key: ""
+
+  # Source language hint (optional, "" or "auto" for auto-detect)
+  # Examples: "en", "ja", "zh", "ko"
+  language: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRANSLATE (llm-subtrans)
+# ─────────────────────────────────────────────────────────────────────────────
+# Translate subtitles using LLM.
+# Repo: https://github.com/machinewrapped/llm-subtrans
+#
+# Providers:
+#   - "openai"     : OpenAI API (gpt-4o, gpt-4o-mini, etc.)
+#   - "claude"     : Anthropic Claude
+#   - "gemini"     : Google Gemini
+#   - "openrouter" : OpenRouter (access to many models)
+#   - "custom"     : Custom OpenAI-compatible endpoint
+translate:
+  # Provider
+  provider: "openai"
+
+  # Model (depends on provider)
+  model: "gpt-4o-mini"
+
+  # API key
+  api_key: ""
+
+  # Target language for translation
+  target_lang: "Simplified Chinese"
+
+  # ─── Custom endpoint (only for provider: "custom") ───
+  # Server URL (e.g., "http://localhost:1234")
+  custom_server: ""
+  # Endpoint path (e.g., "/v1/chat/completions")
+  custom_endpoint: ""
+
+  # ─── Rate limiting ───
+  # Requests per minute (0 = no limit)
+  # Useful for avoiding rate limit errors or controlling costs
+  rate_limit_rpm: 0
+
+  # Additional arguments for llm-subtrans (optional)
+  args: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUEUE
+# ─────────────────────────────────────────────────────────────────────────────
+queue:
+  # Max retries before marking job as failed
+  # Failed files are moved to /data/failed for manual inspection
+  max_retries: 3
+
+  # Delay between retries (milliseconds)
+  retry_delay_ms: 5000
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPRISE (Notifications)
+# ─────────────────────────────────────────────────────────────────────────────
+apprise:
+  enabled: false
+  base_url: "http://apprise:8000"
+  key: "apprise"
+  tag: "fusionn-muse"
+# ════════════════════════════════════════════════════════════════════════════
+# DOCKER SETUP
+# ════════════════════════════════════════════════════════════════════════════
+#
+# docker run -d \
+#   -p 8080:8080 \
+#   -v /path/to/downloads:/data/input:ro \
+#   -v /path/to/finished:/data/finished \
+#   -v /path/to/subtitles:/data/subtitles \
+#   -v ./config.yaml:/app/config/config.yaml:ro \
+#   fusionn-muse
+#
+# Internal folders (no need to mount):
+#   /data/staging    - Queue before processing
+#   /data/processing - Active processing
+#   /data/failed     - Failed jobs (mount if you want access)
+#
+# ════════════════════════════════════════════════════════════════════════════
+# QBITTORRENT SETUP
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Options → Downloads → Run external program on completion:
+#   /path/to/torrent-complete.sh "%F" "%N" "%L"
+#
+# torrent-complete.sh:
+#   #!/bin/bash
+#   curl -X POST http://fusionn-muse:8080/api/v1/webhook/torrent \
+#     -H "Content-Type: application/json" \
+#     -d "{\"path\": \"$1\", \"name\": \"$2\", \"category\": \"$3\"}"
+#
+# ════════════════════════════════════════════════════════════════════════════
+# API ENDPOINTS
+# ════════════════════════════════════════════════════════════════════════════
+#
+# POST /api/v1/webhook/torrent     - qBittorrent completion callback
+# GET  /api/v1/queue               - List all jobs
+# GET  /api/v1/queue/stats         - Queue statistics
+# GET  /api/v1/queue/:id           - Get job details
+# POST /api/v1/retry/staging       - Re-queue all staging files
+# POST /api/v1/retry/failed        - Re-queue all failed files
+# POST /api/v1/retry/failed/:name  - Re-queue specific failed file
+# GET  /api/v1/files/staging       - List staging files
+# GET  /api/v1/files/failed        - List failed files
+#
+# ════════════════════════════════════════════════════════════════════════════

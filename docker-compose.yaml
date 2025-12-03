@@ -1,0 +1,28 @@
+services:
+  fusionn-muse:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fusionn-muse
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Config (required)
+      - ./config/config.yaml:/app/config/config.yaml:ro
+
+      # ─── Required mounts ───
+      - /path/to/downloads:/data/input:ro # Torrent downloads (read-only)
+      - /path/to/finished:/data/finished # Processed videos
+      - /path/to/subtitles:/data/subtitles # Translated subtitles
+
+      # ─── Optional: persist queue across restarts ───
+      # Without these, queued jobs are lost on container restart
+      # - ./data/staging:/data/staging
+      # - ./data/processing:/data/processing
+
+      # ─── Optional: access failed jobs for debugging ───
+      # - ./data/failed:/data/failed
+    environment:
+      - ENV=production
+      - TZ=Asia/Singapore
