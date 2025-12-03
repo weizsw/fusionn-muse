@@ -8,6 +8,10 @@ import argparse
 import os
 import sys
 
+# Disable XET protocol, force standard HTTP downloads with progress
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+
 
 def format_timestamp(seconds: float) -> str:
     """Convert seconds to SRT timestamp format (HH:MM:SS,mmm)."""
@@ -16,6 +20,20 @@ def format_timestamp(seconds: float) -> str:
     secs = int(seconds % 60)
     millis = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def check_model_exists(model_name: str, download_root: str) -> bool:
+    """Check if model is already downloaded."""
+    from huggingface_hub import scan_cache_dir
+
+    try:
+        cache_info = scan_cache_dir(download_root)
+        for repo in cache_info.repos:
+            if model_name in repo.repo_id:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def transcribe(
@@ -27,10 +45,19 @@ def transcribe(
     """Transcribe audio/video file to SRT format."""
     from faster_whisper import WhisperModel
 
+    download_root = "/app/models"
+
+    # Check if model needs downloading
+    if not check_model_exists(model_name, download_root):
+        print(
+            f"📥 Downloading model: {model_name} (this may take a while...)", flush=True
+        )
+        print("   Model will be cached for future use.", flush=True)
+
     # Use CPU with int8 quantization for efficiency
     print(f"Loading model: {model_name}", flush=True)
     model = WhisperModel(
-        model_name, device="cpu", compute_type="int8", download_root="/app/models"
+        model_name, device="cpu", compute_type="int8", download_root=download_root
     )
 
     print(f"Transcribing: {os.path.basename(input_path)}", flush=True)

@@ -31,7 +31,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install faster-whisper (CPU version - much faster than whisper.cpp)
-RUN pip install --no-cache-dir faster-whisper
+# tqdm for download progress bars
+RUN pip install --no-cache-dir faster-whisper tqdm
+
+# Disable HF XET protocol to get proper download progress
+ENV HF_HUB_DISABLE_XET=1
 
 # Clone and install llm-subtrans
 RUN apt-get update && apt-get install -y --no-install-recommends git && \
