@@ -58,10 +58,5 @@ RUN mkdir -p /data/input /data/staging /data/processing /data/finished /data/sub
 ENV ENV=production
 ENV CONFIG_PATH=/app/config/config.yaml
 
-EXPOSE 8080
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=10s \
-    CMD curl -f http://localhost:8080/api/v1/health || exit 1
 
 CMD ["./fusionn-muse"]
