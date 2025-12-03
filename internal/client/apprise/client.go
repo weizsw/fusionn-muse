@@ -88,4 +88,3 @@ func (c *Client) NotifyError(title, body string) error {
 func (c *Client) NotifyInfo(title, body string) error {
 	return c.Notify(title, body, "info")
 }
-

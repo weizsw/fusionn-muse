@@ -30,7 +30,7 @@ type Queue struct {
 }
 
 // New creates a new job queue.
-func New(processor Processor, maxRetries int, retryDelayMs int) *Queue {
+func New(processor Processor, maxRetries, retryDelayMs int) *Queue {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	q := &Queue{

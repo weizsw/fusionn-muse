@@ -48,8 +48,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		api.GET("/queue/:id", h.GetJob)
 
 		// Retry endpoints
-		api.POST("/retry/staging", h.RetryStaging)      // Re-queue all staging files
-		api.POST("/retry/failed", h.RetryFailed)        // Move all failed → staging and queue
+		api.POST("/retry/staging", h.RetryStaging)        // Re-queue all staging files
+		api.POST("/retry/failed", h.RetryFailed)          // Move all failed → staging and queue
 		api.POST("/retry/failed/:name", h.RetryOneFailed) // Move one failed file → staging
 
 		// File listing
@@ -111,7 +111,7 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 		return
 	}
 
-	var jobIDs []string
+	jobIDs := make([]string, 0, len(videoFiles))
 	for _, videoPath := range videoFiles {
 		jobID := uuid.New().String()[:8]
 		fileName := filepath.Base(videoPath)
@@ -171,7 +171,7 @@ func (h *Handler) RetryStaging(c *gin.Context) {
 		return
 	}
 
-	var jobIDs []string
+	jobIDs := make([]string, 0, len(files))
 	for _, filePath := range files {
 		jobID := uuid.New().String()[:8]
 		fileName := filepath.Base(filePath)
@@ -208,8 +208,8 @@ func (h *Handler) RetryFailed(c *gin.Context) {
 		return
 	}
 
-	var jobIDs []string
-	var errors []string
+	jobIDs := make([]string, 0, len(files))
+	errors := make([]string, 0, len(files))
 
 	for _, filePath := range files {
 		fileName := filepath.Base(filePath)
@@ -281,7 +281,7 @@ func (h *Handler) ListStagingFiles(c *gin.Context) {
 		return
 	}
 
-	var fileNames []string
+	fileNames := make([]string, 0, len(files))
 	for _, f := range files {
 		fileNames = append(fileNames, filepath.Base(f))
 	}
@@ -301,7 +301,7 @@ func (h *Handler) ListFailedFiles(c *gin.Context) {
 		return
 	}
 
-	var fileNames []string
+	fileNames := make([]string, 0, len(files))
 	for _, f := range files {
 		fileNames = append(fileNames, filepath.Base(f))
 	}
@@ -312,4 +312,3 @@ func (h *Handler) ListFailedFiles(c *gin.Context) {
 		"count":  len(fileNames),
 	})
 }
-

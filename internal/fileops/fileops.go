@@ -19,7 +19,7 @@ func HardlinkOrCopy(src, dst string) error {
 	// Try hardlink first
 	err := os.Link(src, dst)
 	if err == nil {
-		logger.Debugf("🔗 Hardlinked: %s → %s", src, dst)
+		logger.Debugf("🔗 Hard-linked: %s → %s", src, dst)
 		return nil
 	}
 
@@ -134,4 +134,3 @@ func ChangeExtension(path, newExt string) string {
 	ext := filepath.Ext(path)
 	return path[:len(path)-len(ext)] + newExt
 }
-

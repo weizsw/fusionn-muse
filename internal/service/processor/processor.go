@@ -155,7 +155,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	if subtitlePath != translatedPath && fileops.Exists(subtitlePath) {
 		origSubName := filepath.Base(subtitlePath)
 		origFinalPath := filepath.Join(s.folders.Subtitles, origSubName)
-		_ = fileops.Move(subtitlePath, origFinalPath)
+		_ = fileops.Move(subtitlePath, origFinalPath) //nolint:errcheck // Optional, best-effort move
 	}
 
 	// Step 7: Send success notification

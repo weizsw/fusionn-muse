@@ -40,4 +40,3 @@ func PrintBanner(w io.Writer) {
 	fmt.Fprintln(w, separator)
 	fmt.Fprintln(w)
 }
-

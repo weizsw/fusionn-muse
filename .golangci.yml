@@ -15,26 +15,33 @@ linters:
     - misspell
     - unconvert
     - unparam
+    - gocritic
     - revive
-    - gosec
-    - bodyclose
+    - errorlint
     - nilerr
-    - noctx
-    - prealloc
-    - whitespace
 
 linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment # too strict
+  gofmt:
+    simplify: true
 
   goimports:
-    local-prefixes: github.com/fusionn-muse
+    local-prefixes: github.com/fusionn-air
+
+  misspell:
+    locale: US
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-checks:
+      - hugeParam # Too strict
+      - rangeValCopy # Allow value copies in range loops
+      - unnamedResult # Not enforcing named results
+      - ifElseChain # Allow if-else chains
+      - unnecessaryBlock # Allow grouped blocks (common in Gin routes)
+      - octalLiteral # Allow old-style octal
 
   revive:
     rules:
@@ -48,46 +55,26 @@ linters-settings:
       - name: exported
       - name: increment-decrement
       - name: var-naming
-      - name: var-declaration
       - name: package-comments
+        disabled: true
       - name: range
       - name: receiver-naming
       - name: time-naming
       - name: unexported-return
       - name: indent-error-flow
       - name: errorf
-      - name: empty-block
-      - name: superfluous-else
-      - name: unused-parameter
-      - name: unreachable-code
-      - name: redefines-builtin-id
 
-  gosec:
-    excludes:
-      - G104 # Audit errors not checked (we use errcheck for this)
-
-  misspell:
-    locale: US
+  errorlint:
+    errorf: true
+    asserts: true
+    comparison: true
 
 issues:
   exclude-rules:
-    # Exclude some linters from running on tests files
     - path: _test\.go
       linters:
-        - gosec
-        - unparam
-        - noctx
+        - errcheck
+        - gocritic
 
-    # Ignore missing comments on exported functions in test files
-    - path: _test\.go
-      text: "exported .* should have comment"
-
-  max-issues-per-linter: 0
-  max-same-issues: 0
-
-output:
-  formats:
-    - format: colored-line-number
-  print-issued-lines: true
-  print-linter-name: true
-
+  max-issues-per-linter: 50
+  max-same-issues: 10

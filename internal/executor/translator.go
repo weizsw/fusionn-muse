@@ -1,11 +1,9 @@
 package executor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,16 +16,10 @@ import (
 	"github.com/fusionn-muse/pkg/logger"
 )
 
-const (
-	dimStart = "\033[2m"
-	dimEnd   = "\033[0m"
-)
-
 // Translator handles subtitle translation via llm-subtrans.
 type Translator struct {
 	cfg     config.TranslateConfig
 	limiter *rate.Limiter
-	mu      sync.Mutex
 }
 
 // NewTranslator creates a new Translator executor.
@@ -86,8 +78,8 @@ func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string
 
 	// Stream output in dim/grey (like Docker build logs)
 	wg.Add(2)
-	go streamDimmed(&wg, stdoutPipe, &stdoutBuf)
-	go streamDimmed(&wg, stderrPipe, &stderrBuf)
+	go StreamDimmed(&wg, stdoutPipe, &stdoutBuf)
+	go StreamDimmed(&wg, stderrPipe, &stderrBuf)
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start cmd: %w", err)
@@ -105,24 +97,41 @@ func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string
 		return "", fmt.Errorf("translator failed: %w", err)
 	}
 
+	// Check stderr for error patterns (script may exit 0 but still fail)
+	stderrStr := stderrBuf.String()
+	if strings.Contains(stderrStr, "Error:") || strings.Contains(stderrStr, "Traceback") {
+		return "", fmt.Errorf("translator reported errors:\n%s", stderrStr)
+	}
+
+	// Verify output file was created and has content
+	info, err := os.Stat(translatedPath)
+	if err != nil {
+		return "", fmt.Errorf("translated file not created: %w\nStderr: %s", err, stderrStr)
+	}
+	if info.Size() == 0 {
+		return "", fmt.Errorf("translated file is empty (translation failed)\nStderr: %s", stderrStr)
+	}
+
 	logger.Infof("✅ Translation complete: %s", filepath.Base(translatedPath))
 	return translatedPath, nil
 }
 
 func (t *Translator) buildArgs(inputPath, outputPath string) []string {
-	// Base: /app/llm-subtrans/gpt-subtrans.py <input> --target_language <lang>
+	provider := strings.ToLower(t.cfg.Provider)
+
+	// Select script based on provider
+	// Each provider has its own script; llm-subtrans.py defaults to OpenRouter
+	script := t.getProviderScript(provider)
+
 	args := []string{
-		"/app/llm-subtrans/scripts/llm-subtrans.py",
+		script,
 		inputPath,
 		"--target_language", t.cfg.TargetLang,
 		"-o", outputPath,
 	}
 
-	provider := strings.ToLower(t.cfg.Provider)
-
 	if provider == "custom" {
 		// Custom server endpoint
-		args = append(args, "--provider", "custom")
 		if t.cfg.CustomServer != "" {
 			args = append(args, "--server", t.cfg.CustomServer)
 		}
@@ -130,12 +139,11 @@ func (t *Translator) buildArgs(inputPath, outputPath string) []string {
 			args = append(args, "--endpoint", t.cfg.CustomEndpoint)
 		}
 		args = append(args, "--chat") // Most custom endpoints use chat format
-	} else {
-		// Standard providers: openai, claude, gemini, openrouter
-		args = append(args, "--provider", provider)
-		if t.cfg.Model != "" {
-			args = append(args, "--model", t.cfg.Model)
-		}
+	}
+
+	// Model (applies to all providers)
+	if t.cfg.Model != "" {
+		args = append(args, "--model", t.cfg.Model)
 	}
 
 	// API key
@@ -152,6 +160,24 @@ func (t *Translator) buildArgs(inputPath, outputPath string) []string {
 	args = append(args, t.cfg.Args...)
 
 	return args
+}
+
+// getProviderScript returns the appropriate llm-subtrans script for the provider.
+func (t *Translator) getProviderScript(provider string) string {
+	scriptMap := map[string]string{
+		"openai":     "/app/llm-subtrans/scripts/gpt-subtrans.py",
+		"claude":     "/app/llm-subtrans/scripts/claude-subtrans.py",
+		"gemini":     "/app/llm-subtrans/scripts/gemini-subtrans.py",
+		"deepseek":   "/app/llm-subtrans/scripts/deepseek-subtrans.py",
+		"openrouter": "/app/llm-subtrans/scripts/llm-subtrans.py", // llm-subtrans defaults to OpenRouter
+		"custom":     "/app/llm-subtrans/scripts/llm-subtrans.py", // with --server flag
+	}
+
+	if script, ok := scriptMap[provider]; ok {
+		return script
+	}
+	// Default to llm-subtrans.py (OpenRouter)
+	return "/app/llm-subtrans/scripts/llm-subtrans.py"
 }
 
 // getLangCode returns a short language code for filename.
@@ -195,25 +221,4 @@ func (t *Translator) WaitForRateLimit(ctx context.Context) error {
 		return nil
 	}
 	return t.limiter.Wait(ctx)
-}
-
-// streamDimmed reads from r, writes to buf for capture, and prints dimmed to stderr.
-// This creates a Docker-build-like experience where script output is visible but greyed out.
-func streamDimmed(wg *sync.WaitGroup, r io.Reader, buf *bytes.Buffer) {
-	defer wg.Done()
-	scanner := bufio.NewScanner(r)
-	// Increase buffer for potentially long lines
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		buf.WriteString(line)
-		buf.WriteByte('\n')
-		// Print dimmed to stderr (doesn't interfere with structured logs)
-		fmt.Fprintf(os.Stderr, "%s  │ %s%s\n", dimStart, line, dimEnd)
-	}
-
-	if err := scanner.Err(); err != nil {
-		logger.Debugf("Scanner error (may be normal): %v", err)
-	}
 }
