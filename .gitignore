@@ -1,0 +1,46 @@
+# Binaries
+/fusionn-muse
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output
+*.out
+*.log
+
+# Coverage
+coverage.out
+coverage.html
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets (keep config.example.yaml tracked)
+config/config.yaml
+config/config.local.yaml
+config/*.local.yaml
+
+# Data directory (tokens, state, etc)
+data/
+.cursor/
+
+# Build
+dist/
+bin/
+
