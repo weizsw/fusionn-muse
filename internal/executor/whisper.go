@@ -57,7 +57,7 @@ func (w *Whisper) transcribeLocal(ctx context.Context, videoPath string) (string
 		lang = "auto"
 	}
 
-	// Build command: python transcribe.py <input> <output> --model <model> [--language <lang>]
+	// Build command: python transcribe.py <input> <output> --model <model> [--language <lang>] [--prompt <prompt>]
 	args := []string{
 		transcribeScript,
 		videoPath,
@@ -66,6 +66,9 @@ func (w *Whisper) transcribeLocal(ctx context.Context, videoPath string) (string
 	}
 	if lang != "" && lang != "auto" {
 		args = append(args, "--language", lang)
+	}
+	if w.cfg.Prompt != "" {
+		args = append(args, "--prompt", w.cfg.Prompt)
 	}
 
 	logger.Infof("🎤 Transcribing (faster-whisper): %s", filepath.Base(videoPath))

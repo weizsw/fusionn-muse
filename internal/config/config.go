@@ -57,6 +57,8 @@ type WhisperConfig struct {
 	APIKey string `mapstructure:"api_key"`
 	// Language: source language hint (optional, "auto" for auto-detect)
 	Language string `mapstructure:"language"`
+	// Prompt: initial context for better transcription (e.g., topic, proper nouns)
+	Prompt string `mapstructure:"prompt"`
 }
 
 type TranslateConfig struct {

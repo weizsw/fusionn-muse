@@ -31,6 +31,14 @@ whisper:
   # Examples: "en", "ja", "zh", "ko"
   language: ""
 
+  # Initial prompt for context (optional)
+  # Helps improve accuracy by providing topic, proper nouns, or expected content
+  # Examples:
+  #   - "This is a Japanese anime about cooking."
+  #   - "Technical discussion about Kubernetes and Docker."
+  #   - "名前: 田中太郎, 山田花子" (for proper name recognition)
+  prompt: ""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TRANSLATE (llm-subtrans)
 # ─────────────────────────────────────────────────────────────────────────────
