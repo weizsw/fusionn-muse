@@ -24,15 +24,6 @@ def setup_env(api_key: str, base_url: str):
     os.environ["OPENAI_BASE_URL"] = base_url
 
 
-def remove_trailing_punctuation(asr_data: ASRData) -> ASRData:
-    """Remove trailing Chinese punctuation from subtitles."""
-    for seg in asr_data.segments:
-        text = seg.text.rstrip()
-        # Remove trailing Chinese punctuation
-        while text and text[-1] in "，。、！？；：,.:;!?":
-            text = text[:-1]
-        seg.text = text
-    return asr_data
 
 
 def main():
@@ -152,7 +143,7 @@ def main():
     # Step 3: Remove trailing punctuation
     if args.remove_punctuation:
         print("Removing trailing punctuation...", flush=True)
-        asr_data = remove_trailing_punctuation(asr_data)
+        asr_data.remove_punctuation()
 
     # Step 4: Translate
     if args.translate:
