@@ -91,6 +91,7 @@ def main():
 
     # Concurrency
     parser.add_argument("--threads", type=int, default=4, help="Number of threads")
+    parser.add_argument("--batch-size", type=int, default=10, help="Subtitles per batch")
 
     args = parser.parse_args()
 
@@ -116,12 +117,12 @@ def main():
         print(f"Optimizing subtitles with {args.model}...", flush=True)
         optimizer = SubtitleOptimizer(
             thread_num=args.threads,
+            batch_num=args.batch_size,
             model=args.model,
+            custom_prompt=args.reference,
         )
         try:
-            asr_data = optimizer.optimize_subtitle(
-                asr_data, custom_prompt=args.reference
-            )
+            asr_data = optimizer.optimize_subtitle(asr_data)
             print(
                 f"Optimization complete: {len(asr_data.segments)} segments", flush=True
             )

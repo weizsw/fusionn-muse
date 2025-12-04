@@ -170,6 +170,19 @@ func (w *Whisper) postProcessSubtitles(ctx context.Context, srtPath string) (str
 			model = "gpt-4o-mini"
 		}
 		args = append(args, "--model", model)
+
+		// Threads and batch size
+		threads := w.translateCfg.Threads
+		if threads <= 0 {
+			threads = 4
+		}
+		args = append(args, "--threads", fmt.Sprintf("%d", threads))
+
+		batchSize := w.translateCfg.BatchSize
+		if batchSize <= 0 {
+			batchSize = 10
+		}
+		args = append(args, "--batch-size", fmt.Sprintf("%d", batchSize))
 	}
 
 	if w.cfg.OptimizeSubtitles {
