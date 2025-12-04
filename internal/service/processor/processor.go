@@ -96,6 +96,10 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	}
 
 	// Step 2: Clean filename and move to processing
+	// Check if original filename has -C suffix (skip transcription/translation)
+	originalName := job.FileName
+	hasSubtitleSuffix := fileops.HasSubtitleSuffix(originalName)
+
 	cleanedName := fileops.CleanVideoFilename(job.FileName)
 	if cleanedName != job.FileName {
 		logger.Infof("📝 Cleaned filename: %s → %s", job.FileName, cleanedName)
@@ -114,10 +118,15 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	durations["move_to_processing"] = t.done()
 
 	var subtitlePath, translatedPath string
+	skipSubtitle := s.cfg.DryRun || hasSubtitleSuffix
 
-	if s.cfg.DryRun {
-		// Dry run: skip transcription and translation, create dummy subtitle
-		logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (dry run)")
+	if skipSubtitle {
+		// Skip transcription and translation
+		if hasSubtitleSuffix {
+			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (-C suffix detected)")
+		} else {
+			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (dry run)")
+		}
 		baseName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName))
 		subtitlePath = filepath.Join(filepath.Dir(processingPath), baseName+".srt")
 		if err := fileops.WriteDummySubtitle(subtitlePath); err != nil {
@@ -152,9 +161,9 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	job.SubtitlePath = subtitlePath
 	job.TranslatedPath = translatedPath
 
-	// Step 5: Move translated subtitle to subtitles folder (skip in dry run)
-	if s.cfg.DryRun {
-		logger.Infof("⏭️  Step 5: Skipping subtitle move (dry run)")
+	// Step 5: Move translated subtitle to subtitles folder (skip if no real subtitle)
+	if skipSubtitle {
+		logger.Infof("⏭️  Step 5: Skipping subtitle move")
 		// Clean up dummy subtitle
 		_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
 	} else {
@@ -197,7 +206,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	logger.Infof("✅ Job completed: %s", job.FileName)
 	logger.Infof("⏱️  Total time: %s", formatDuration(totalDuration))
-	if !s.cfg.DryRun {
+	if !skipSubtitle {
 		logger.Infof("   Transcription: %s | Translation: %s",
 			formatDuration(durations["transcription"]),
 			formatDuration(durations["translation"]))

@@ -15,6 +15,9 @@ import (
 // Removes suffixes like -C, -1, etc.
 var codePattern = regexp.MustCompile(`([A-Z]{2,5}-\d{3,5})`)
 
+// subtitleSuffixPattern matches -C or -c suffix before extension (indicates subtitle already exists)
+var subtitleSuffixPattern = regexp.MustCompile(`(?i)-c\.[^.]+$`)
+
 // HardlinkOrCopy tries to hardlink src to dst, falls back to copy if hardlink fails.
 func HardlinkOrCopy(src, dst string) error {
 	// Ensure destination directory exists
@@ -144,6 +147,12 @@ func FindVideoFiles(dir string) ([]string, error) {
 func ChangeExtension(path, newExt string) string {
 	ext := filepath.Ext(path)
 	return path[:len(path)-len(ext)] + newExt
+}
+
+// HasSubtitleSuffix checks if filename has -C suffix (indicates subtitle already exists).
+// Examples: SONE-269-C.mp4 → true, SONE-269.mp4 → false
+func HasSubtitleSuffix(filename string) bool {
+	return subtitleSuffixPattern.MatchString(filename)
 }
 
 // CleanVideoFilename extracts the video code from messy filenames.
