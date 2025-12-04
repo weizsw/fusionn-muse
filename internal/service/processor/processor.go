@@ -130,20 +130,10 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	job.TranslatedPath = translatedPath
 	durations["translation"] = t.done()
 
-	// Step 5: Move video to finished folder
-	finishedVideoPath := filepath.Join(s.folders.Finished, job.FileName)
-	logger.Infof("📦 Step 5: Moving video to finished...")
-	t = startStep("Move to finished")
-
-	if err := fileops.Move(processingPath, finishedVideoPath); err != nil {
-		return s.handleError(job, "move video to finished", err)
-	}
-	durations["move_to_finished"] = t.done()
-
-	// Step 6: Move translated subtitle to subtitles folder
+	// Step 5: Move translated subtitle to subtitles folder (before video)
 	translatedSubName := filepath.Base(translatedPath)
 	finalSubPath := filepath.Join(s.folders.Subtitles, translatedSubName)
-	logger.Infof("📦 Step 6: Moving subtitle to subtitles folder...")
+	logger.Infof("📦 Step 5: Moving translated subtitle to subtitles folder...")
 	t = startStep("Move subtitle")
 
 	if err := fileops.Move(translatedPath, finalSubPath); err != nil {
@@ -155,6 +145,16 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	if subtitlePath != translatedPath && fileops.Exists(subtitlePath) {
 		_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
 	}
+
+	// Step 6: Move video to finished folder
+	finishedVideoPath := filepath.Join(s.folders.Finished, job.FileName)
+	logger.Infof("📦 Step 6: Moving video to finished...")
+	t = startStep("Move to finished")
+
+	if err := fileops.Move(processingPath, finishedVideoPath); err != nil {
+		return s.handleError(job, "move video to finished", err)
+	}
+	durations["move_to_finished"] = t.done()
 
 	// Step 7: Send success notification
 	logger.Infof("🔔 Step 7: Sending notification...")
