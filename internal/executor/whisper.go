@@ -3,23 +3,18 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"mime/multipart"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/fusionn-muse/internal/config"
 	"github.com/fusionn-muse/pkg/logger"
 )
 
-// Whisper handles transcription via local whisper.cpp or OpenAI API.
+// Whisper handles transcription via faster-whisper.
 type Whisper struct {
 	cfg          config.WhisperConfig
 	translateCfg config.TranslateConfig // For LLM post-processing
@@ -30,20 +25,10 @@ func NewWhisper(cfg config.WhisperConfig, translateCfg config.TranslateConfig) *
 	return &Whisper{cfg: cfg, translateCfg: translateCfg}
 }
 
-// Transcribe transcribes a video file and returns the path to the generated subtitle.
-func (w *Whisper) Transcribe(ctx context.Context, videoPath string) (string, error) {
-	switch strings.ToLower(w.cfg.Provider) {
-	case "openai":
-		return w.transcribeOpenAI(ctx, videoPath)
-	default:
-		return w.transcribeLocal(ctx, videoPath)
-	}
-}
-
 const transcribeScript = "/app/scripts/transcribe.py"
 
-// transcribeLocal uses faster-whisper via Python script.
-func (w *Whisper) transcribeLocal(ctx context.Context, videoPath string) (string, error) {
+// Transcribe transcribes a video file and returns the path to the generated subtitle.
+func (w *Whisper) Transcribe(ctx context.Context, videoPath string) (string, error) {
 	outputDir := filepath.Dir(videoPath)
 	baseName := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))
 	srtPath := filepath.Join(outputDir, baseName+".srt")
@@ -58,7 +43,7 @@ func (w *Whisper) transcribeLocal(ctx context.Context, videoPath string) (string
 		lang = "auto"
 	}
 
-	// Build command: python transcribe.py <input> <output> --model <model> [--language <lang>] [--prompt <prompt>]
+	// Build command: python transcribe.py <input> <output> [options]
 	args := []string{
 		transcribeScript,
 		videoPath,
@@ -72,7 +57,27 @@ func (w *Whisper) transcribeLocal(ctx context.Context, videoPath string) (string
 		args = append(args, "--prompt", w.cfg.Prompt)
 	}
 
-	logger.Infof("🎤 Transcribing (faster-whisper): %s", filepath.Base(videoPath))
+	// Device (cuda/cpu/auto)
+	device := w.cfg.Device
+	if device == "" {
+		device = "auto"
+	}
+	args = append(args, "--device", device)
+
+	// VAD settings
+	if w.cfg.VADFilter != nil && !*w.cfg.VADFilter {
+		args = append(args, "--no-vad")
+	}
+	if w.cfg.VADThreshold > 0 {
+		args = append(args, "--vad-threshold", fmt.Sprintf("%.2f", w.cfg.VADThreshold))
+	}
+
+	// Word timestamps (required for LLM sentence splitting)
+	if w.cfg.SplitSentences {
+		args = append(args, "--word-timestamps")
+	}
+
+	logger.Infof("🎤 Transcribing: %s", filepath.Base(videoPath))
 	logger.Debugf("  Command: python3 %s", strings.Join(args, " "))
 
 	cmd := exec.CommandContext(ctx, "python3", args...)
@@ -155,18 +160,8 @@ func (w *Whisper) postProcessSubtitles(ctx context.Context, srtPath string) (str
 
 		args = append(args, "--api-key", w.translateCfg.APIKey)
 
-		// Determine base URL
-		baseURL := "https://api.openai.com"
-		switch strings.ToLower(w.translateCfg.Provider) {
-		case "openai":
-			baseURL = "https://api.openai.com"
-		case "openrouter":
-			baseURL = "https://openrouter.ai/api"
-		case "custom":
-			if w.translateCfg.CustomServer != "" {
-				baseURL = w.translateCfg.CustomServer
-			}
-		}
+		// Use translator's base URL helper
+		baseURL := getBaseURL(w.translateCfg.Provider, w.translateCfg.CustomServer)
 		args = append(args, "--base-url", baseURL)
 
 		// Model
@@ -236,93 +231,28 @@ func (w *Whisper) postProcessSubtitles(ctx context.Context, srtPath string) (str
 	return outputPath, nil
 }
 
-// transcribeOpenAI uses OpenAI Whisper API.
-func (w *Whisper) transcribeOpenAI(ctx context.Context, videoPath string) (string, error) {
-	outputDir := filepath.Dir(videoPath)
-	baseName := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))
-	srtPath := filepath.Join(outputDir, baseName+".srt")
+// getBaseURL returns the OpenAI-compatible API base URL for the provider.
+func getBaseURL(provider, customServer string) string {
+	provider = strings.ToLower(provider)
 
-	logger.Infof("🎤 Transcribing (OpenAI API): %s", filepath.Base(videoPath))
-
-	// Open video file
-	file, err := os.Open(videoPath)
-	if err != nil {
-		return "", fmt.Errorf("open file: %w", err)
-	}
-	defer file.Close()
-
-	// Create multipart form
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-
-	// Add file
-	part, err := writer.CreateFormFile("file", filepath.Base(videoPath))
-	if err != nil {
-		return "", fmt.Errorf("create form file: %w", err)
-	}
-	if _, copyErr := io.Copy(part, file); copyErr != nil {
-		return "", fmt.Errorf("copy file: %w", copyErr)
+	baseURLs := map[string]string{
+		"openai":       "https://api.openai.com",
+		"deepseek":     "https://api.deepseek.com",
+		"openrouter":   "https://openrouter.ai/api",
+		"groq":         "https://api.groq.com/openai",
+		"together":     "https://api.together.xyz",
+		"fireworks":    "https://api.fireworks.ai/inference",
+		"siliconcloud": "https://api.siliconflow.cn/v1",
+		"siliconflow":  "https://api.siliconflow.cn/v1",
 	}
 
-	// Add model and format fields
-	err = writer.WriteField("model", "whisper-1")
-	if err != nil {
-		return "", fmt.Errorf("write model field: %w", err)
-	}
-	err = writer.WriteField("response_format", "srt")
-	if err != nil {
-		return "", fmt.Errorf("write format field: %w", err)
-	}
-	if w.cfg.Language != "" && w.cfg.Language != "auto" {
-		err = writer.WriteField("language", w.cfg.Language)
-		if err != nil {
-			return "", fmt.Errorf("write language field: %w", err)
-		}
+	if customServer != "" {
+		return customServer
 	}
 
-	err = writer.Close()
-	if err != nil {
-		return "", fmt.Errorf("close multipart writer: %w", err)
+	if url, ok := baseURLs[provider]; ok {
+		return url
 	}
 
-	// Create request
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/audio/transcriptions", &buf)
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+w.cfg.APIKey)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	// Send request
-	client := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("api request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var errResp struct {
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if jsonErr := json.Unmarshal(body, &errResp); jsonErr != nil {
-			return "", fmt.Errorf("openai api error (%d): %s", resp.StatusCode, string(body))
-		}
-		return "", fmt.Errorf("openai api error (%d): %s", resp.StatusCode, errResp.Error.Message)
-	}
-
-	// Write SRT file
-	if err := os.WriteFile(srtPath, body, 0600); err != nil {
-		return "", fmt.Errorf("write srt: %w", err)
-	}
-
-	logger.Infof("✅ Transcription complete: %s", filepath.Base(srtPath))
-	return srtPath, nil
+	return "https://api.openai.com"
 }

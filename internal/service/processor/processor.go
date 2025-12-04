@@ -107,7 +107,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	durations["move_to_processing"] = t.done()
 
 	// Step 3: Transcribe with whisper
-	logger.Infof("🎤 Step 3: Transcribing with Whisper (%s)...", s.cfg.Whisper.Provider)
+	logger.Infof("🎤 Step 3: Transcribing with Whisper (%s)...", s.cfg.Whisper.Model)
 	t = startStep("Transcription")
 
 	subtitlePath, err := s.whisper.Transcribe(ctx, processingPath)
