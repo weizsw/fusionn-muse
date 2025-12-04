@@ -28,7 +28,7 @@ func New(cfg *config.Config, appriseClient *apprise.Client) *Service {
 	return &Service{
 		cfg:        cfg,
 		folders:    config.Folders(),
-		whisper:    executor.NewWhisper(cfg.Whisper),
+		whisper:    executor.NewWhisper(cfg.Whisper, cfg.Translate), // Pass translate config for LLM post-processing
 		translator: executor.NewTranslator(cfg.Translate),
 		apprise:    appriseClient,
 	}
@@ -151,11 +151,9 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	}
 	durations["move_subtitle"] = t.done()
 
-	// Also move the original (untranslated) subtitle if it exists
+	// Clean up original (untranslated) subtitle - don't move, just delete
 	if subtitlePath != translatedPath && fileops.Exists(subtitlePath) {
-		origSubName := filepath.Base(subtitlePath)
-		origFinalPath := filepath.Join(s.folders.Subtitles, origSubName)
-		_ = fileops.Move(subtitlePath, origFinalPath) //nolint:errcheck // Optional, best-effort move
+		_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
 	}
 
 	// Step 7: Send success notification
