@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/fusionn-muse/pkg/logger"
 )
@@ -158,13 +159,14 @@ func HasSubtitleSuffix(filename string) bool {
 // CleanVideoFilename extracts the video code from messy filenames.
 // Examples:
 //   - SONE-269.mp4 → SONE-269.mp4 (unchanged)
+//   - sone-269.mp4 → SONE-269.mp4 (uppercase)
 //   - SONE-269-C.mp4 → SONE-269.mp4 (removes -C suffix)
 //   - xxxSONE-269.mp4 → SONE-269.mp4 (removes prefix)
 //
 // Returns original filename if no code pattern found.
 func CleanVideoFilename(filename string) string {
-	ext := filepath.Ext(filename)
-	match := codePattern.FindString(filename)
+	ext := strings.ToLower(filepath.Ext(filename))
+	match := codePattern.FindString(strings.ToUpper(filename))
 	if match == "" {
 		return filename // No pattern found, return as-is
 	}
