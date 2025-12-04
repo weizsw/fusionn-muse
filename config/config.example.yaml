@@ -9,23 +9,18 @@ server:
 # ─────────────────────────────────────────────────────────────────────────────
 # WHISPER (Transcription)
 # ─────────────────────────────────────────────────────────────────────────────
-# Transcribe video audio to subtitles.
+# Transcribe video audio to subtitles using VideoCaptioner's FasterWhisperASR.
 #
-# Providers:
-#   - "local"  : Uses whisper.cpp (bundled in Docker image)
-#   - "openai" : Uses OpenAI Whisper API (requires api_key)
+# Features:
+#   - Hallucination filtering (removes common ASR artifacts)
+#   - VAD filtering with configurable method/threshold
+#   - Auto CJK (30 chars) vs Latin (90 chars) line width
+#   - Timing optimization
 whisper:
-  # Provider: "local" or "openai"
-  provider: "local"
-
   # Model (downloaded automatically if not present):
-  #   local  = "tiny", "base", "small", "medium", "large-v2", "large-v3"
-  #   openai = "whisper-1"
+  #   "tiny", "base", "small", "medium", "large-v2", "large-v3", "large-v3-turbo"
   # Note: First run with a new model will download it (~1-3GB depending on size)
   model: "large-v2"
-
-  # API key (required for openai provider)
-  api_key: ""
 
   # Source language hint (optional, "" or "auto" for auto-detect)
   # Examples: "en", "ja", "zh", "ko"
@@ -38,6 +33,16 @@ whisper:
   #   - "Technical discussion about Kubernetes and Docker."
   #   - "名前: 田中太郎, 山田花子" (for proper name recognition)
   prompt: ""
+
+  # ─── FasterWhisper Settings ───
+
+  # Device for inference: "cuda" (GPU), "cpu", or "auto" (recommended)
+  # Auto will use CUDA if available, otherwise CPU
+  device: "auto"
+
+  # Voice Activity Detection (VAD) - filters out non-speech audio (uses Silero VAD)
+  vad_filter: true
+  vad_threshold: 0.5 # 0.0-1.0, lower = more sensitive
 
   # ─── Post-processing (like VideoCaptioner) ───
   # Uses the translate LLM settings below
@@ -56,17 +61,24 @@ whisper:
   remove_punctuation: true
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TRANSLATE (llm-subtrans)
+# TRANSLATE (VideoCaptioner LLM Translator)
 # ─────────────────────────────────────────────────────────────────────────────
-# Translate subtitles using LLM.
-# Repo: https://github.com/machinewrapped/llm-subtrans
+# Translate subtitles using LLM with batch processing and validation.
+# Based on VideoCaptioner's translation engine with:
+#   - Auto-retry on malformed responses
+#   - JSON validation and repair
+#   - Reflection mode for higher quality
+#   - Built-in caching (7-day TTL)
 #
-# Providers:
-#   - "openai"     : OpenAI API (gpt-4o, gpt-4o-mini, etc.)
-#   - "claude"     : Anthropic Claude
-#   - "gemini"     : Google Gemini
-#   - "openrouter" : OpenRouter (access to many models)
-#   - "custom"     : Custom OpenAI-compatible endpoint
+# Providers (all OpenAI-compatible):
+#   - "openai"       : OpenAI API (gpt-4o, gpt-4o-mini, etc.)
+#   - "deepseek"     : DeepSeek API (deepseek-chat, deepseek-reasoner)
+#   - "siliconcloud" : SiliconCloud (Qwen, Yi, DeepSeek models)
+#   - "openrouter"   : OpenRouter (access to many models)
+#   - "groq"         : Groq (fast inference)
+#   - "together"     : Together AI
+#   - "fireworks"    : Fireworks AI
+#   - "custom"       : Custom OpenAI-compatible endpoint
 translate:
   # Provider
   provider: "openai"
@@ -78,25 +90,33 @@ translate:
   api_key: ""
 
   # Target language for translation
+  # Options: "Simplified Chinese", "Traditional Chinese", "English", "Japanese",
+  #          "Korean", "French", "German", "Spanish", "Russian", etc.
   target_lang: "Simplified Chinese"
 
   # ─── Custom endpoint (only for provider: "custom") ───
   # Server URL (e.g., "http://localhost:1234")
   custom_server: ""
-  # Endpoint path (e.g., "/v1/chat/completions")
-  custom_endpoint: ""
 
-  # ─── Rate limiting ───
-  # Requests per minute (0 = no limit)
-  # Useful for avoiding rate limit errors or controlling costs
-  rate_limit_rpm: 0
-
-  # Custom instruction for the LLM translator (optional)
-  # Example: "Preserve Japanese honorifics like -san, -kun, -chan"
+  # Custom instruction/prompt for translation (optional)
+  # Use for terminology, style guidance, or domain-specific instructions
+  # Examples:
+  #   - "Preserve Japanese honorifics like -san, -kun, -chan"
+  #   - "Technical terms: API=接口, server=服务器"
+  #   - "Use formal language style"
   instruction: ""
 
-  # Additional arguments for llm-subtrans (optional)
-  args: []
+  # ─── Quality settings ───
+  # Enable reflection mode for higher quality translation (2-3x slower)
+  # LLM translates, then self-critiques and improves the translation
+  use_reflect: false
+
+  # Number of parallel translation threads (default: 4)
+  threads: 4
+
+  # Number of subtitles per batch (default: 10)
+  # Smaller batches = more API calls but better error recovery
+  batch_size: 10
 
 # ─────────────────────────────────────────────────────────────────────────────
 # QUEUE
