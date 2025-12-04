@@ -185,7 +185,7 @@ def main():
             translator.stop()
 
     # Save output
-    asr_data.to_srt(args.output)
+    asr_data.to_srt(save_path=args.output)
     print(f"Saved: {args.output} ({len(asr_data.segments)} segments)", flush=True)
 
 
