@@ -39,6 +39,22 @@ whisper:
   #   - "名前: 田中太郎, 山田花子" (for proper name recognition)
   prompt: ""
 
+  # ─── Post-processing (like VideoCaptioner) ───
+  # Uses the translate LLM settings below
+
+  # Use LLM to fix recognition errors, remove filler words (um, uh, ah)
+  optimize_subtitles: false
+
+  # Use LLM to split long subtitles into shorter sentences (断句)
+  split_sentences: true
+
+  # Max characters/words per line for sentence splitting
+  max_cjk_chars: 25 # Chinese/Japanese/Korean
+  max_english_words: 18 # English and other languages (VideoCaptioner default)
+
+  # Remove trailing punctuation (，。) from subtitles
+  remove_punctuation: true
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TRANSLATE (llm-subtrans)
 # ─────────────────────────────────────────────────────────────────────────────

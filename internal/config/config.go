@@ -59,6 +59,18 @@ type WhisperConfig struct {
 	Language string `mapstructure:"language"`
 	// Prompt: initial context for better transcription (e.g., topic, proper nouns)
 	Prompt string `mapstructure:"prompt"`
+
+	// Post-processing options (like VideoCaptioner)
+	// OptimizeSubtitles: use LLM to fix recognition errors
+	OptimizeSubtitles bool `mapstructure:"optimize_subtitles"`
+	// SplitSentences: use LLM to split long subtitles into shorter sentences
+	SplitSentences bool `mapstructure:"split_sentences"`
+	// MaxCJKChars: max Chinese/Japanese/Korean characters per line (default 25)
+	MaxCJKChars int `mapstructure:"max_cjk_chars"`
+	// MaxEnglishWords: max English words per line (default 18, same as VideoCaptioner)
+	MaxEnglishWords int `mapstructure:"max_english_words"`
+	// RemovePunctuation: remove trailing punctuation (，。) from subtitles
+	RemovePunctuation bool `mapstructure:"remove_punctuation"`
 }
 
 type TranslateConfig struct {

@@ -21,12 +21,13 @@ import (
 
 // Whisper handles transcription via local whisper.cpp or OpenAI API.
 type Whisper struct {
-	cfg config.WhisperConfig
+	cfg          config.WhisperConfig
+	translateCfg config.TranslateConfig // For LLM post-processing
 }
 
 // NewWhisper creates a new Whisper executor.
-func NewWhisper(cfg config.WhisperConfig) *Whisper {
-	return &Whisper{cfg: cfg}
+func NewWhisper(cfg config.WhisperConfig, translateCfg config.TranslateConfig) *Whisper {
+	return &Whisper{cfg: cfg, translateCfg: translateCfg}
 }
 
 // Transcribe transcribes a video file and returns the path to the generated subtitle.
@@ -119,7 +120,120 @@ func (w *Whisper) transcribeLocal(ctx context.Context, videoPath string) (string
 	}
 
 	logger.Infof("✅ Transcription complete: %s", filepath.Base(srtPath))
+
+	// Post-process with LLM if enabled
+	if w.cfg.OptimizeSubtitles || w.cfg.SplitSentences || w.cfg.RemovePunctuation {
+		processedPath, err := w.postProcessSubtitles(ctx, srtPath)
+		if err != nil {
+			logger.Warnf("⚠️ Post-processing failed (using original): %v", err)
+			return srtPath, nil
+		}
+		return processedPath, nil
+	}
+
 	return srtPath, nil
+}
+
+const subtitleProcessorScript = "/app/scripts/subtitle_processor.py"
+
+// postProcessSubtitles uses LLM to optimize and split subtitles.
+func (w *Whisper) postProcessSubtitles(ctx context.Context, srtPath string) (string, error) {
+	// Output to same path (overwrite)
+	outputPath := srtPath
+
+	args := []string{
+		subtitleProcessorScript,
+		srtPath,
+		outputPath,
+	}
+
+	// LLM settings from translate config
+	if w.cfg.OptimizeSubtitles || w.cfg.SplitSentences {
+		if w.translateCfg.APIKey == "" {
+			return "", fmt.Errorf("translate API key required for subtitle post-processing")
+		}
+
+		args = append(args, "--api-key", w.translateCfg.APIKey)
+
+		// Determine base URL
+		baseURL := "https://api.openai.com"
+		switch strings.ToLower(w.translateCfg.Provider) {
+		case "openai":
+			baseURL = "https://api.openai.com"
+		case "openrouter":
+			baseURL = "https://openrouter.ai/api"
+		case "custom":
+			if w.translateCfg.CustomServer != "" {
+				baseURL = w.translateCfg.CustomServer
+			}
+		}
+		args = append(args, "--base-url", baseURL)
+
+		// Model
+		model := w.translateCfg.Model
+		if model == "" {
+			model = "gpt-4o-mini"
+		}
+		args = append(args, "--model", model)
+	}
+
+	if w.cfg.OptimizeSubtitles {
+		args = append(args, "--optimize")
+		if w.cfg.Prompt != "" {
+			args = append(args, "--reference", w.cfg.Prompt)
+		}
+	}
+
+	if w.cfg.SplitSentences {
+		args = append(args, "--split")
+		maxCJK := w.cfg.MaxCJKChars
+		if maxCJK <= 0 {
+			maxCJK = 25
+		}
+		maxEnglish := w.cfg.MaxEnglishWords
+		if maxEnglish <= 0 {
+			maxEnglish = 18 // VideoCaptioner default
+		}
+		args = append(args, "--max-cjk", fmt.Sprintf("%d", maxCJK), "--max-english", fmt.Sprintf("%d", maxEnglish))
+	}
+
+	if w.cfg.RemovePunctuation {
+		args = append(args, "--remove-punctuation")
+	}
+
+	logger.Infof("📝 Post-processing subtitles...")
+	logger.Debugf("  Command: python3 %s", strings.Join(args, " "))
+
+	cmd := exec.CommandContext(ctx, "python3", args...)
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	var wg sync.WaitGroup
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	wg.Add(2)
+	go StreamDimmed(&wg, stdoutPipe, &stdoutBuf)
+	go StreamDimmed(&wg, stderrPipe, &stderrBuf)
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start post-processing: %w", err)
+	}
+
+	wg.Wait()
+
+	if err := cmd.Wait(); err != nil {
+		return "", fmt.Errorf("post-processing failed: %w\nStderr: %s", err, stderrBuf.String())
+	}
+
+	logger.Infof("✅ Post-processing complete")
+	return outputPath, nil
 }
 
 // transcribeOpenAI uses OpenAI Whisper API.

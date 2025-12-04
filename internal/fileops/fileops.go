@@ -95,6 +95,11 @@ func Exists(path string) bool {
 	return err == nil
 }
 
+// Remove deletes a file.
+func Remove(path string) error {
+	return os.Remove(path)
+}
+
 // IsVideoFile checks if the file has a video extension.
 func IsVideoFile(path string) bool {
 	ext := filepath.Ext(path)
