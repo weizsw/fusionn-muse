@@ -12,6 +12,7 @@ import sys
 
 # VideoCaptioner core imports
 from app.core.asr.asr_data import ASRData
+from app.core.entities import SubtitleLayoutEnum
 from app.core.translate.llm_translator import LLMTranslator
 from app.core.translate.types import TargetLanguage
 
@@ -140,8 +141,8 @@ def translate(
     # Remove trailing punctuation (like VideoCaptioner does after translation)
     asr_data.remove_punctuation()
 
-    # Save output (bilingual SRT: original on top)
-    asr_data.to_srt(save_path=output_path)
+    # Save output (translated only, not bilingual)
+    asr_data.to_srt(layout=SubtitleLayoutEnum.ONLY_TRANSLATE, save_path=output_path)
     print(f"Saved: {os.path.basename(output_path)}", flush=True)
 
     return len(asr_data.segments)
