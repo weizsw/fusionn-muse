@@ -112,7 +112,25 @@ def main():
     asr_data = ASRData.from_subtitle_file(args.input)
     print(f"Loaded {len(asr_data.segments)} segments", flush=True)
 
-    # Step 1: Optimize (fix recognition errors)
+    # Step 1: Split sentences (merge word-level → sentence-level)
+    # Must happen before optimize since optimize works on sentences, not words
+    if args.split:
+        print(f"Splitting sentences with {args.model}...", flush=True)
+        splitter = SubtitleSplitter(
+            thread_num=args.threads,
+            model=args.model,
+            max_word_count_cjk=args.max_cjk,
+            max_word_count_english=args.max_english,
+        )
+        try:
+            asr_data = splitter.split_subtitle(asr_data)
+            print(f"Split complete: {len(asr_data.segments)} segments", flush=True)
+        except Exception as e:
+            print(f"Warning: Split failed: {e}", flush=True)
+        finally:
+            splitter.stop()
+
+    # Step 2: Optimize (fix recognition errors) - works on sentence-level
     if args.optimize:
         print(f"Optimizing subtitles with {args.model}...", flush=True)
         optimizer = SubtitleOptimizer(
@@ -130,23 +148,6 @@ def main():
             print(f"Warning: Optimization failed: {e}", flush=True)
         finally:
             optimizer.stop()
-
-    # Step 2: Split sentences
-    if args.split:
-        print(f"Splitting sentences with {args.model}...", flush=True)
-        splitter = SubtitleSplitter(
-            thread_num=args.threads,
-            model=args.model,
-            max_word_count_cjk=args.max_cjk,
-            max_word_count_english=args.max_english,
-        )
-        try:
-            asr_data = splitter.split_subtitle(asr_data)
-            print(f"Split complete: {len(asr_data.segments)} segments", flush=True)
-        except Exception as e:
-            print(f"Warning: Split failed: {e}", flush=True)
-        finally:
-            splitter.stop()
 
     # Step 3: Remove trailing punctuation
     if args.remove_punctuation:
