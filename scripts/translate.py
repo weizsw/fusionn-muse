@@ -138,7 +138,7 @@ def translate(
         translator.stop()
 
     # Save output (bilingual SRT: original on top)
-    asr_data.to_srt(output_path)
+    asr_data.to_srt(save_path=output_path)
     print(f"Saved: {os.path.basename(output_path)}", flush=True)
 
     return len(asr_data.segments)
