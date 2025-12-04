@@ -123,7 +123,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	if skipSubtitle {
 		// Skip transcription and translation
 		if hasSubtitleSuffix {
-			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (-C suffix detected)")
+			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (embedded subtitle detected)")
 		} else {
 			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (dry run)")
 		}
