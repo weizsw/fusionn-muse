@@ -2,9 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
   pull_request:
-    branches: [main, master]
 
 jobs:
   lint:
@@ -80,4 +78,3 @@ jobs:
           tags: fusionn-muse:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
