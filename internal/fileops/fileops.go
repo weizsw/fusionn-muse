@@ -5,9 +5,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/fusionn-muse/pkg/logger"
 )
+
+// codePattern matches video codes like SONE-269, JUR-123
+// Format: [2-5 letters]-[3-5 digits]
+// Removes suffixes like -C, -1, etc.
+var codePattern = regexp.MustCompile(`([A-Z]{2,5}-\d{3,5})`)
 
 // HardlinkOrCopy tries to hardlink src to dst, falls back to copy if hardlink fails.
 func HardlinkOrCopy(src, dst string) error {
@@ -138,4 +144,33 @@ func FindVideoFiles(dir string) ([]string, error) {
 func ChangeExtension(path, newExt string) string {
 	ext := filepath.Ext(path)
 	return path[:len(path)-len(ext)] + newExt
+}
+
+// CleanVideoFilename extracts the video code from messy filenames.
+// Examples:
+//   - SONE-269.mp4 → SONE-269.mp4 (unchanged)
+//   - SONE-269-C.mp4 → SONE-269.mp4 (removes -C suffix)
+//   - xxxSONE-269.mp4 → SONE-269.mp4 (removes prefix)
+//
+// Returns original filename if no code pattern found.
+func CleanVideoFilename(filename string) string {
+	ext := filepath.Ext(filename)
+	match := codePattern.FindString(filename)
+	if match == "" {
+		return filename // No pattern found, return as-is
+	}
+	return match + ext
+}
+
+// WriteDummySubtitle creates a dummy SRT file for dry-run testing.
+func WriteDummySubtitle(path string) error {
+	content := `1
+00:00:00,000 --> 00:00:05,000
+[Dry run test subtitle]
+
+2
+00:00:05,000 --> 00:00:10,000
+This is a dummy subtitle for testing the workflow.
+`
+	return os.WriteFile(path, []byte(content), 0644)
 }

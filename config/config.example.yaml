@@ -6,6 +6,9 @@
 server:
   port: 8080
 
+# Skip transcription & translation for testing file workflow
+dry_run: false
+
 # ─────────────────────────────────────────────────────────────────────────────
 # WHISPER (Transcription)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -144,7 +147,7 @@ apprise:
 # docker run -d \
 #   -p 8080:8080 \
 #   -v /path/to/downloads:/data/input:ro \
-#   -v /path/to/finished:/data/finished \
+#   -v /path/to/scraping:/data/scraping \
 #   -v /path/to/subtitles:/data/subtitles \
 #   -v ./config.yaml:/app/config/config.yaml:ro \
 #   fusionn-muse
