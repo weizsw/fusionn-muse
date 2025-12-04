@@ -137,7 +137,7 @@ func ensureDirectories(folders config.FoldersConfig) error {
 		folders.Input,
 		folders.Staging,
 		folders.Process,
-		folders.Finished,
+		folders.Scraping,
 		folders.Subtitles,
 		folders.Failed,
 	}

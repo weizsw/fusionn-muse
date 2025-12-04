@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fusionn-muse/internal/client/apprise"
@@ -94,7 +95,13 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		logger.Infof("📥 Step 1: Using existing staging file (skipped)")
 	}
 
-	// Step 2: Move to processing
+	// Step 2: Clean filename and move to processing
+	cleanedName := fileops.CleanVideoFilename(job.FileName)
+	if cleanedName != job.FileName {
+		logger.Infof("📝 Cleaned filename: %s → %s", job.FileName, cleanedName)
+		job.FileName = cleanedName
+	}
+
 	processingPath := filepath.Join(s.folders.Process, job.FileName)
 	logger.Infof("📦 Step 2: Moving to processing...")
 	t := startStep("Move to processing")
@@ -106,55 +113,76 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	job.StagingPath = ""
 	durations["move_to_processing"] = t.done()
 
-	// Step 3: Transcribe with whisper
-	logger.Infof("🎤 Step 3: Transcribing with Whisper (%s)...", s.cfg.Whisper.Model)
-	t = startStep("Transcription")
+	var subtitlePath, translatedPath string
 
-	subtitlePath, err := s.whisper.Transcribe(ctx, processingPath)
-	if err != nil {
-		s.moveToFailed(job, processingPath)
-		return s.handleError(job, "transcription", err)
+	if s.cfg.DryRun {
+		// Dry run: skip transcription and translation, create dummy subtitle
+		logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (dry run)")
+		baseName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName))
+		subtitlePath = filepath.Join(filepath.Dir(processingPath), baseName+".srt")
+		if err := fileops.WriteDummySubtitle(subtitlePath); err != nil {
+			s.moveToFailed(job, processingPath)
+			return s.handleError(job, "create dummy subtitle", err)
+		}
+		translatedPath = subtitlePath
+	} else {
+		// Step 3: Transcribe with whisper
+		logger.Infof("🎤 Step 3: Transcribing with Whisper (%s)...", s.cfg.Whisper.Model)
+		t = startStep("Transcription")
+
+		var err error
+		subtitlePath, err = s.whisper.Transcribe(ctx, processingPath)
+		if err != nil {
+			s.moveToFailed(job, processingPath)
+			return s.handleError(job, "transcription", err)
+		}
+		durations["transcription"] = t.done()
+
+		// Step 4: Translate with llm-subtrans
+		logger.Infof("🌐 Step 4: Translating subtitle → %s...", s.cfg.Translate.TargetLang)
+		t = startStep("Translation")
+
+		translatedPath, err = s.translator.Translate(ctx, subtitlePath)
+		if err != nil {
+			s.moveToFailed(job, processingPath)
+			return s.handleError(job, "translation", err)
+		}
+		durations["translation"] = t.done()
 	}
 	job.SubtitlePath = subtitlePath
-	durations["transcription"] = t.done()
-
-	// Step 4: Translate with llm-subtrans
-	logger.Infof("🌐 Step 4: Translating subtitle → %s...", s.cfg.Translate.TargetLang)
-	t = startStep("Translation")
-
-	translatedPath, err := s.translator.Translate(ctx, subtitlePath)
-	if err != nil {
-		s.moveToFailed(job, processingPath)
-		return s.handleError(job, "translation", err)
-	}
 	job.TranslatedPath = translatedPath
-	durations["translation"] = t.done()
 
-	// Step 5: Move translated subtitle to subtitles folder (before video)
-	translatedSubName := filepath.Base(translatedPath)
-	finalSubPath := filepath.Join(s.folders.Subtitles, translatedSubName)
-	logger.Infof("📦 Step 5: Moving translated subtitle to subtitles folder...")
-	t = startStep("Move subtitle")
-
-	if err := fileops.Move(translatedPath, finalSubPath); err != nil {
-		return s.handleError(job, "move subtitle", err)
-	}
-	durations["move_subtitle"] = t.done()
-
-	// Clean up original (untranslated) subtitle - don't move, just delete
-	if subtitlePath != translatedPath && fileops.Exists(subtitlePath) {
+	// Step 5: Move translated subtitle to subtitles folder (skip in dry run)
+	if s.cfg.DryRun {
+		logger.Infof("⏭️  Step 5: Skipping subtitle move (dry run)")
+		// Clean up dummy subtitle
 		_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
+	} else {
+		translatedSubName := filepath.Base(translatedPath)
+		finalSubPath := filepath.Join(s.folders.Subtitles, translatedSubName)
+		logger.Infof("📦 Step 5: Moving translated subtitle to subtitles folder...")
+		t = startStep("Move subtitle")
+
+		if err := fileops.Move(translatedPath, finalSubPath); err != nil {
+			return s.handleError(job, "move subtitle", err)
+		}
+		durations["move_subtitle"] = t.done()
+
+		// Clean up original (untranslated) subtitle - don't move, just delete
+		if subtitlePath != translatedPath && fileops.Exists(subtitlePath) {
+			_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
+		}
 	}
 
-	// Step 6: Move video to finished folder
-	finishedVideoPath := filepath.Join(s.folders.Finished, job.FileName)
-	logger.Infof("📦 Step 6: Moving video to finished...")
-	t = startStep("Move to finished")
+	// Step 6: Move video to scraping folder (another program handles from here)
+	scrapingPath := filepath.Join(s.folders.Scraping, job.FileName)
+	logger.Infof("📦 Step 6: Moving video to scraping...")
+	t = startStep("Move to scraping")
 
-	if err := fileops.Move(processingPath, finishedVideoPath); err != nil {
-		return s.handleError(job, "move video to finished", err)
+	if err := fileops.Move(processingPath, scrapingPath); err != nil {
+		return s.handleError(job, "move video to scraping", err)
 	}
-	durations["move_to_finished"] = t.done()
+	durations["move_to_scraping"] = t.done()
 
 	// Step 7: Send success notification
 	logger.Infof("🔔 Step 7: Sending notification...")
@@ -168,9 +196,11 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	logger.Infof("✅ Job completed: %s", job.FileName)
 	logger.Infof("⏱️  Total time: %s", formatDuration(totalDuration))
-	logger.Infof("   Transcription: %s | Translation: %s",
-		formatDuration(durations["transcription"]),
-		formatDuration(durations["translation"]))
+	if !s.cfg.DryRun {
+		logger.Infof("   Transcription: %s | Translation: %s",
+			formatDuration(durations["transcription"]),
+			formatDuration(durations["translation"]))
+	}
 	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	return nil

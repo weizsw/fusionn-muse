@@ -20,6 +20,9 @@ type Config struct {
 	Translate TranslateConfig `mapstructure:"translate"`
 	Apprise   AppriseConfig   `mapstructure:"apprise"`
 	Queue     QueueConfig     `mapstructure:"queue"`
+
+	// DryRun: skip transcription and translation (for testing file workflow)
+	DryRun bool `mapstructure:"dry_run"`
 }
 
 type ServerConfig struct {
@@ -32,7 +35,7 @@ func Folders() FoldersConfig {
 		Input:     "/data/input",      // Mount: torrent download folder
 		Staging:   "/data/staging",    // Internal: queue before processing
 		Process:   "/data/processing", // Internal: active processing
-		Finished:  "/data/finished",   // Mount: completed videos
+		Scraping:  "/data/scraping",   // Mount: videos ready for scraping
 		Subtitles: "/data/subtitles",  // Mount: translated subtitles
 		Failed:    "/data/failed",     // Failed jobs (for manual inspection)
 	}
@@ -42,7 +45,7 @@ type FoldersConfig struct {
 	Input     string // Source files from torrent client
 	Staging   string // Queue before processing
 	Process   string // Active processing
-	Finished  string // Completed videos
+	Scraping  string // Videos ready for scraping by another program
 	Subtitles string // Translated subtitles
 	Failed    string // Failed jobs
 }
