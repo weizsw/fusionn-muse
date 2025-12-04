@@ -146,16 +146,18 @@ apprise:
 #
 # docker run -d \
 #   -p 8080:8080 \
-#   -v /path/to/downloads:/data/input:ro \
-#   -v /path/to/scraping:/data/scraping \
-#   -v /path/to/subtitles:/data/subtitles \
+#   -v /path/to/downloads:/data/torrents:ro \
+#   -v /path/to/automation:/data/automation \
 #   -v ./config.yaml:/app/config/config.yaml:ro \
 #   fusionn-muse
 #
-# Internal folders (no need to mount):
-#   /data/staging    - Queue before processing
-#   /data/processing - Active processing
-#   /data/failed     - Failed jobs (mount if you want access)
+# Folder structure:
+#   /data/torrents              - Input: torrent download folder (read-only)
+#   /data/automation/staging    - Internal: queue before processing
+#   /data/automation/processing - Internal: active processing
+#   /data/automation/scraping   - Output: videos ready for scraping
+#   /data/automation/subtitles  - Output: translated subtitles
+#   /data/automation/failed     - Failed jobs (for manual inspection)
 #
 # ════════════════════════════════════════════════════════════════════════════
 # QBITTORRENT SETUP
