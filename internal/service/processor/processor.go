@@ -158,8 +158,9 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		// Clean up dummy subtitle
 		_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
 	} else {
-		translatedSubName := filepath.Base(translatedPath)
-		finalSubPath := filepath.Join(s.folders.Subtitles, translatedSubName)
+		// Use cleaned video name as subtitle name (removes .zh suffix)
+		cleanSubName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName)) + ".srt"
+		finalSubPath := filepath.Join(s.folders.Subtitles, cleanSubName)
 		logger.Infof("📦 Step 5: Moving translated subtitle to subtitles folder...")
 		t = startStep("Move subtitle")
 

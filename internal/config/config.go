@@ -32,12 +32,12 @@ type ServerConfig struct {
 // Folders returns hardcoded folder paths (user mounts via Docker volumes).
 func Folders() FoldersConfig {
 	return FoldersConfig{
-		Input:     "/data/input",      // Mount: torrent download folder
-		Staging:   "/data/staging",    // Internal: queue before processing
-		Process:   "/data/processing", // Internal: active processing
-		Scraping:  "/data/scraping",   // Mount: videos ready for scraping
-		Subtitles: "/data/subtitles",  // Mount: translated subtitles
-		Failed:    "/data/failed",     // Failed jobs (for manual inspection)
+		Input:     "/data/torrents",              // Mount: torrent download folder
+		Staging:   "/data/automation/staging",    // Internal: queue before processing
+		Process:   "/data/automation/processing", // Internal: active processing
+		Scraping:  "/data/automation/scraping",   // Output: videos ready for scraping
+		Subtitles: "/data/automation/subtitles",  // Output: translated subtitles
+		Failed:    "/data/automation/failed",     // Failed jobs (for manual inspection)
 	}
 }
 
