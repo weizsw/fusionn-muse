@@ -97,9 +97,9 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	}
 
 	// Step 2: Clean filename and move to processing
-	// Check if original filename has -C suffix (skip transcription/translation)
+	// Check if filename has Chinese subtitle indicators (skip transcription/translation)
 	originalName := job.FileName
-	hasSubtitleSuffix := fileops.HasSubtitleSuffix(originalName)
+	hasChineseSub := fileops.HasChineseSubtitle(originalName)
 
 	cleanedName := fileops.CleanVideoFilename(job.FileName)
 	if cleanedName != job.FileName {
@@ -119,12 +119,12 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	durations["move_to_processing"] = t.done()
 
 	var subtitlePath, translatedPath string
-	skipSubtitle := cfg.DryRun || hasSubtitleSuffix
+	skipSubtitle := cfg.DryRun || hasChineseSub
 
 	if skipSubtitle {
 		// Skip transcription and translation
-		if hasSubtitleSuffix {
-			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (embedded subtitle detected)")
+		if hasChineseSub {
+			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (Chinese subtitle detected)")
 		} else {
 			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (dry run)")
 		}
