@@ -61,7 +61,7 @@ func main() {
 	}
 
 	// Initialize processor service
-	proc := processor.New(cfg, appriseClient)
+	proc := processor.New(cfgMgr, appriseClient)
 
 	// Initialize job queue
 	jobQueue := queue.New(proc, cfg.Queue.MaxRetries, cfg.Queue.RetryDelayMs)

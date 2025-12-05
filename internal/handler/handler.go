@@ -85,48 +85,41 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 
 	logger.Infof("📥 Webhook received: %s", req.Path)
 
-	var videoFiles []string
+	var videoPath string
 
 	if fileops.IsVideoFile(req.Path) {
-		videoFiles = append(videoFiles, req.Path)
+		// Direct file path: process without filtering (preserve existing behavior)
+		videoPath = req.Path
 	} else if fileops.Exists(req.Path) {
-		files, err := fileops.FindVideoFiles(req.Path)
+		// Folder path: find single valid video (filter by code pattern + size)
+		validPath, err := fileops.FindValidVideoFile(req.Path)
 		if err != nil {
-			logger.Errorf("❌ Failed to scan directory: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to scan directory"})
+			logger.Warnf("⚠️ %v in: %s", err, req.Path)
+			c.JSON(http.StatusOK, gin.H{
+				"message": "no valid video files found",
+				"jobs":    []string{},
+			})
 			return
 		}
-		videoFiles = files
+		videoPath = validPath
 	} else {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "path does not exist"})
 		return
 	}
 
-	if len(videoFiles) == 0 {
-		logger.Warnf("⚠️ No video files found in: %s", req.Path)
-		c.JSON(http.StatusOK, gin.H{
-			"message": "no video files found",
-			"jobs":    []string{},
-		})
-		return
-	}
+	// Queue the single valid video
+	jobID := uuid.New().String()[:8]
+	fileName := filepath.Base(videoPath)
 
-	jobIDs := make([]string, 0, len(videoFiles))
-	for _, videoPath := range videoFiles {
-		jobID := uuid.New().String()[:8]
-		fileName := filepath.Base(videoPath)
+	job := queue.NewJob(jobID, videoPath, fileName, req.Name, req.Category)
+	h.queue.Enqueue(job)
 
-		job := queue.NewJob(jobID, videoPath, fileName, req.Name, req.Category)
-		h.queue.Enqueue(job)
-		jobIDs = append(jobIDs, jobID)
-
-		logger.Infof("📥 Queued: %s (job: %s)", fileName, jobID)
-	}
+	logger.Infof("📥 Queued: %s (job: %s)", fileName, jobID)
 
 	c.JSON(http.StatusAccepted, gin.H{
-		"message": "jobs queued",
-		"jobs":    jobIDs,
-		"count":   len(jobIDs),
+		"message": "job queued",
+		"jobs":    []string{jobID},
+		"count":   1,
 	})
 }
 

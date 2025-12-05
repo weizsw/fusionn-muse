@@ -17,21 +17,17 @@ import (
 
 // Service handles the subtitle processing pipeline.
 type Service struct {
-	cfg        *config.Config
-	folders    config.FoldersConfig
-	whisper    *executor.Whisper
-	translator *executor.Translator
-	apprise    *apprise.Client
+	cfgMgr  *config.Manager
+	folders config.FoldersConfig
+	apprise *apprise.Client
 }
 
 // New creates a new processor service.
-func New(cfg *config.Config, appriseClient *apprise.Client) *Service {
+func New(cfgMgr *config.Manager, appriseClient *apprise.Client) *Service {
 	return &Service{
-		cfg:        cfg,
-		folders:    config.Folders(),
-		whisper:    executor.NewWhisper(cfg.Whisper, cfg.Translate), // Pass translate config for LLM post-processing
-		translator: executor.NewTranslator(cfg.Translate),
-		apprise:    appriseClient,
+		cfgMgr:  cfgMgr,
+		folders: config.Folders(),
+		apprise: appriseClient,
 	}
 }
 
@@ -72,6 +68,11 @@ func formatDuration(d time.Duration) string {
 // Process implements queue.Processor interface.
 func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	totalStart := time.Now()
+
+	// Get fresh config for this job (enables hot-reload)
+	cfg := s.cfgMgr.Get()
+	whisper := executor.NewWhisper(cfg.Whisper, cfg.Translate)
+	translator := executor.NewTranslator(cfg.Translate)
 
 	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	logger.Infof("🎬 Starting job: %s", job.FileName)
@@ -118,7 +119,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	durations["move_to_processing"] = t.done()
 
 	var subtitlePath, translatedPath string
-	skipSubtitle := s.cfg.DryRun || hasSubtitleSuffix
+	skipSubtitle := cfg.DryRun || hasSubtitleSuffix
 
 	if skipSubtitle {
 		// Skip transcription and translation
@@ -136,11 +137,11 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		translatedPath = subtitlePath
 	} else {
 		// Step 3: Transcribe with whisper
-		logger.Infof("🎤 Step 3: Transcribing with Whisper (%s)...", s.cfg.Whisper.Model)
+		logger.Infof("🎤 Step 3: Transcribing with Whisper (%s)...", cfg.Whisper.Model)
 		t = startStep("Transcription")
 
 		var err error
-		subtitlePath, err = s.whisper.Transcribe(ctx, processingPath)
+		subtitlePath, err = whisper.Transcribe(ctx, processingPath)
 		if err != nil {
 			s.moveToFailed(job, processingPath)
 			return s.handleError(job, "transcription", err)
@@ -148,10 +149,10 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		durations["transcription"] = t.done()
 
 		// Step 4: Translate with llm-subtrans
-		logger.Infof("🌐 Step 4: Translating subtitle → %s...", s.cfg.Translate.TargetLang)
+		logger.Infof("🌐 Step 4: Translating subtitle → %s...", cfg.Translate.TargetLang)
 		t = startStep("Translation")
 
-		translatedPath, err = s.translator.Translate(ctx, subtitlePath)
+		translatedPath, err = translator.Translate(ctx, subtitlePath)
 		if err != nil {
 			s.moveToFailed(job, processingPath)
 			return s.handleError(job, "translation", err)

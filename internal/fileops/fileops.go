@@ -11,6 +11,10 @@ import (
 	"github.com/fusionn-muse/pkg/logger"
 )
 
+// MinVideoSize is the minimum file size (200MB) for a valid video file.
+// Files smaller than this are likely ads, samples, or bonus content.
+const MinVideoSize int64 = 200 * 1024 * 1024
+
 // codePattern matches video codes like SONE-269, JUR-123
 // Format: [2-5 letters]-[3-5 digits]
 // Removes suffixes like -C, -1, etc.
@@ -142,6 +146,64 @@ func FindVideoFiles(dir string) ([]string, error) {
 	})
 
 	return videos, err
+}
+
+// HasVideoCode checks if a filename contains a valid video code pattern.
+// Matches codes like SONE-269, JUR-123 anywhere in the filename (handles prefixes).
+func HasVideoCode(filename string) bool {
+	return codePattern.MatchString(strings.ToUpper(filename))
+}
+
+// FindValidVideoFile finds the single valid video file in a directory.
+// Filters by: code pattern match AND size > MinVideoSize.
+// Returns the largest file if multiple match, or error if none found.
+func FindValidVideoFile(dir string) (string, error) {
+	videos, err := FindVideoFiles(dir)
+	if err != nil {
+		return "", err
+	}
+
+	var bestPath string
+	var bestSize int64
+
+	for _, path := range videos {
+		filename := filepath.Base(path)
+
+		// Check code pattern
+		if !HasVideoCode(filename) {
+			logger.Debugf("⏭️  Skipped (no code pattern): %s", filename)
+			continue
+		}
+
+		// Check file size
+		info, err := os.Stat(path)
+		if err != nil {
+			logger.Debugf("⏭️  Skipped (stat error): %s: %v", filename, err)
+			continue
+		}
+
+		size := info.Size()
+		if size <= MinVideoSize {
+			logger.Debugf("⏭️  Skipped (too small: %dMB): %s", size/(1024*1024), filename)
+			continue
+		}
+
+		// Track largest valid file
+		if size > bestSize {
+			bestPath = path
+			bestSize = size
+		}
+	}
+
+	if bestPath == "" {
+		return "", fmt.Errorf("no valid video file found (need code pattern + size > %dMB)", MinVideoSize/(1024*1024))
+	}
+
+	if len(videos) > 1 {
+		logger.Debugf("✅ Selected largest valid video: %s (%dMB)", filepath.Base(bestPath), bestSize/(1024*1024))
+	}
+
+	return bestPath, nil
 }
 
 // ChangeExtension changes the extension of a filename.
