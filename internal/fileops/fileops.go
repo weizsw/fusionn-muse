@@ -17,11 +17,24 @@ const MinVideoSize int64 = 200 * 1024 * 1024
 
 // codePattern matches video codes like SONE-269, JUR-123
 // Format: [2-5 letters]-[3-5 digits]
-// Removes suffixes like -C, -1, etc.
 var codePattern = regexp.MustCompile(`([A-Z]{2,5}-\d{3,5})`)
 
-// subtitleSuffixPattern matches -C or -c suffix before extension (indicates subtitle already exists)
-var subtitleSuffixPattern = regexp.MustCompile(`(?i)-c\.[^.]+$`)
+// chineseSubtitlePatterns detects Chinese subtitle indicators in filenames.
+// Matches -C/_C anywhere (bounded), language codes, and Chinese terms.
+var chineseSubtitlePatterns = []*regexp.Regexp{
+	// Any non-alphanumeric + C + non-letter (e.g., SSIS-127_C.mp4, xxx.C.mp4, xxx-C.mp4)
+	regexp.MustCompile(`(?i)[^a-zA-Z0-9]c([^a-zA-Z]|$)`),
+	// Language codes (word-bounded): zh, chs, cht, chi, cn, gb, big5
+	regexp.MustCompile(`(?i)(^|[^a-z0-9])(zh|chs|cht|chi|cn|gb|big5)([^a-z0-9]|$)`),
+	// English abbreviations: SC (Simplified Chinese), TC (Traditional Chinese)
+	regexp.MustCompile(`(?i)(^|[^a-z0-9])(sc|tc)([^a-z0-9]|$)`),
+}
+
+// chineseTerms are Chinese characters indicating subtitles
+var chineseTerms = []string{
+	"中文", "简中", "繁中", "软中", "硬中",
+	"字幕", "内嵌", "内封", "中字", "国语", "双语",
+}
 
 // HardlinkOrCopy tries to hardlink src to dst, falls back to copy if hardlink fails.
 func HardlinkOrCopy(src, dst string) error {
@@ -212,10 +225,32 @@ func ChangeExtension(path, newExt string) string {
 	return path[:len(path)-len(ext)] + newExt
 }
 
-// HasSubtitleSuffix checks if filename has -C suffix (indicates subtitle already exists).
-// Examples: SONE-269-C.mp4 → true, SONE-269.mp4 → false
-func HasSubtitleSuffix(filename string) bool {
-	return subtitleSuffixPattern.MatchString(filename)
+// HasChineseSubtitle checks if filename contains Chinese subtitle indicators.
+// Detects: -C/_C (anywhere), language codes (zh, chs, cht, chi, cn, gb, big5, sc, tc),
+// and Chinese terms (中文, 简中, 繁中, 软中, 硬中, 字幕, 内嵌, 内封, 中字, 国语, 双语).
+// Examples:
+//   - SONE-269-C.mp4 → true
+//   - MIDE-939_C.mp4 → true
+//   - MIDE-939.4k-C.x265.mp4 → true
+//   - JUR-456.chs.mp4 → true
+//   - STARS-123.中文.mp4 → true
+//   - SONE-269.mp4 → false
+func HasChineseSubtitle(filename string) bool {
+	// Check regex patterns (case-insensitive)
+	for _, pattern := range chineseSubtitlePatterns {
+		if pattern.MatchString(filename) {
+			return true
+		}
+	}
+
+	// Check Chinese terms
+	for _, term := range chineseTerms {
+		if strings.Contains(filename, term) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // CleanVideoFilename extracts the video code from messy filenames.
