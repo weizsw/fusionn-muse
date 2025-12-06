@@ -185,7 +185,3 @@ fusionn-muse/
 └── config/
     └── config.example.yaml # Example configuration
 ```
-
-## License
-
-MIT
