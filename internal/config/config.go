@@ -20,6 +20,9 @@ type Config struct {
 	Translate TranslateConfig `mapstructure:"translate"`
 	Apprise   AppriseConfig   `mapstructure:"apprise"`
 	Queue     QueueConfig     `mapstructure:"queue"`
+
+	// DryRun: skip transcription and translation (for testing file workflow)
+	DryRun bool `mapstructure:"dry_run"`
 }
 
 type ServerConfig struct {
@@ -29,12 +32,12 @@ type ServerConfig struct {
 // Folders returns hardcoded folder paths (user mounts via Docker volumes).
 func Folders() FoldersConfig {
 	return FoldersConfig{
-		Input:     "/data/input",      // Mount: torrent download folder
-		Staging:   "/data/staging",    // Internal: queue before processing
-		Process:   "/data/processing", // Internal: active processing
-		Finished:  "/data/finished",   // Mount: completed videos
-		Subtitles: "/data/subtitles",  // Mount: translated subtitles
-		Failed:    "/data/failed",     // Failed jobs (for manual inspection)
+		Input:     "/data/torrents",              // Mount: torrent download folder
+		Staging:   "/data/automation/staging",    // Internal: queue before processing
+		Process:   "/data/automation/processing", // Internal: active processing
+		Scraping:  "/data/automation/scraping",   // Output: videos ready for scraping
+		Subtitles: "/data/automation/subtitles",  // Output: translated subtitles
+		Failed:    "/data/automation/failed",     // Failed jobs (for manual inspection)
 	}
 }
 
@@ -42,29 +45,44 @@ type FoldersConfig struct {
 	Input     string // Source files from torrent client
 	Staging   string // Queue before processing
 	Process   string // Active processing
-	Finished  string // Completed videos
+	Scraping  string // Videos ready for scraping by another program
 	Subtitles string // Translated subtitles
 	Failed    string // Failed jobs
 }
 
 type WhisperConfig struct {
-	// Provider: "local" (whisper.cpp) or "openai" (API)
-	Provider string `mapstructure:"provider"`
-	// Model: for local = "base", "small", "medium", "large-v2", "large-v3"
-	//        for openai = "whisper-1"
+	// Model: "tiny", "base", "small", "medium", "large-v2", "large-v3", "large-v3-turbo"
 	Model string `mapstructure:"model"`
-	// APIKey: required if provider is "openai"
-	APIKey string `mapstructure:"api_key"`
 	// Language: source language hint (optional, "auto" for auto-detect)
 	Language string `mapstructure:"language"`
 	// Prompt: initial context for better transcription (e.g., topic, proper nouns)
 	Prompt string `mapstructure:"prompt"`
+
+	// FasterWhisper settings
+	// Device: "cuda", "cpu", or "auto" (default: auto)
+	Device string `mapstructure:"device"`
+	// VADFilter: enable Voice Activity Detection filtering (default: true)
+	VADFilter *bool `mapstructure:"vad_filter"`
+	// VADThreshold: VAD threshold 0.0-1.0 (default: 0.5)
+	VADThreshold float64 `mapstructure:"vad_threshold"`
+
+	// Post-processing options (uses translate LLM settings)
+	// OptimizeSubtitles: use LLM to fix recognition errors
+	OptimizeSubtitles bool `mapstructure:"optimize_subtitles"`
+	// SplitSentences: use LLM to split long subtitles into shorter sentences
+	SplitSentences bool `mapstructure:"split_sentences"`
+	// MaxCJKChars: max Chinese/Japanese/Korean characters per line (default 25)
+	MaxCJKChars int `mapstructure:"max_cjk_chars"`
+	// MaxEnglishWords: max English words per line (default 18, same as VideoCaptioner)
+	MaxEnglishWords int `mapstructure:"max_english_words"`
+	// RemovePunctuation: remove trailing punctuation (，。) from subtitles
+	RemovePunctuation bool `mapstructure:"remove_punctuation"`
 }
 
 type TranslateConfig struct {
-	// Provider: "openai", "claude", "gemini", "openrouter", "custom"
+	// Provider: "openai", "deepseek", "siliconcloud", "openrouter", "groq", "together", "fireworks", "custom"
 	Provider string `mapstructure:"provider"`
-	// Model: e.g., "gpt-4o-mini", "claude-3-haiku"
+	// Model: e.g., "gpt-4o-mini", "deepseek-chat"
 	Model string `mapstructure:"model"`
 	// APIKey: API key for the provider
 	APIKey string `mapstructure:"api_key"`
@@ -72,17 +90,17 @@ type TranslateConfig struct {
 	TargetLang string `mapstructure:"target_lang"`
 
 	// Custom endpoint settings (for provider: "custom")
-	CustomServer   string `mapstructure:"custom_server"`   // e.g., "http://localhost:1234"
-	CustomEndpoint string `mapstructure:"custom_endpoint"` // e.g., "/v1/chat/completions"
+	CustomServer string `mapstructure:"custom_server"` // e.g., "http://localhost:1234"
 
-	// Rate limiting
-	RateLimitRPM int `mapstructure:"rate_limit_rpm"` // Requests per minute (0 = no limit)
-
-	// Instruction: custom instruction for the LLM translator
+	// Instruction: custom prompt/terminology for translation
 	Instruction string `mapstructure:"instruction"`
 
-	// Additional CLI args for llm-subtrans
-	Args []string `mapstructure:"args"`
+	// UseReflect: enable reflection mode for higher quality translation (slower)
+	UseReflect bool `mapstructure:"use_reflect"`
+	// Threads: number of parallel translation threads (default 4)
+	Threads int `mapstructure:"threads"`
+	// BatchSize: number of subtitles per batch (default 10)
+	BatchSize int `mapstructure:"batch_size"`
 }
 
 type AppriseConfig struct {

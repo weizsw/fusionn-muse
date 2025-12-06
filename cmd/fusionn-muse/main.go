@@ -61,7 +61,7 @@ func main() {
 	}
 
 	// Initialize processor service
-	proc := processor.New(cfg, appriseClient)
+	proc := processor.New(cfgMgr, appriseClient)
 
 	// Initialize job queue
 	jobQueue := queue.New(proc, cfg.Queue.MaxRetries, cfg.Queue.RetryDelayMs)
@@ -102,11 +102,8 @@ func main() {
 	logger.Infof("   /data/finished  → Processed videos (write)")
 	logger.Infof("   /data/subtitles → Translated subtitles (write)")
 	logger.Info("")
-	logger.Infof("🎤 Whisper: %s (model: %s)", cfg.Whisper.Provider, cfg.Whisper.Model)
+	logger.Infof("🎤 Whisper: FasterWhisper (model: %s)", cfg.Whisper.Model)
 	logger.Infof("🌐 Translate: %s → %s", cfg.Translate.Provider, cfg.Translate.TargetLang)
-	if cfg.Translate.RateLimitRPM > 0 {
-		logger.Infof("🚦 Rate limit: %d RPM", cfg.Translate.RateLimitRPM)
-	}
 	logger.Info("")
 	logger.Infof("🌐 API server: http://localhost:%d", cfg.Server.Port)
 	logger.Infof("   POST /api/v1/webhook/torrent  - qBittorrent callback")
@@ -140,7 +137,7 @@ func ensureDirectories(folders config.FoldersConfig) error {
 		folders.Input,
 		folders.Staging,
 		folders.Process,
-		folders.Finished,
+		folders.Scraping,
 		folders.Subtitles,
 		folders.Failed,
 	}
