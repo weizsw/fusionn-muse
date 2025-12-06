@@ -16,7 +16,7 @@ const (
 	dimEnd   = "\033[0m"
 )
 
-// StreamDimmed reads from r, writes to buf for capture, and prints dimmed to stderr.
+// StreamDimmed reads from r, writes to buf for capture, and prints dimmed to stdout.
 // This creates a Docker-build-like experience where script output is visible but greyed out.
 func StreamDimmed(wg *sync.WaitGroup, r io.Reader, buf *bytes.Buffer) {
 	defer wg.Done()
@@ -28,8 +28,8 @@ func StreamDimmed(wg *sync.WaitGroup, r io.Reader, buf *bytes.Buffer) {
 		line := scanner.Text()
 		buf.WriteString(line)
 		buf.WriteByte('\n')
-		// Print dimmed to stderr (doesn't interfere with structured logs)
-		fmt.Fprintf(os.Stderr, "%s  │ %s%s\n", dimStart, line, dimEnd)
+		// Print dimmed to stdout (same stream as logger for proper interleaving)
+		fmt.Fprintf(os.Stdout, "%s  │ %s%s\n", dimStart, line, dimEnd)
 	}
 
 	if err := scanner.Err(); err != nil {

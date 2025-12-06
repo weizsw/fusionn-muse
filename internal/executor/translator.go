@@ -10,42 +10,22 @@ import (
 	"strings"
 	"sync"
 
-	"golang.org/x/time/rate"
-
 	"github.com/fusionn-muse/internal/config"
 	"github.com/fusionn-muse/pkg/logger"
 )
 
-// Translator handles subtitle translation via llm-subtrans.
+// Translator handles subtitle translation via VideoCaptioner's LLM translator.
 type Translator struct {
-	cfg     config.TranslateConfig
-	limiter *rate.Limiter
+	cfg config.TranslateConfig
 }
 
 // NewTranslator creates a new Translator executor.
 func NewTranslator(cfg config.TranslateConfig) *Translator {
-	t := &Translator{cfg: cfg}
-
-	// Set up rate limiter if configured
-	if cfg.RateLimitRPM > 0 {
-		// Convert RPM to rate per second
-		rps := float64(cfg.RateLimitRPM) / 60.0
-		t.limiter = rate.NewLimiter(rate.Limit(rps), 1)
-		logger.Infof("🚦 Translator rate limit: %d RPM", cfg.RateLimitRPM)
-	}
-
-	return t
+	return &Translator{cfg: cfg}
 }
 
 // Translate translates a subtitle file and returns the path to the translated subtitle.
 func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string, error) {
-	// Apply rate limiting
-	if t.limiter != nil {
-		if err := t.limiter.Wait(ctx); err != nil {
-			return "", fmt.Errorf("rate limit: %w", err)
-		}
-	}
-
 	dir := filepath.Dir(subtitlePath)
 	base := filepath.Base(subtitlePath)
 	ext := filepath.Ext(base)
@@ -117,67 +97,82 @@ func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string
 }
 
 func (t *Translator) buildArgs(inputPath, outputPath string) []string {
-	provider := strings.ToLower(t.cfg.Provider)
-
-	// Select script based on provider
-	// Each provider has its own script; llm-subtrans.py defaults to OpenRouter
-	script := t.getProviderScript(provider)
+	// Use VideoCaptioner's translate.py script
+	script := "/app/scripts/translate.py"
 
 	args := []string{
 		script,
 		inputPath,
-		"--target_language", t.cfg.TargetLang,
-		"-o", outputPath,
+		outputPath,
+		"--target", t.cfg.TargetLang,
 	}
 
-	if provider == "custom" {
-		// Custom server endpoint
-		if t.cfg.CustomServer != "" {
-			args = append(args, "--server", t.cfg.CustomServer)
-		}
-		if t.cfg.CustomEndpoint != "" {
-			args = append(args, "--endpoint", t.cfg.CustomEndpoint)
-		}
-		args = append(args, "--chat") // Most custom endpoints use chat format
-	}
-
-	// Model (applies to all providers)
+	// Model
 	if t.cfg.Model != "" {
 		args = append(args, "--model", t.cfg.Model)
 	}
 
 	// API key
 	if t.cfg.APIKey != "" {
-		args = append(args, "--apikey", t.cfg.APIKey)
+		args = append(args, "--api-key", t.cfg.APIKey)
 	}
 
-	// Custom instruction
+	// Base URL (for custom/OpenAI-compatible endpoints)
+	baseURL := t.getBaseURL()
+	if baseURL != "" {
+		args = append(args, "--base-url", baseURL)
+	}
+
+	// Custom instruction/prompt
 	if t.cfg.Instruction != "" {
-		args = append(args, "--instruction", t.cfg.Instruction)
+		args = append(args, "--prompt", t.cfg.Instruction)
 	}
 
-	// Additional custom args
-	args = append(args, t.cfg.Args...)
+	// Reflect mode for higher quality (optional)
+	if t.cfg.UseReflect {
+		args = append(args, "--reflect")
+	}
+
+	// Thread count (default 4)
+	if t.cfg.Threads > 0 {
+		args = append(args, "--threads", fmt.Sprintf("%d", t.cfg.Threads))
+	}
+
+	// Batch size (default 10)
+	if t.cfg.BatchSize > 0 {
+		args = append(args, "--batch-size", fmt.Sprintf("%d", t.cfg.BatchSize))
+	}
 
 	return args
 }
 
-// getProviderScript returns the appropriate llm-subtrans script for the provider.
-func (t *Translator) getProviderScript(provider string) string {
-	scriptMap := map[string]string{
-		"openai":     "/app/llm-subtrans/scripts/gpt-subtrans.py",
-		"claude":     "/app/llm-subtrans/scripts/claude-subtrans.py",
-		"gemini":     "/app/llm-subtrans/scripts/gemini-subtrans.py",
-		"deepseek":   "/app/llm-subtrans/scripts/deepseek-subtrans.py",
-		"openrouter": "/app/llm-subtrans/scripts/llm-subtrans.py", // llm-subtrans defaults to OpenRouter
-		"custom":     "/app/llm-subtrans/scripts/llm-subtrans.py", // with --server flag
+// getBaseURL returns the OpenAI-compatible API base URL for the provider.
+func (t *Translator) getBaseURL() string {
+	provider := strings.ToLower(t.cfg.Provider)
+
+	// Known provider base URLs (all OpenAI-compatible)
+	baseURLs := map[string]string{
+		"openai":       "https://api.openai.com",
+		"deepseek":     "https://api.deepseek.com",
+		"openrouter":   "https://openrouter.ai/api",
+		"groq":         "https://api.groq.com/openai",
+		"together":     "https://api.together.xyz",
+		"fireworks":    "https://api.fireworks.ai/inference",
+		"siliconcloud": "https://api.siliconflow.cn/v1",
+		"siliconflow":  "https://api.siliconflow.cn/v1", // alias
 	}
 
-	if script, ok := scriptMap[provider]; ok {
-		return script
+	// Check for custom server first
+	if t.cfg.CustomServer != "" {
+		return t.cfg.CustomServer
 	}
-	// Default to llm-subtrans.py (OpenRouter)
-	return "/app/llm-subtrans/scripts/llm-subtrans.py"
+
+	if url, ok := baseURLs[provider]; ok {
+		return url
+	}
+
+	// Default to OpenAI
+	return "https://api.openai.com"
 }
 
 // getLangCode returns a short language code for filename.
@@ -212,13 +207,4 @@ func (t *Translator) getLangCode() string {
 		return strings.ToLower(t.cfg.TargetLang[:2])
 	}
 	return "xx"
-}
-
-// WaitForRateLimit blocks until the rate limiter allows the next request.
-// Useful for pre-checking before starting expensive operations.
-func (t *Translator) WaitForRateLimit(ctx context.Context) error {
-	if t.limiter == nil {
-		return nil
-	}
-	return t.limiter.Wait(ctx)
 }

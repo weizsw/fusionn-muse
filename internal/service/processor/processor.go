@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fusionn-muse/internal/client/apprise"
@@ -16,21 +17,17 @@ import (
 
 // Service handles the subtitle processing pipeline.
 type Service struct {
-	cfg        *config.Config
-	folders    config.FoldersConfig
-	whisper    *executor.Whisper
-	translator *executor.Translator
-	apprise    *apprise.Client
+	cfgMgr  *config.Manager
+	folders config.FoldersConfig
+	apprise *apprise.Client
 }
 
 // New creates a new processor service.
-func New(cfg *config.Config, appriseClient *apprise.Client) *Service {
+func New(cfgMgr *config.Manager, appriseClient *apprise.Client) *Service {
 	return &Service{
-		cfg:        cfg,
-		folders:    config.Folders(),
-		whisper:    executor.NewWhisper(cfg.Whisper),
-		translator: executor.NewTranslator(cfg.Translate),
-		apprise:    appriseClient,
+		cfgMgr:  cfgMgr,
+		folders: config.Folders(),
+		apprise: appriseClient,
 	}
 }
 
@@ -72,6 +69,11 @@ func formatDuration(d time.Duration) string {
 func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	totalStart := time.Now()
 
+	// Get fresh config for this job (enables hot-reload)
+	cfg := s.cfgMgr.Get()
+	whisper := executor.NewWhisper(cfg.Whisper, cfg.Translate)
+	translator := executor.NewTranslator(cfg.Translate)
+
 	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	logger.Infof("🎬 Starting job: %s", job.FileName)
 	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -94,7 +96,17 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		logger.Infof("📥 Step 1: Using existing staging file (skipped)")
 	}
 
-	// Step 2: Move to processing
+	// Step 2: Clean filename and move to processing
+	// Check if filename has Chinese subtitle indicators (skip transcription/translation)
+	originalName := job.FileName
+	hasChineseSub := fileops.HasChineseSubtitle(originalName)
+
+	cleanedName := fileops.CleanVideoFilename(job.FileName)
+	if cleanedName != job.FileName {
+		logger.Infof("📝 Cleaned filename: %s → %s", job.FileName, cleanedName)
+		job.FileName = cleanedName
+	}
+
 	processingPath := filepath.Join(s.folders.Process, job.FileName)
 	logger.Infof("📦 Step 2: Moving to processing...")
 	t := startStep("Move to processing")
@@ -106,57 +118,82 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	job.StagingPath = ""
 	durations["move_to_processing"] = t.done()
 
-	// Step 3: Transcribe with whisper
-	logger.Infof("🎤 Step 3: Transcribing with Whisper (%s)...", s.cfg.Whisper.Provider)
-	t = startStep("Transcription")
+	var subtitlePath, translatedPath string
+	skipSubtitle := cfg.DryRun || hasChineseSub
 
-	subtitlePath, err := s.whisper.Transcribe(ctx, processingPath)
-	if err != nil {
-		s.moveToFailed(job, processingPath)
-		return s.handleError(job, "transcription", err)
+	if skipSubtitle {
+		// Skip transcription and translation
+		if hasChineseSub {
+			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (Chinese subtitle detected)")
+		} else {
+			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (dry run)")
+		}
+		baseName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName))
+		subtitlePath = filepath.Join(filepath.Dir(processingPath), baseName+".srt")
+		if err := fileops.WriteDummySubtitle(subtitlePath); err != nil {
+			s.moveToFailed(job, processingPath)
+			return s.handleError(job, "create dummy subtitle", err)
+		}
+		translatedPath = subtitlePath
+	} else {
+		// Step 3: Transcribe with whisper
+		logger.Infof("🎤 Step 3: Transcribing with Whisper (%s)...", cfg.Whisper.Model)
+		t = startStep("Transcription")
+
+		var err error
+		subtitlePath, err = whisper.Transcribe(ctx, processingPath)
+		if err != nil {
+			s.moveToFailed(job, processingPath)
+			return s.handleError(job, "transcription", err)
+		}
+		durations["transcription"] = t.done()
+
+		// Step 4: Translate with llm-subtrans
+		logger.Infof("🌐 Step 4: Translating subtitle → %s...", cfg.Translate.TargetLang)
+		t = startStep("Translation")
+
+		translatedPath, err = translator.Translate(ctx, subtitlePath)
+		if err != nil {
+			s.moveToFailed(job, processingPath)
+			return s.handleError(job, "translation", err)
+		}
+		durations["translation"] = t.done()
 	}
 	job.SubtitlePath = subtitlePath
-	durations["transcription"] = t.done()
-
-	// Step 4: Translate with llm-subtrans
-	logger.Infof("🌐 Step 4: Translating subtitle → %s...", s.cfg.Translate.TargetLang)
-	t = startStep("Translation")
-
-	translatedPath, err := s.translator.Translate(ctx, subtitlePath)
-	if err != nil {
-		s.moveToFailed(job, processingPath)
-		return s.handleError(job, "translation", err)
-	}
 	job.TranslatedPath = translatedPath
-	durations["translation"] = t.done()
 
-	// Step 5: Move video to finished folder
-	finishedVideoPath := filepath.Join(s.folders.Finished, job.FileName)
-	logger.Infof("📦 Step 5: Moving video to finished...")
-	t = startStep("Move to finished")
+	// Step 5: Move translated subtitle to subtitles folder (skip if no real subtitle)
+	if skipSubtitle {
+		logger.Infof("⏭️  Step 5: Skipping subtitle move")
+		// Clean up dummy subtitle
+		_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
+	} else {
+		// Use cleaned video name as subtitle name (removes .zh suffix)
+		cleanSubName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName)) + ".srt"
+		finalSubPath := filepath.Join(s.folders.Subtitles, cleanSubName)
+		logger.Infof("📦 Step 5: Moving translated subtitle to subtitles folder...")
+		t = startStep("Move subtitle")
 
-	if err := fileops.Move(processingPath, finishedVideoPath); err != nil {
-		return s.handleError(job, "move video to finished", err)
+		if err := fileops.Move(translatedPath, finalSubPath); err != nil {
+			return s.handleError(job, "move subtitle", err)
+		}
+		durations["move_subtitle"] = t.done()
+
+		// Clean up original (untranslated) subtitle - don't move, just delete
+		if subtitlePath != translatedPath && fileops.Exists(subtitlePath) {
+			_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
+		}
 	}
-	durations["move_to_finished"] = t.done()
 
-	// Step 6: Move translated subtitle to subtitles folder
-	translatedSubName := filepath.Base(translatedPath)
-	finalSubPath := filepath.Join(s.folders.Subtitles, translatedSubName)
-	logger.Infof("📦 Step 6: Moving subtitle to subtitles folder...")
-	t = startStep("Move subtitle")
+	// Step 6: Move video to scraping folder (another program handles from here)
+	scrapingPath := filepath.Join(s.folders.Scraping, job.FileName)
+	logger.Infof("📦 Step 6: Moving video to scraping...")
+	t = startStep("Move to scraping")
 
-	if err := fileops.Move(translatedPath, finalSubPath); err != nil {
-		return s.handleError(job, "move subtitle", err)
+	if err := fileops.Move(processingPath, scrapingPath); err != nil {
+		return s.handleError(job, "move video to scraping", err)
 	}
-	durations["move_subtitle"] = t.done()
-
-	// Also move the original (untranslated) subtitle if it exists
-	if subtitlePath != translatedPath && fileops.Exists(subtitlePath) {
-		origSubName := filepath.Base(subtitlePath)
-		origFinalPath := filepath.Join(s.folders.Subtitles, origSubName)
-		_ = fileops.Move(subtitlePath, origFinalPath) //nolint:errcheck // Optional, best-effort move
-	}
+	durations["move_to_scraping"] = t.done()
 
 	// Step 7: Send success notification
 	logger.Infof("🔔 Step 7: Sending notification...")
@@ -170,9 +207,11 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	logger.Infof("✅ Job completed: %s", job.FileName)
 	logger.Infof("⏱️  Total time: %s", formatDuration(totalDuration))
-	logger.Infof("   Transcription: %s | Translation: %s",
-		formatDuration(durations["transcription"]),
-		formatDuration(durations["translation"]))
+	if !skipSubtitle {
+		logger.Infof("   Transcription: %s | Translation: %s",
+			formatDuration(durations["transcription"]),
+			formatDuration(durations["translation"]))
+	}
 	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	return nil

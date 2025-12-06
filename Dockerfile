@@ -28,26 +28,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     tzdata \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install faster-whisper (CPU version - much faster than whisper.cpp)
-# tqdm for download progress bars
-RUN pip install --no-cache-dir faster-whisper tqdm
-
-# Disable HF XET protocol to get proper download progress
-ENV HF_HUB_DISABLE_XET=1
-
-# Clone and install llm-subtrans
+# Clone VideoCaptioner (use its core modules for subtitle processing and translation)
+# Install faster-whisper and other dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends git && \
-    git clone https://github.com/machinewrapped/llm-subtrans.git /app/llm-subtrans --depth 1 && \
-    cd /app/llm-subtrans && pip install --no-cache-dir -e ".[openai,gemini,claude]" && \
+    git clone https://github.com/WEIFENG2333/VideoCaptioner.git /app/videocaptioner --depth 1 && \
+    pip install --no-cache-dir \
+        faster-whisper \
+        requests \
+        openai \
+        json-repair \
+        diskcache \
+        langdetect \
+        tenacity \
+        pydub \
+        GPUtil && \
     apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
-# Setup instructions directory (llm-subtrans expects /app/instructions/instructions.txt)
-RUN ln -s /app/llm-subtrans/instructions /app/instructions
+# Add VideoCaptioner to Python path
+ENV PYTHONPATH="/app/videocaptioner"
 
-# Copy transcription script
+# Copy scripts
 COPY scripts/transcribe.py /app/scripts/transcribe.py
+COPY scripts/subtitle_processor.py /app/scripts/subtitle_processor.py
+COPY scripts/translate.py /app/scripts/translate.py
 
 # Copy Go binary
 COPY --from=go-builder /app/fusionn-muse .
@@ -57,6 +63,5 @@ RUN mkdir -p /data/input /data/staging /data/processing /data/finished /data/sub
 
 ENV ENV=production
 ENV CONFIG_PATH=/app/config/config.yaml
-
 
 CMD ["./fusionn-muse"]
