@@ -21,30 +21,20 @@ import tempfile
 from pathlib import Path
 from typing import List, NamedTuple
 
-from faster_whisper import WhisperModel
-
 # VideoCaptioner's video2audio utility
 from app.core.utils.video_utils import video2audio
+from faster_whisper import WhisperModel
 
 # Supported audio formats
 SUPPORTED_AUDIO_FORMATS = {"flac", "m4a", "mp3", "wav", "ogg"}
 # Video formats that need audio extraction
 VIDEO_FORMATS = {"mp4", "mkv", "avi", "mov", "webm", "wmv", "flv", "ts", "m2ts"}
 
-# Hallucination keywords to filter (common ASR artifacts)
+# Hallucination keywords to filter (match VideoCaptioner's list exactly)
+# Keep this minimal to avoid removing valid speech
 HALLUCINATION_KEYWORDS = [
-    "请不吝点赞",
-    "订阅 转发",
-    "打赏支持",
-    "感谢观看",
-    "thanks for watching",
-    "subscribe",
-    "like and subscribe",
-    "don't forget to subscribe",
-    "please subscribe",
-    "字幕由",
-    "字幕制作",
-    "subtitles by",
+    "请不吝点赞 订阅 转发",
+    "打赏支持明镜",
 ]
 
 # Music/sound effect tag patterns (to filter out)
@@ -53,6 +43,7 @@ MUSIC_TAG_PATTERN = re.compile(r"^[\[【（\(♪♫🎵]")
 
 class Segment(NamedTuple):
     """Processed segment with timing."""
+
     start: float
     end: float
     text: str
@@ -87,22 +78,22 @@ def filter_segments(segments: List[Segment]) -> List[Segment]:
 
 def optimize_timing(segments: List[Segment], threshold_ms: int = 1000) -> List[Segment]:
     """Optimize subtitle timing by adjusting adjacent segment boundaries.
-    
+
     If gap between adjacent segments is below threshold, adjust the boundary
     to 3/4 point between them (reduces flicker).
     """
     if len(segments) < 2:
         return segments
-    
+
     optimized = []
     for i, seg in enumerate(segments):
         if i == 0:
             optimized.append(seg)
             continue
-        
+
         prev = optimized[-1]
         gap_ms = (seg.start - prev.end) * 1000
-        
+
         if 0 < gap_ms < threshold_ms:
             # Adjust boundary to 3/4 point
             mid_point = prev.end + (seg.start - prev.end) * 0.75
@@ -112,7 +103,7 @@ def optimize_timing(segments: List[Segment], threshold_ms: int = 1000) -> List[S
             optimized.append(seg)
         else:
             optimized.append(seg)
-    
+
     return optimized
 
 
@@ -134,13 +125,17 @@ def write_srt(segments: List[Segment], output_path: str, word_level: bool = Fals
                 # Word-level timestamps
                 for word in segment.words:
                     f.write(f"{idx}\n")
-                    f.write(f"{format_timestamp(word.start)} --> {format_timestamp(word.end)}\n")
+                    f.write(
+                        f"{format_timestamp(word.start)} --> {format_timestamp(word.end)}\n"
+                    )
                     f.write(f"{word.word.strip()}\n\n")
                     idx += 1
             else:
                 # Segment-level timestamps
                 f.write(f"{idx}\n")
-                f.write(f"{format_timestamp(segment.start)} --> {format_timestamp(segment.end)}\n")
+                f.write(
+                    f"{format_timestamp(segment.start)} --> {format_timestamp(segment.end)}\n"
+                )
                 f.write(f"{segment.text.strip()}\n\n")
                 idx += 1
     return idx - 1
@@ -156,7 +151,7 @@ def transcribe(
     device: str = "cuda",
     compute_type: str = "auto",
     vad_filter: bool = True,
-    vad_threshold: float = 0.5,
+    vad_threshold: float = 0.4,  # Match VideoCaptioner default
 ) -> int:
     """Transcribe audio/video file to SRT.
 
@@ -176,7 +171,10 @@ def transcribe(
         Number of subtitle segments
     """
     print(f"Transcribing: {os.path.basename(input_path)}", flush=True)
-    print(f"Model: {model_name}, Language: {language or 'auto'}, Device: {device}", flush=True)
+    print(
+        f"Model: {model_name}, Language: {language or 'auto'}, Device: {device}",
+        flush=True,
+    )
 
     # Check if we need to extract audio from video
     ext = Path(input_path).suffix.lower().lstrip(".")
@@ -194,7 +192,9 @@ def transcribe(
 
         audio_path = temp_audio.name
     elif ext not in SUPPORTED_AUDIO_FORMATS:
-        raise ValueError(f"Unsupported format: {ext}. Supported: {SUPPORTED_AUDIO_FORMATS | VIDEO_FORMATS}")
+        raise ValueError(
+            f"Unsupported format: {ext}. Supported: {SUPPORTED_AUDIO_FORMATS | VIDEO_FORMATS}"
+        )
 
     try:
         # Determine compute type based on device
@@ -205,7 +205,7 @@ def transcribe(
                 compute_type = "int8"
 
         print(f"Loading model (compute_type={compute_type})...", flush=True)
-        
+
         # Load model
         model = WhisperModel(
             model_name,
@@ -217,16 +217,27 @@ def transcribe(
         print("Transcribing...", flush=True)
 
         # Build transcribe options
+        # Use settings similar to faster-whisper-xxl defaults for consistency
         transcribe_opts = {
             "word_timestamps": word_timestamps,
             "vad_filter": vad_filter,
+            # Transcription quality parameters
+            "beam_size": 5,
+            "best_of": 5,
+            "patience": 1.0,
+            "length_penalty": 1.0,
+            "temperature": 0.0,  # Greedy decoding for consistency
+            "compression_ratio_threshold": 2.4,
+            "log_prob_threshold": -1.0,
+            "no_speech_threshold": 0.6,
+            "condition_on_previous_text": True,
         }
 
         if vad_filter:
+            # Only set threshold, let library use defaults for other params
+            # Don't set min_speech_duration_ms/min_silence_duration_ms as they may cut speech
             transcribe_opts["vad_parameters"] = {
                 "threshold": vad_threshold,
-                "min_speech_duration_ms": 250,
-                "min_silence_duration_ms": 100,
             }
 
         if language and language != "auto":
@@ -242,14 +253,19 @@ def transcribe(
         processed_segments = []
         for seg in segments:
             words = list(seg.words) if word_timestamps and seg.words else None
-            processed_segments.append(Segment(
-                start=seg.start,
-                end=seg.end,
-                text=seg.text,
-                words=words,
-            ))
-        
-        print(f"Detected language: {info.language} (prob: {info.language_probability:.2f})", flush=True)
+            processed_segments.append(
+                Segment(
+                    start=seg.start,
+                    end=seg.end,
+                    text=seg.text,
+                    words=words,
+                )
+            )
+
+        print(
+            f"Detected language: {info.language} (prob: {info.language_probability:.2f})",
+            flush=True,
+        )
         print(f"Raw segments: {len(processed_segments)}", flush=True)
 
         # Filter hallucinations and music tags
@@ -261,9 +277,14 @@ def transcribe(
             processed_segments = optimize_timing(processed_segments)
 
         # Write to SRT
-        segment_count = write_srt(processed_segments, output_path, word_level=word_timestamps)
+        segment_count = write_srt(
+            processed_segments, output_path, word_level=word_timestamps
+        )
 
-        print(f"Transcription complete: {segment_count} subtitles written to {os.path.basename(output_path)}", flush=True)
+        print(
+            f"Transcription complete: {segment_count} subtitles written to {os.path.basename(output_path)}",
+            flush=True,
+        )
         return segment_count
 
     finally:
@@ -279,38 +300,53 @@ def main():
     parser.add_argument("input", help="Input video/audio file")
     parser.add_argument("output", help="Output SRT file")
     parser.add_argument(
-        "--model", "-m", default="large-v2",
+        "--model",
+        "-m",
+        default="large-v2",
         help="Whisper model (tiny, base, small, medium, large-v2, large-v3, large-v3-turbo)",
     )
     parser.add_argument(
-        "--language", "-l", default=None,
+        "--language",
+        "-l",
+        default=None,
         help="Source language code (zh, ja, ko, en, etc.). Auto-detect if not specified.",
     )
     parser.add_argument(
-        "--prompt", "-p", default=None,
+        "--prompt",
+        "-p",
+        default=None,
         help="Initial prompt for context (e.g., topic, proper nouns)",
     )
     parser.add_argument(
-        "--word-timestamps", "-w", action="store_true",
+        "--word-timestamps",
+        "-w",
+        action="store_true",
         help="Output word-level timestamps (for downstream sentence splitting)",
     )
     parser.add_argument(
-        "--device", "-d", default="auto",
+        "--device",
+        "-d",
+        default="auto",
         choices=["cuda", "cpu", "auto"],
         help="Device for inference (default: auto)",
     )
     parser.add_argument(
-        "--compute-type", "-c", default="auto",
+        "--compute-type",
+        "-c",
+        default="auto",
         choices=["float16", "float32", "int8", "int8_float16", "auto"],
         help="Compute type (default: auto - float16 for CUDA, int8 for CPU)",
     )
     parser.add_argument(
-        "--no-vad", action="store_true",
+        "--no-vad",
+        action="store_true",
         help="Disable VAD filtering",
     )
     parser.add_argument(
-        "--vad-threshold", type=float, default=0.5,
-        help="VAD threshold 0.0-1.0 (default: 0.5)",
+        "--vad-threshold",
+        type=float,
+        default=0.4,
+        help="VAD threshold 0.0-1.0 (default: 0.4, matches VideoCaptioner)",
     )
 
     args = parser.parse_args()
@@ -337,6 +373,7 @@ def main():
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

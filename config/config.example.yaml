@@ -45,7 +45,7 @@ whisper:
 
   # Voice Activity Detection (VAD) - filters out non-speech audio (uses Silero VAD)
   vad_filter: true
-  vad_threshold: 0.5 # 0.0-1.0, lower = more sensitive
+  vad_threshold: 0.4 # 0.0-1.0, lower = more sensitive (0.4 matches VideoCaptioner)
 
   # ─── Post-processing (like VideoCaptioner) ───
   # Uses the translate LLM settings below
@@ -114,11 +114,13 @@ translate:
   # LLM translates, then self-critiques and improves the translation
   use_reflect: false
 
-  # Number of parallel translation threads (default: 4)
-  threads: 4
+  # Number of parallel translation threads (concurrent API calls)
+  # Lower this if you hit rate limits!
+  # Recommended: 1-2 for SiliconCloud/budget providers, 4 for OpenAI
+  threads: 2
 
-  # Number of subtitles per batch (default: 10)
-  # Smaller batches = more API calls but better error recovery
+  # Number of subtitles per API call (larger = fewer total calls)
+  # Larger batches are more efficient but may hit token limits
   batch_size: 10
 
 # ─────────────────────────────────────────────────────────────────────────────
