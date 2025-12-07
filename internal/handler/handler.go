@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -107,20 +108,108 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 		return
 	}
 
-	// Queue the single valid video
 	jobID := uuid.New().String()[:8]
 	fileName := filepath.Base(videoPath)
 
+	// Detect if this is a "light" job (Chinese subtitle detected)
+	isLight := fileops.HasChineseSubtitle(fileName)
+
 	job := queue.NewJob(jobID, videoPath, fileName, req.Name, req.Category)
-	h.queue.Enqueue(job)
+	job.IsLight = isLight
 
-	logger.Infof("📥 Queued: %s (job: %s)", fileName, jobID)
+	if isLight {
+		// Light job: process immediately in background (no queue wait)
+		logger.Infof("⚡ Light job detected (Chinese subtitle): %s (job: %s)", fileName, jobID)
+		h.queue.RegisterLightJob(job) // Register for tracking, but don't queue
+		go h.processLightJob(job)
 
-	c.JSON(http.StatusAccepted, gin.H{
-		"message": "job queued",
-		"jobs":    []string{jobID},
-		"count":   1,
-	})
+		c.JSON(http.StatusAccepted, gin.H{
+			"message":  "light job started (skip transcribe/translate)",
+			"job":      jobID,
+			"job_type": "light",
+		})
+	} else {
+		// Heavy job: queue for sequential processing (transcribe + translate)
+		h.queue.Enqueue(job)
+		logger.Infof("📥 Heavy job queued: %s (job: %s)", fileName, jobID)
+
+		c.JSON(http.StatusAccepted, gin.H{
+			"message":  "heavy job queued (transcribe + translate)",
+			"job":      jobID,
+			"job_type": "heavy",
+		})
+	}
+}
+
+// processLightJob handles light jobs that bypass the queue.
+// Light jobs have Chinese subtitle detected, so they skip transcription/translation.
+func (h *Handler) processLightJob(job *queue.Job) {
+	startTime := time.Now()
+
+	// Update job status
+	job.Status = queue.StatusProcessing
+	job.StartedAt = startTime
+
+	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	logger.Infof("⚡ Light job started: %s", job.FileName)
+	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	// Step 1: Stage file (hardlink/copy)
+	stagingPath := filepath.Join(h.folders.Staging, job.FileName)
+	logger.Infof("📥 Step 1: Staging file...")
+
+	if err := fileops.HardlinkOrCopy(job.SourcePath, stagingPath); err != nil {
+		h.handleLightJobError(job, "staging", err)
+		return
+	}
+	job.StagingPath = stagingPath
+
+	// Step 2: Clean filename
+	cleanedName := fileops.CleanVideoFilename(job.FileName)
+	if cleanedName != job.FileName {
+		logger.Infof("📝 Cleaned filename: %s → %s", job.FileName, cleanedName)
+		job.FileName = cleanedName
+	}
+
+	// Step 3: Move directly to scraping (skip processing folder, no transcribe/translate)
+	scrapingPath := filepath.Join(h.folders.Scraping, job.FileName)
+	logger.Infof("📦 Step 2: Moving to scraping (skip transcribe/translate)...")
+
+	if err := fileops.Move(stagingPath, scrapingPath); err != nil {
+		h.handleLightJobError(job, "move to scraping", err)
+		return
+	}
+
+	// Mark completed
+	job.Status = queue.StatusCompleted
+	job.CompletedAt = time.Now()
+	h.queue.MarkLightJobCompleted()
+
+	elapsed := time.Since(startTime)
+	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	logger.Infof("✅ Light job completed: %s", job.FileName)
+	logger.Infof("⏱️  Total time: %v", elapsed)
+	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+}
+
+// handleLightJobError handles errors during light job processing.
+func (h *Handler) handleLightJobError(job *queue.Job, step string, err error) {
+	logger.Errorf("❌ Light job %s failed at %s: %v", job.ID, step, err)
+
+	job.Status = queue.StatusFailed
+	job.Error = fmt.Sprintf("%s: %v", step, err)
+	job.CompletedAt = time.Now()
+	h.queue.MarkLightJobFailed()
+
+	// Try to move to failed folder if staging path exists
+	if job.StagingPath != "" && fileops.Exists(job.StagingPath) {
+		failedPath := filepath.Join(h.folders.Failed, job.FileName)
+		if moveErr := fileops.Move(job.StagingPath, failedPath); moveErr != nil {
+			logger.Warnf("⚠️ Failed to move to failed folder: %v", moveErr)
+		} else {
+			logger.Infof("📁 Moved to failed folder: %s", failedPath)
+		}
+	}
 }
 
 // GetQueue returns all jobs in the queue.
