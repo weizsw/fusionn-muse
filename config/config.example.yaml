@@ -124,6 +124,25 @@ translate:
   batch_size: 10
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SUBTITLE (Output Settings)
+# ─────────────────────────────────────────────────────────────────────────────
+# Configure how subtitle files are named for media server compatibility.
+subtitle:
+  # Language suffix for generated subtitle files
+  # Media servers (Emby, Jellyfin, Plex) use this to identify subtitle languages
+  #
+  # Examples:
+  #   "zh-CN"    → movie.zh-CN.srt (Simplified Chinese, ISO 639-1)
+  #   "zh-TW"    → movie.zh-TW.srt (Traditional Chinese)
+  #   "chi"      → movie.chi.srt (ISO 639-2)
+  #   "chs"      → movie.chs.srt (Common alternative)
+  #   "en"       → movie.en.srt (English)
+  #   ""         → movie.srt (no suffix, backwards compatible)
+  #
+  # Leave empty for no suffix (default behavior)
+  language_suffix: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # QUEUE
 # ─────────────────────────────────────────────────────────────────────────────
 queue:

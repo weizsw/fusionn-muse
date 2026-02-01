@@ -18,6 +18,7 @@ type Config struct {
 	Server    ServerConfig    `mapstructure:"server"`
 	Whisper   WhisperConfig   `mapstructure:"whisper"`
 	Translate TranslateConfig `mapstructure:"translate"`
+	Subtitle  SubtitleConfig  `mapstructure:"subtitle"`
 	Apprise   AppriseConfig   `mapstructure:"apprise"`
 	Queue     QueueConfig     `mapstructure:"queue"`
 
@@ -113,6 +114,13 @@ type AppriseConfig struct {
 type QueueConfig struct {
 	MaxRetries   int `mapstructure:"max_retries"`    // Max retries per job
 	RetryDelayMs int `mapstructure:"retry_delay_ms"` // Delay between retries
+}
+
+type SubtitleConfig struct {
+	// LanguageSuffix: suffix added to subtitle filenames for media server language detection
+	// Examples: "zh-CN", "chi", "chs", "zh-Hans", "en"
+	// Leave empty for no suffix (e.g., "movie.srt" instead of "movie.zh-CN.srt")
+	LanguageSuffix string `mapstructure:"language_suffix"`
 }
 
 // ChangeCallback is called when config changes.
