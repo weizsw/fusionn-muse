@@ -28,6 +28,9 @@ type Job struct {
 	StartedAt   time.Time `json:"started_at,omitempty"`
 	CompletedAt time.Time `json:"completed_at,omitempty"`
 
+	// IsLight indicates this job has Chinese subtitle detected and can skip transcription
+	IsLight bool `json:"is_light"`
+
 	// Paths set during processing
 	StagingPath    string `json:"staging_path,omitempty"`
 	ProcessingPath string `json:"processing_path,omitempty"`

@@ -25,7 +25,6 @@ vendor/
 .vscode/
 *.swp
 *.swo
-.cursor/
 
 # OS
 .DS_Store
@@ -38,12 +37,7 @@ config/*.local.yaml
 
 # Data directory (tokens, state, etc)
 data/
-.cursor/
 
 # Build
 dist/
 bin/
-
-# OpenSpec
-openspec/
-AGENTS.md

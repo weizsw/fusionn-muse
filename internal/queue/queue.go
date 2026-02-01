@@ -24,6 +24,10 @@ type Queue struct {
 	maxRetries int
 	retryDelay time.Duration
 
+	// Light job counters (light jobs bypass the queue but we track them)
+	lightCompleted int
+	lightFailed    int
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -115,28 +119,62 @@ func (q *Queue) GetQueueStats() map[string]int {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 
-	stats := map[string]int{
-		"total":      len(q.jobs),
-		"pending":    0,
-		"processing": 0,
-		"completed":  0,
-		"failed":     0,
-	}
+	// Count heavy jobs (queued jobs)
+	heavyPending := 0
+	heavyProcessing := 0
+	heavyCompleted := 0
+	heavyFailed := 0
 
 	for _, job := range q.jobs {
+		if job.IsLight {
+			continue // Light jobs tracked separately
+		}
 		switch job.Status {
 		case StatusPending:
-			stats["pending"]++
+			heavyPending++
 		case StatusProcessing:
-			stats["processing"]++
+			heavyProcessing++
 		case StatusCompleted:
-			stats["completed"]++
+			heavyCompleted++
 		case StatusFailed:
-			stats["failed"]++
+			heavyFailed++
 		}
 	}
 
-	return stats
+	return map[string]int{
+		"total": len(q.jobs),
+		// Heavy jobs (transcribe + translate)
+		"heavy_pending":    heavyPending,
+		"heavy_processing": heavyProcessing,
+		"heavy_completed":  heavyCompleted,
+		"heavy_failed":     heavyFailed,
+		// Light jobs (skip transcribe/translate)
+		"light_completed": q.lightCompleted,
+		"light_failed":    q.lightFailed,
+	}
+}
+
+// RegisterLightJob registers a light job that bypassed the queue.
+// This allows tracking light jobs in stats without adding them to the queue.
+func (q *Queue) RegisterLightJob(job *Job) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.jobs = append(q.jobs, job)
+	q.jobMap[job.ID] = job
+}
+
+// MarkLightJobCompleted increments the light job completed counter.
+func (q *Queue) MarkLightJobCompleted() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.lightCompleted++
+}
+
+// MarkLightJobFailed increments the light job failed counter.
+func (q *Queue) MarkLightJobFailed() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.lightFailed++
 }
 
 // worker processes jobs sequentially.
