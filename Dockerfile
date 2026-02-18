@@ -22,17 +22,18 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install runtime dependencies
+# Install runtime dependencies (including fonts for subtitle rendering)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     ca-certificates \
     tzdata \
     libgomp1 \
+    fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone VideoCaptioner (use its core modules for subtitle processing and translation)
-# Install faster-whisper and other dependencies
+# Clone VideoCaptioner and install Python dependencies
+# Based on VideoCaptioner pyproject.toml (excluding GUI packages like PyQt5)
 RUN apt-get update && apt-get install -y --no-install-recommends git && \
     git clone https://github.com/WEIFENG2333/VideoCaptioner.git /app/videocaptioner --depth 1 && \
     pip install --no-cache-dir \
@@ -44,7 +45,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
         langdetect \
         tenacity \
         pydub \
-        GPUtil && \
+        GPUtil \
+        Pillow \
+        fonttools && \
     apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 # Add VideoCaptioner to Python path
