@@ -18,6 +18,9 @@ func TestExtractVideoCode(t *testing.T) {
 		{name: "hyphenated hd technical prefix rejected", in: "HD-108.mp4", want: "", ok: false},
 		{name: "hyphenated fhd technical prefix rejected", in: "FHD-1080.mp4", want: "", ok: false},
 		{name: "hyphenated avc technical prefix rejected", in: "AVC-123.mp4", want: "", ok: false},
+		{name: "scans past hyphenated technical prefix", in: "FHD-1080.SONE-269.mp4", want: "SONE-269", ok: true},
+		{name: "scans past compact technical prefix", in: "movie.FHD1080.SONE269.mp4", want: "SONE-269", ok: true},
+		{name: "glued prefix hyphenated", in: "xxxSONE-269.mp4", want: "SONE-269", ok: true},
 		{name: "no code", in: "sample-video.mp4", want: "", ok: false},
 	}
 
@@ -35,5 +38,12 @@ func TestCleanVideoFilenameUsesCompactCode(t *testing.T) {
 	got := CleanVideoFilename("ssni00083hhb.mp4")
 	if got != "SSNI-083.mp4" {
 		t.Fatalf("CleanVideoFilename compact = %q, want SSNI-083.mp4", got)
+	}
+}
+
+func TestCleanVideoFilenameUsesGluedHyphenatedCode(t *testing.T) {
+	got := CleanVideoFilename("xxxSONE-269.mp4")
+	if got != "SONE-269.mp4" {
+		t.Fatalf("CleanVideoFilename glued hyphenated = %q, want SONE-269.mp4", got)
 	}
 }
