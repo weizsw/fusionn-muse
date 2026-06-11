@@ -26,10 +26,7 @@ func (ExecCommandRunner) Run(ctx context.Context, name string, args ...string) e
 }
 
 func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error) {
-	code, ok := ExtractVideoCode(filepath.Base(parts[0]))
-	if !ok {
-		code, ok = fallbackCode(req.Path, req.TorrentName)
-	}
+	code, ok := mediaCodeFor(parts[0], req.Path, req.TorrentName)
 	if !ok {
 		return nil, fmt.Errorf("no code found for multipart video")
 	}
@@ -50,7 +47,7 @@ func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error
 }
 
 func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) {
-	code, ok := imageCodeFor(imagePath, imageFallbackFolder(req.Path), req.TorrentName)
+	code, ok := mediaCodeFor(imagePath, imageFallbackFolder(req.Path), req.TorrentName)
 	if !ok {
 		return nil, fmt.Errorf("no code found in image filename, folder, or torrent name")
 	}
