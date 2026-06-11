@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	hyphenatedCodePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])([a-z]{2,5})-(\d{3,5})([^a-z0-9]|$)`)
-	compactCodePattern    = regexp.MustCompile(`(?i)(^|[^a-z0-9])([a-z]{2,5})0*(\d{3,5})([a-z0-9]*)([^a-z0-9]|$)`)
+	hyphenatedCodePattern = regexp.MustCompile(`(?i)([a-z]{2,})-(\d{3,5})`)
+	compactCodePattern    = regexp.MustCompile(`(?i)([a-z]{2,5})0*(\d{3,5})([a-z0-9]*)`)
 	technicalPrefixes     = map[string]bool{
 		"HD": true, "FHD": true, "UHD": true, "SD": true,
 		"AVC": true, "HEVC": true, "XVID": true, "X264": true, "X265": true,
@@ -18,14 +18,37 @@ var (
 
 // ExtractVideoCode returns a normalized code like SONE-269 from hyphenated or compact names.
 func ExtractVideoCode(name string) (string, bool) {
-	upper := strings.ToUpper(name)
-	if match := hyphenatedCodePattern.FindStringSubmatch(upper); match != nil {
-		return normalizeVideoCode(match[2], match[3])
+	for _, match := range hyphenatedCodePattern.FindAllStringSubmatch(name, -1) {
+		if code, ok := normalizeVideoCode(hyphenatedPrefix(match[1]), match[2]); ok {
+			return code, true
+		}
 	}
-	if match := compactCodePattern.FindStringSubmatch(upper); match != nil {
-		return normalizeVideoCode(match[2], match[3])
+	for _, match := range compactCodePattern.FindAllStringSubmatch(name, -1) {
+		if code, ok := normalizeVideoCode(match[1], match[2]); ok {
+			return code, true
+		}
 	}
 	return "", false
+}
+
+func hyphenatedPrefix(prefix string) string {
+	if len(prefix) <= 5 {
+		return prefix
+	}
+
+	start := len(prefix)
+	for start > 0 {
+		ch := prefix[start-1]
+		if ch < 'A' || ch > 'Z' {
+			break
+		}
+		start--
+	}
+	if trailingLen := len(prefix) - start; trailingLen >= 2 && trailingLen <= 5 {
+		return prefix[start:]
+	}
+
+	return prefix[len(prefix)-5:]
 }
 
 func normalizeVideoCode(prefix, digits string) (string, bool) {
