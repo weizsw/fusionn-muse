@@ -295,7 +295,32 @@ func imageCodeFor(imagePath, folder, torrentName string) (string, bool) {
 	if code, ok := ExtractVideoCode(filepath.Base(imagePath)); ok {
 		return code, true
 	}
-	return fallbackCode(folder, torrentName)
+	for _, dir := range imageCodeFolders(imagePath, folder) {
+		if code, ok := ExtractVideoCode(filepath.Base(dir)); ok {
+			return code, true
+		}
+	}
+	if code, ok := ExtractVideoCode(torrentName); ok {
+		return code, true
+	}
+	return "", false
+}
+
+func imageCodeFolders(imagePath, requestPath string) []string {
+	imageDir := filepath.Clean(filepath.Dir(imagePath))
+	requestDir := filepath.Clean(imageFallbackFolder(requestPath))
+	var dirs []string
+	for dir := imageDir; ; dir = filepath.Dir(dir) {
+		dirs = append(dirs, dir)
+		if dir == requestDir {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+	return dirs
 }
 
 func detectPartOrder(name string) (int, bool) {

@@ -56,6 +56,9 @@ func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) 
 	}
 
 	extractDir := filepath.Join(req.StagingDir, code+"-image")
+	if imageExtractionOverlapsSource(extractDir, imagePath) || imageExtractionOverlapsSource(extractDir, req.Path) {
+		return nil, fmt.Errorf("image extraction dir overlaps source path: %s", extractDir)
+	}
 	if err := os.RemoveAll(extractDir); err != nil {
 		return nil, fmt.Errorf("clear image extraction dir: %w", err)
 	}
@@ -94,6 +97,26 @@ func imageFallbackFolder(path string) string {
 		return filepath.Dir(path)
 	}
 	return path
+}
+
+func imageExtractionOverlapsSource(extractDir, sourcePath string) bool {
+	extractAbs, err := filepath.Abs(extractDir)
+	if err != nil {
+		extractAbs = filepath.Clean(extractDir)
+	}
+	sourceAbs, err := filepath.Abs(sourcePath)
+	if err != nil {
+		sourceAbs = filepath.Clean(sourcePath)
+	}
+	return pathContains(extractAbs, sourceAbs) || pathContains(sourceAbs, extractAbs)
+}
+
+func pathContains(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
 
 func concatVideos(ctx context.Context, runner CommandRunner, parts []string, out string) (string, error) {
