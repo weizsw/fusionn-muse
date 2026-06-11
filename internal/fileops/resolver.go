@@ -2,6 +2,7 @@ package fileops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,6 +52,9 @@ type codeMatch struct {
 	rank int
 }
 
+// ErrNoValidMedia marks expected no-op resolution failures.
+var ErrNoValidMedia = errors.New("no valid media")
+
 var imageExts = map[string]bool{
 	".iso": true,
 	".nrg": true,
@@ -93,7 +97,7 @@ func ResolveMedia(req ResolveRequest) (*ResolvedMedia, error) {
 		if IsImageFile(req.Path) {
 			return prepareImage(req, req.Path)
 		}
-		return nil, fmt.Errorf("unsupported media path: %s", req.Path)
+		return nil, noValidMediaf("unsupported media path: %s", req.Path)
 	}
 
 	return resolveFolder(req)
@@ -102,7 +106,7 @@ func ResolveMedia(req ResolveRequest) (*ResolvedMedia, error) {
 func resolveSingleVideo(path, torrentName string, requireCode bool) (*ResolvedMedia, error) {
 	code, ok := bestCodeFor(path, torrentName)
 	if requireCode && !ok {
-		return nil, fmt.Errorf("no code found in filename, folder, or torrent name")
+		return nil, noValidMediaf("no code found in filename, folder, or torrent name")
 	}
 
 	return resolveSelectedVideo(path, code), nil
@@ -141,14 +145,18 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 		return resolveSelectedVideo(best.Path, best.Code), nil
 	}
 	if hasIncompleteMultipartSet(videos, req.Path, req.TorrentName) {
-		return nil, fmt.Errorf("incomplete multipart video set")
+		return nil, noValidMediaf("incomplete multipart video set")
 	}
 
 	if image := bestImageCandidate(images, req.Path, req.TorrentName); image != nil {
 		return prepareImage(req, image.Path)
 	}
 
-	return nil, fmt.Errorf("no valid video file found (need code pattern + size > %dMB)", MinVideoSize/(1024*1024))
+	return nil, noValidMediaf("no valid video file found (need code pattern + size > %dMB)", MinVideoSize/(1024*1024))
+}
+
+func noValidMediaf(format string, args ...interface{}) error {
+	return fmt.Errorf("%w: %s", ErrNoValidMedia, fmt.Sprintf(format, args...))
 }
 
 func findMediaCandidates(ctx context.Context, dir string) ([]mediaCandidate, []mediaCandidate, error) {
@@ -446,13 +454,13 @@ func selectExtractedMedia(ctx context.Context, dir string) ([]string, error) {
 		return parts, nil
 	}
 	if hasIncompleteMultipartSet(videos, dir, "") {
-		return nil, fmt.Errorf("incomplete multipart video set in extracted image")
+		return nil, noValidMediaf("incomplete multipart video set in extracted image")
 	}
 	if best := bestVideoCandidate(videos, dir, ""); best != nil {
 		return []string{best.Path}, nil
 	}
 
-	return nil, fmt.Errorf("no media found in extracted image")
+	return nil, noValidMediaf("no media found in extracted image")
 }
 
 func selectDVDTitleChain(dir string) []string {
@@ -524,12 +532,14 @@ func bestCodeFor(path, torrentName string) (string, bool) {
 	if code, ok := ExtractVideoCode(filepath.Base(path)); ok {
 		return code, true
 	}
-	return fallbackCode(filepath.Dir(path), torrentName)
-}
-
-func fallbackCode(folder, torrentName string) (string, bool) {
-	if code, ok := ExtractVideoCode(filepath.Base(folder)); ok {
-		return code, true
+	for dir := filepath.Clean(filepath.Dir(path)); ; dir = filepath.Dir(dir) {
+		if code, ok := ExtractVideoCode(filepath.Base(dir)); ok {
+			return code, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
 	}
 	if code, ok := ExtractVideoCode(torrentName); ok {
 		return code, true

@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -93,7 +95,7 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 		StagingDir:  h.folders.Staging,
 	})
 	if err != nil {
-		if fileops.Exists(req.Path) {
+		if errors.Is(err, fileops.ErrNoValidMedia) {
 			logger.Warnf("⚠️ %v in: %s", err, req.Path)
 			c.JSON(http.StatusOK, gin.H{
 				"message": "no valid video files found",
@@ -101,7 +103,12 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 			})
 			return
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "path does not exist"})
+		if errors.Is(err, os.ErrNotExist) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "path does not exist"})
+			return
+		}
+		logger.Errorf("❌ Failed to resolve media: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 

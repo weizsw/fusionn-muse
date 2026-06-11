@@ -58,6 +58,27 @@ func TestResolveMediaFallsBackToTorrentName(t *testing.T) {
 	}
 }
 
+func TestResolveMediaUsesAncestorCodeForDirectNestedVideo(t *testing.T) {
+	root := t.TempDir()
+	video := filepath.Join(root, "SSNI-083", "BDMV", "STREAM", "00001.m2ts")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        video,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if got.SourcePath != video {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, video)
+	}
+	if got.FileName != "SSNI-083.m2ts" {
+		t.Fatalf("FileName = %q, want SSNI-083.m2ts", got.FileName)
+	}
+}
+
 func TestResolveMediaReturnsCancelledContextError(t *testing.T) {
 	root := t.TempDir()
 	folder := filepath.Join(root, "SSNI-083")
@@ -89,6 +110,22 @@ func TestResolveMediaRejectsFolderWithoutCode(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("ResolveMedia returned nil error, want missing code error")
+	}
+}
+
+func TestResolveMediaClassifiesMissingCodeAsNoValidMedia(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "download")
+	mustMkdir(t, folder)
+	mustWriteSizedFile(t, filepath.Join(folder, "movie.mp4"), MinVideoSize+1)
+
+	_, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "no code here",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if !errors.Is(err, ErrNoValidMedia) {
+		t.Fatalf("ResolveMedia error = %v, want ErrNoValidMedia", err)
 	}
 }
 
@@ -248,6 +285,34 @@ func TestResolveMediaUsesParentCodeForDirectImage(t *testing.T) {
 	staging := filepath.Join(root, "staging")
 	runner := fakeImageRunner(t, func(outDir string) {
 		mustWriteSizedFile(t, filepath.Join(outDir, "BDMV", "STREAM", "00001.m2ts"), MinVideoSize+1)
+	})
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        image,
+		TorrentName: "fallback-name",
+		StagingDir:  staging,
+		Runner:      runner,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+
+	wantPath := filepath.Join(staging, "SSNI-083.mkv")
+	if got.SourcePath != wantPath {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, wantPath)
+	}
+	if got.Code != "SSNI-083" {
+		t.Fatalf("Code = %q, want SSNI-083", got.Code)
+	}
+}
+
+func TestResolveMediaUsesAncestorCodeForDirectNestedImage(t *testing.T) {
+	root := t.TempDir()
+	image := filepath.Join(root, "SSNI-083", "DVD", "disc.iso")
+	mustWriteSizedFile(t, image, 1024)
+	staging := filepath.Join(root, "staging")
+	runner := fakeImageRunner(t, func(outDir string) {
+		mustWriteSizedFile(t, filepath.Join(outDir, "feature.mp4"), MinVideoSize+1)
 	})
 
 	got, err := ResolveMedia(ResolveRequest{
@@ -646,6 +711,9 @@ func TestResolveMediaReturnsImageExtractionError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "image extraction failed") {
 		t.Fatalf("error = %q, want image extraction failed", err)
+	}
+	if errors.Is(err, ErrNoValidMedia) {
+		t.Fatalf("error = %v, want preparation failure not ErrNoValidMedia", err)
 	}
 }
 

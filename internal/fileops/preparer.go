@@ -28,7 +28,7 @@ func (ExecCommandRunner) Run(ctx context.Context, name string, args ...string) e
 func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error) {
 	code, ok := mediaCodeFor(parts[0], req.Path, req.TorrentName)
 	if !ok {
-		return nil, fmt.Errorf("no code found for multipart video")
+		return nil, noValidMediaf("no code found for multipart video")
 	}
 
 	out := filepath.Join(req.StagingDir, code+".mkv")
@@ -47,9 +47,9 @@ func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error
 }
 
 func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) {
-	code, ok := mediaCodeFor(imagePath, imageFallbackFolder(req.Path), req.TorrentName)
+	code, ok := imageCodeFor(req, imagePath)
 	if !ok {
-		return nil, fmt.Errorf("no code found in image filename, folder, or torrent name")
+		return nil, noValidMediaf("no code found in image filename, folder, or torrent name")
 	}
 
 	extractDir := imageExtractionDir(req.StagingDir, code)
@@ -89,6 +89,13 @@ func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) 
 		Code:               code,
 		HasChineseSubtitle: HasChineseSubtitle(filepath.Base(imagePath)) || anyChineseSubtitle(parts),
 	}, nil
+}
+
+func imageCodeFor(req ResolveRequest, imagePath string) (string, bool) {
+	if filepath.Clean(req.Path) == filepath.Clean(imagePath) {
+		return bestCodeFor(imagePath, req.TorrentName)
+	}
+	return mediaCodeFor(imagePath, imageFallbackFolder(req.Path), req.TorrentName)
 }
 
 func imageFallbackFolder(path string) string {
