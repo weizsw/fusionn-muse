@@ -522,7 +522,7 @@ func TestFindMultipartSetLetterOrder(t *testing.T) {
 	for _, name := range files {
 		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
 	}
-	videos, _, err := findMediaCandidates(root)
+	videos, _, err := findMediaCandidates(context.Background(), root)
 	if err != nil {
 		t.Fatalf("findMediaCandidates: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestFindMultipartSetNumericOrder(t *testing.T) {
 	for _, name := range files {
 		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
 	}
-	videos, _, err := findMediaCandidates(root)
+	videos, _, err := findMediaCandidates(context.Background(), root)
 	if err != nil {
 		t.Fatalf("findMediaCandidates: %v", err)
 	}
@@ -565,7 +565,7 @@ func TestFindMultipartSetRejectsDuplicateMarkers(t *testing.T) {
 	for _, name := range files {
 		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
 	}
-	videos, _, err := findMediaCandidates(root)
+	videos, _, err := findMediaCandidates(context.Background(), root)
 	if err != nil {
 		t.Fatalf("findMediaCandidates: %v", err)
 	}
@@ -589,35 +589,7 @@ Expected: fail because multipart helpers are missing.
 
 - [ ] **Step 3: Implement multipart helpers**
 
-Modify the direct image branch in `ResolveMedia` in `internal/fileops/resolver.go`:
-
-```go
-		if IsImageFile(req.Path) {
-			return prepareImage(req, req.Path)
-		}
-```
-
-Modify `resolveFolder` in `internal/fileops/resolver.go` to keep image candidates and use them after video fallback:
-
-```go
-	videos, images, err := findMediaCandidates(req.Path)
-	if err != nil {
-		return nil, err
-	}
-
-	if parts := findMultipartSet(videos, req.Path, req.TorrentName); len(parts) > 1 {
-		return prepareMultipart(req, parts)
-	}
-
-	if best := bestVideoCandidate(videos, req.Path, req.TorrentName); best != nil {
-		return resolveSingleVideo(best.Path, req.TorrentName, true)
-	}
-
-	if len(images) > 0 {
-		sort.Slice(images, func(i, j int) bool { return images[i].Size > images[j].Size })
-		return prepareImage(req, images[0].Path)
-	}
-```
+Do not integrate multipart preparation into `resolveFolder` in this task. Task 3 only adds ordered multipart detection helpers. Task 4 will add `prepareMultipart` and wire detection into the resolver.
 
 Add to `internal/fileops/resolver.go`:
 
