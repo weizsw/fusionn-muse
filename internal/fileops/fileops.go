@@ -125,7 +125,7 @@ func Remove(path string) error {
 
 // IsVideoFile checks if the file has a video extension.
 func IsVideoFile(path string) bool {
-	ext := filepath.Ext(path)
+	ext := strings.ToLower(filepath.Ext(path))
 	videoExts := map[string]bool{
 		".mkv":  true,
 		".mp4":  true,

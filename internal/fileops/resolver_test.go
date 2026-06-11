@@ -94,6 +94,28 @@ func TestResolveMediaUsesRootFolderCodeForNestedVideo(t *testing.T) {
 	}
 }
 
+func TestResolveMediaAcceptsUppercaseM2TS(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "SSNI-083")
+	video := filepath.Join(folder, "BDMV", "STREAM", "00001.M2TS")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if got.SourcePath != video {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, video)
+	}
+	if got.FileName != "SSNI-083.m2ts" {
+		t.Fatalf("FileName = %q, want SSNI-083.m2ts", got.FileName)
+	}
+}
+
 func TestResolveMediaDirectImageReturnsPlaceholderError(t *testing.T) {
 	root := t.TempDir()
 	image := filepath.Join(root, "SSNI-083.iso")
@@ -109,6 +131,28 @@ func TestResolveMediaDirectImageReturnsPlaceholderError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "image preparation not implemented") {
 		t.Fatalf("error = %q, want image preparation placeholder", err)
+	}
+}
+
+func TestIsImageFileRecognizesImageExtensions(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "disc.iso", want: true},
+		{path: "disc.nrg", want: true},
+		{path: "disc.img", want: true},
+		{path: "disc.mdf", want: true},
+		{path: "disc.bin", want: true},
+		{path: "disc.txt", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := IsImageFile(tt.path); got != tt.want {
+				t.Fatalf("IsImageFile(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
 	}
 }
 
