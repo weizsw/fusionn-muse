@@ -151,14 +151,17 @@ func (h *Handler) processLightJob(job *queue.Job) {
 	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	// Step 1: Stage file (hardlink/copy)
-	stagingPath := filepath.Join(h.folders.Staging, job.FileName)
-	logger.Infof("📥 Step 1: Staging file...")
+	stagingPath := job.StagingPath
+	if stagingPath == "" {
+		stagingPath = filepath.Join(h.folders.Staging, job.FileName)
+		logger.Infof("📥 Step 1: Staging file...")
 
-	if err := fileops.HardlinkOrCopy(job.SourcePath, stagingPath); err != nil {
-		h.handleLightJobError(job, "staging", err)
-		return
+		if err := fileops.HardlinkOrCopy(job.SourcePath, stagingPath); err != nil {
+			h.handleLightJobError(job, "staging", err)
+			return
+		}
+		job.StagingPath = stagingPath
 	}
-	job.StagingPath = stagingPath
 
 	// Step 2: Clean filename
 	cleanedName := fileops.CleanVideoFilename(job.FileName)
