@@ -22,6 +22,8 @@ func TestExtractVideoCode(t *testing.T) {
 		{name: "scans past compact technical prefix", in: "movie.FHD1080.SONE269.mp4", want: "SONE-269", ok: true},
 		{name: "glued prefix hyphenated", in: "xxxSONE-269.mp4", want: "SONE-269", ok: true},
 		{name: "lowercase glued prefix hyphenated", in: "xxxsone-269.mp4", want: "SONE-269", ok: true},
+		{name: "arbitrary glued prefix rejected", in: "abcSONE-269.mp4", want: "", ok: false},
+		{name: "resolution-like compact rejected", in: "movie1080p.mp4", want: "", ok: false},
 		{name: "no code", in: "sample-video.mp4", want: "", ok: false},
 	}
 

@@ -132,12 +132,12 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 	if len(parts) > 1 {
 		return prepareMultipart(req, parts)
 	}
-	if hasIncompleteMultipartSet(videos, req.Path, req.TorrentName) {
-		return nil, fmt.Errorf("incomplete multipart video set")
-	}
 
 	if best := bestVideoCandidate(videos, req.Path, req.TorrentName); best != nil {
 		return resolveSelectedVideo(best.Path, best.Code), nil
+	}
+	if hasIncompleteMultipartSet(videos, req.Path, req.TorrentName) {
+		return nil, fmt.Errorf("incomplete multipart video set")
 	}
 
 	if image := bestImageCandidate(images, req.Path, req.TorrentName); image != nil {
@@ -188,6 +188,9 @@ func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *me
 	var coded []mediaCandidate
 	bestRank := 0
 	for _, video := range videos {
+		if _, _, ok := detectPartInfo(video.Name); ok {
+			continue
+		}
 		if match, ok := mediaCodeMatchFor(video.Path, folder, torrentName); ok {
 			video.Code = match.code
 			if len(coded) == 0 || match.rank < bestRank {

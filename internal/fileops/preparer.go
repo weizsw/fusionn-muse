@@ -132,6 +132,9 @@ func concatVideos(ctx context.Context, runner CommandRunner, parts []string, out
 	if err := writeConcatList(listPath, parts); err != nil {
 		return "", err
 	}
+	defer func() {
+		_ = os.Remove(listPath)
+	}()
 
 	if err := runner.Run(ctx, "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", out); err != nil {
 		if removeErr := os.Remove(out); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
