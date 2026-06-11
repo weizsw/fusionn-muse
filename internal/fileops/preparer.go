@@ -84,7 +84,7 @@ func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) 
 		FileName:           filepath.Base(prepared),
 		StagingPath:        prepared,
 		Code:               code,
-		HasChineseSubtitle: HasChineseSubtitle(filepath.Base(imagePath)),
+		HasChineseSubtitle: HasChineseSubtitle(filepath.Base(imagePath)) || anyChineseSubtitle(parts),
 	}, nil
 }
 

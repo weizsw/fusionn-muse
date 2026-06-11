@@ -357,6 +357,28 @@ func TestResolveMediaSelectsPlainExtractedMediaFromImage(t *testing.T) {
 	}
 }
 
+func TestResolveMediaDetectsChineseSubtitleInExtractedMedia(t *testing.T) {
+	root := t.TempDir()
+	image := filepath.Join(root, "SSNI-083.iso")
+	mustWriteSizedFile(t, image, 1024)
+	runner := fakeImageRunner(t, func(outDir string) {
+		mustWriteSizedFile(t, filepath.Join(outDir, "feature-C.mp4"), MinVideoSize+1)
+	})
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        image,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      runner,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if !got.HasChineseSubtitle {
+		t.Fatal("HasChineseSubtitle = false, want true from extracted media name")
+	}
+}
+
 func TestResolveMediaClearsStaleImageExtractionDir(t *testing.T) {
 	root := t.TempDir()
 	image := filepath.Join(root, "SSNI-083.iso")
@@ -383,6 +405,50 @@ func TestResolveMediaClearsStaleImageExtractionDir(t *testing.T) {
 	wantInput := filepath.Join(staging, "SSNI-083-image", "feature.mp4")
 	if runner.calls[1].args[2] != wantInput {
 		t.Fatalf("remux input = %q, want current extracted media %q", runner.calls[1].args[2], wantInput)
+	}
+}
+
+func TestResolveMediaIgnoresTinyBluRayStreamFromImage(t *testing.T) {
+	root := t.TempDir()
+	image := filepath.Join(root, "SSNI-083.iso")
+	mustWriteSizedFile(t, image, 1024)
+	runner := fakeImageRunner(t, func(outDir string) {
+		mustWriteSizedFile(t, filepath.Join(outDir, "BDMV", "STREAM", "00001.m2ts"), MinVideoSize)
+	})
+
+	_, err := ResolveMedia(ResolveRequest{
+		Path:        image,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      runner,
+	})
+	if err == nil {
+		t.Fatal("ResolveMedia returned nil error, want no extracted media error")
+	}
+	if !strings.Contains(err.Error(), "no media found in extracted image") {
+		t.Fatalf("error = %q, want no extracted media error", err)
+	}
+}
+
+func TestResolveMediaIgnoresTinyDVDTitleChainFromImage(t *testing.T) {
+	root := t.TempDir()
+	image := filepath.Join(root, "SSNI-083.iso")
+	mustWriteSizedFile(t, image, 1024)
+	runner := fakeImageRunner(t, func(outDir string) {
+		mustWriteSizedFile(t, filepath.Join(outDir, "VIDEO_TS", "VTS_01_1.VOB"), MinVideoSize)
+	})
+
+	_, err := ResolveMedia(ResolveRequest{
+		Path:        image,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      runner,
+	})
+	if err == nil {
+		t.Fatal("ResolveMedia returned nil error, want no extracted media error")
+	}
+	if !strings.Contains(err.Error(), "no media found in extracted image") {
+		t.Fatalf("error = %q, want no extracted media error", err)
 	}
 }
 

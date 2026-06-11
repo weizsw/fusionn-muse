@@ -411,6 +411,9 @@ func selectDVDTitleChain(dir string) []string {
 		}
 	}
 
+	if bestSize <= MinVideoSize {
+		return nil
+	}
 	return best
 }
 
@@ -421,7 +424,7 @@ func selectLargestByGlob(patterns ...string) string {
 		matches, _ := filepath.Glob(pattern)
 		for _, path := range matches {
 			info, err := os.Stat(path)
-			if err == nil && info.Size() > bestSize {
+			if err == nil && info.Size() > MinVideoSize && info.Size() > bestSize {
 				best = path
 				bestSize = info.Size()
 			}
