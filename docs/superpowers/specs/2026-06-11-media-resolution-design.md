@@ -9,7 +9,7 @@ Success criteria:
 - A folder containing `ssni00083hhb.mp4` and a folder or torrent name containing `SSNI-083` is accepted and queued as `SSNI-083.mp4`.
 - Ordered split videos such as `pppd176A.FHD.wmv`, `pppd176B.FHD.wmv`, `pppd176C.FHD.wmv` are assembled in order into one normalized media file.
 - Ordered split videos such as `soe00967hhb1.wmv`, `soe00967hhb2.wmv` are assembled in numeric order into one normalized media file.
-- Playable `.iso` and `.nrg` downloads are extracted without privileged mounts, resolved to their main media content, and prepared as one normalized `.mkv` when possible.
+- Playable disc/archive image downloads such as `.iso`, `.nrg`, `.img`, `.mdf`, and `.bin` are extracted without privileged mounts, resolved to their main media content, and prepared as one normalized `.mkv` when possible.
 - Normal single video files continue through the current hardlink/copy and processing path without unnecessary conversion.
 
 ## Scope
@@ -20,7 +20,7 @@ In scope:
 - Code fallback priority: video filename, parent folder name, torrent name.
 - Folder media resolution before job creation.
 - Multipart video detection and assembly.
-- `.iso` and `.nrg` extraction plus media selection.
+- Disc/archive image extraction plus media selection, starting with `.iso`, `.nrg`, `.img`, `.mdf`, and `.bin`.
 - Lossless remux/concat first, transcode only as a fallback.
 
 Out of scope:
@@ -113,7 +113,7 @@ Assembly behavior:
 
 The prepared output should be named from the normalized code, not the first part name.
 
-## ISO and NRG Preparation
+## Image Preparation
 
 Disc images are handled without loop mounts.
 
@@ -121,6 +121,7 @@ Extraction strategy:
 
 - `.iso`: extract with `bsdtar` or `7z`.
 - `.nrg`: extract with `7z` when possible; if needed, convert to ISO with `nrg2iso`, then extract.
+- `.img`, `.mdf`, `.bin`: extract with `7z`.
 
 Docker runtime dependencies should include the minimum tools needed for this path. Prefer tools available through Debian packages in the current Python slim image.
 
@@ -167,4 +168,18 @@ Add integration-style tests where practical using temporary directories and smal
 
 - Use `.mkv` as the preferred prepared output for multipart and image-based sources.
 - Keep normal single video files in their original extension.
-- Add `.iso` and `.nrg` as resolvable media sources, but not as normal video extensions.
+- Add disc/archive image extensions as resolvable media sources, but not as normal video extensions.
+
+## Image Candidate Strategy
+
+Image-like files should be handled through an extractor registry, not through `IsVideoFile`.
+
+Initial supported image extensions:
+
+- `.iso`: extract with `bsdtar`, fallback to `7z`
+- `.nrg`: extract with `7z`, fallback to `nrg2iso` then ISO extraction
+- `.img`, `.mdf`, `.bin`: extract with `7z`
+
+The resolver should only consider these files as image candidates when they are direct webhook paths or when no better normal video candidate exists in a folder. This keeps normal video handling fast and avoids treating arbitrary large files as media.
+
+Future unsupported extensions should be added by registering an extractor strategy and tests for that extension. Unknown extensions should not be processed by default unless a safe probe proves the file is extractable and contains media.
