@@ -908,6 +908,35 @@ func TestResolveMediaIgnoresIncompleteMultipartWhenValidNormalCandidateExists(t 
 	}
 }
 
+func TestResolveMediaPrefersFilenameCodedNormalVideoOverFallbackMultipart(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "SSNI-083")
+	valid := filepath.Join(folder, "SSNI-083.mp4")
+	mustWriteSizedFile(t, valid, MinVideoSize+1)
+	mustWriteSizedFile(t, filepath.Join(folder, "bonus-part1.mkv"), MinVideoSize+2)
+	mustWriteSizedFile(t, filepath.Join(folder, "bonus-part2.mkv"), MinVideoSize+3)
+	runner := &fakeRunner{}
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      runner,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if got.SourcePath != valid {
+		t.Fatalf("SourcePath = %q, want filename-coded normal video %q", got.SourcePath, valid)
+	}
+	if got.StagingPath != "" {
+		t.Fatalf("StagingPath = %q, want empty for normal video", got.StagingPath)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %d, want no multipart preparation", len(runner.calls))
+	}
+}
+
 func TestFindMultipartSetLetterOrder(t *testing.T) {
 	root := t.TempDir()
 	files := []string{"pppd176A.FHD.wmv", "pppd176B.FHD.wmv", "pppd176C.FHD.wmv"}
@@ -1002,6 +1031,26 @@ func TestFindMultipartSetNumericOrder(t *testing.T) {
 	}
 	if filepath.Base(got[0]) != "soe00967hhb1.wmv" || filepath.Base(got[1]) != "soe00967hhb2.wmv" {
 		t.Fatalf("parts order = %v, want numeric order", got)
+	}
+}
+
+func TestFindMultipartSetNumericOrderWithReleaseNoise(t *testing.T) {
+	root := t.TempDir()
+	files := []string{"soe00967hhb2.FHD.wmv", "soe00967hhb1.FHD.wmv"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
+	}
+	videos, _, err := findMediaCandidates(context.Background(), root)
+	if err != nil {
+		t.Fatalf("findMediaCandidates: %v", err)
+	}
+
+	got := findMultipartSet(videos, root, "")
+	if len(got) != 2 {
+		t.Fatalf("len(parts) = %d, want 2", len(got))
+	}
+	if filepath.Base(got[0]) != "soe00967hhb1.FHD.wmv" || filepath.Base(got[1]) != "soe00967hhb2.FHD.wmv" {
+		t.Fatalf("parts order = %v, want numeric order with release noise", got)
 	}
 }
 
