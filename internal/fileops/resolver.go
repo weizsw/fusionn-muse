@@ -94,7 +94,7 @@ func resolveSelectedVideo(path, code string) *ResolvedMedia {
 }
 
 func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
-	videos, _, err := findMediaCandidates(req.Path)
+	videos, _, err := findMediaCandidates(req.Context, req.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -106,11 +106,16 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 	return nil, fmt.Errorf("no valid video file found (need code pattern + size > %dMB)", MinVideoSize/(1024*1024))
 }
 
-func findMediaCandidates(dir string) ([]mediaCandidate, []mediaCandidate, error) {
+func findMediaCandidates(ctx context.Context, dir string) ([]mediaCandidate, []mediaCandidate, error) {
 	var videos []mediaCandidate
 	var images []mediaCandidate
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		if err != nil {
 			return err
 		}
