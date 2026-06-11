@@ -30,6 +30,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     libgomp1 \
     fonts-noto-cjk \
+    libarchive-tools \
+    7zip \
+    nrg2iso \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone VideoCaptioner and install Python dependencies

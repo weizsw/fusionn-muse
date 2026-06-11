@@ -114,8 +114,17 @@ See [config.example.yaml](config/config.example.yaml) for full documentation.
 When processing a folder, Fusionn-Muse automatically filters out ads and samples:
 
 - **Size filter**: Files ≤200MB are skipped
-- **Pattern filter**: Must contain a valid code pattern (e.g., `SONE-269`, `JUR-123`)
-- **Selection**: Largest valid file is selected
+- **Code detection**: Hyphenated and compact filenames are supported
+- **Fallback detection**: If a filename has no usable code, the folder name is checked next, then the torrent name
+- **Selection**: Largest valid file is selected when no ordered multipart set is present
+
+Fusionn-Muse detects codes from both hyphenated and compact filenames:
+
+- `SSNI-083.mp4` -> `SSNI-083`
+- `ssni00083hhb.mp4` -> `SSNI-083`
+- `pppd176A.FHD.wmv` -> `PPPD-176`
+
+Ordered multipart videos such as `ABC-001A.wmv`, `ABC-001B.wmv`, or `abc00001hhb1.wmv`, `abc00001hhb2.wmv` are assembled into one `.mkv` before processing. Playable disc/archive image sources such as `.iso`, `.nrg`, `.img`, `.mdf`, and `.bin` are extracted without Docker loop mounts and remuxed to `.mkv` when possible.
 
 ### Chinese Subtitle Detection
 
