@@ -50,12 +50,15 @@ func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error
 }
 
 func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) {
-	code, ok := bestCodeFor(imagePath, req.TorrentName)
+	code, ok := imageCodeFor(imagePath, req.Path, req.TorrentName)
 	if !ok {
 		return nil, fmt.Errorf("no code found in image filename, folder, or torrent name")
 	}
 
 	extractDir := filepath.Join(req.StagingDir, code+"-image")
+	if err := os.RemoveAll(extractDir); err != nil {
+		return nil, fmt.Errorf("clear image extraction dir: %w", err)
+	}
 	if err := extractImage(req.Context, req.Runner, imagePath, extractDir); err != nil {
 		return nil, fmt.Errorf("image extraction failed: %w", err)
 	}

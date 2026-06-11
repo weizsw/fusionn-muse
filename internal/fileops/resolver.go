@@ -133,7 +133,7 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 		return resolveSelectedVideo(best.Path, best.Code), nil
 	}
 
-	if image := bestImageCandidate(images, req.TorrentName); image != nil {
+	if image := bestImageCandidate(images, req.Path, req.TorrentName); image != nil {
 		return prepareImage(req, image.Path)
 	}
 
@@ -199,14 +199,14 @@ func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *me
 	return &videos[0]
 }
 
-func bestImageCandidate(images []mediaCandidate, torrentName string) *mediaCandidate {
+func bestImageCandidate(images []mediaCandidate, folder, torrentName string) *mediaCandidate {
 	if len(images) == 0 {
 		return nil
 	}
 
 	var coded []mediaCandidate
 	for _, image := range images {
-		if _, ok := bestCodeFor(image.Path, torrentName); ok {
+		if _, ok := imageCodeFor(image.Path, folder, torrentName); ok {
 			coded = append(coded, image)
 		}
 	}
@@ -289,6 +289,13 @@ func multipartGroups(videos []mediaCandidate, folder, torrentName string) map[mu
 
 func videoExtensionFamily(path string) string {
 	return strings.ToLower(filepath.Ext(path))
+}
+
+func imageCodeFor(imagePath, folder, torrentName string) (string, bool) {
+	if code, ok := ExtractVideoCode(filepath.Base(imagePath)); ok {
+		return code, true
+	}
+	return fallbackCode(folder, torrentName)
 }
 
 func detectPartOrder(name string) (int, bool) {
@@ -380,8 +387,15 @@ func selectDVDTitleChain(dir string) []string {
 	}
 
 	var best []string
+	bestKey := ""
 	var bestSize int64
-	for _, group := range groups {
+	keys := make([]string, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		group := groups[key]
 		sort.Strings(group)
 		var size int64
 		for _, path := range group {
@@ -390,8 +404,9 @@ func selectDVDTitleChain(dir string) []string {
 				size += info.Size()
 			}
 		}
-		if size > bestSize {
+		if size > bestSize || (size == bestSize && (bestKey == "" || key < bestKey)) {
 			best = group
+			bestKey = key
 			bestSize = size
 		}
 	}
