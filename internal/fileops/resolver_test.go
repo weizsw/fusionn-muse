@@ -231,6 +231,57 @@ func TestResolveMediaPreparesMultipartToStaging(t *testing.T) {
 	}
 }
 
+func TestResolveMediaPreparesNestedMultipartWithRootCode(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "SSNI-083")
+	files := []string{"movie-part1.m2ts", "movie-part2.m2ts"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(folder, "BDMV", "STREAM", name), MinVideoSize+1)
+	}
+	staging := filepath.Join(root, "staging")
+	runner := &fakeRunner{}
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  staging,
+		Runner:      runner,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+
+	wantPath := filepath.Join(staging, "SSNI-083.mkv")
+	if got.SourcePath != wantPath {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, wantPath)
+	}
+	if got.FileName != "SSNI-083.mkv" {
+		t.Fatalf("FileName = %q, want SSNI-083.mkv", got.FileName)
+	}
+}
+
+func TestResolveMediaRejectsMultipartMissingPartOne(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "SSNI-083")
+	files := []string{"movie-part2.m2ts", "movie-part3.m2ts"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(folder, "BDMV", "STREAM", name), MinVideoSize+1)
+	}
+
+	_, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      &fakeRunner{},
+	})
+	if err == nil {
+		t.Fatal("ResolveMedia returned nil error, want incomplete multipart error")
+	}
+	if !strings.Contains(err.Error(), "incomplete multipart") {
+		t.Fatalf("error = %q, want incomplete multipart error", err)
+	}
+}
+
 func TestFindMultipartSetLetterOrder(t *testing.T) {
 	root := t.TempDir()
 	files := []string{"pppd176A.FHD.wmv", "pppd176B.FHD.wmv", "pppd176C.FHD.wmv"}
@@ -360,6 +411,23 @@ func TestFindMultipartSetRejectsDuplicateMarkers(t *testing.T) {
 	got := findMultipartSet(videos, root, "")
 	if len(got) != 0 {
 		t.Fatalf("len(parts) = %d, want 0 for duplicate markers", len(got))
+	}
+}
+
+func TestFindMultipartSetRejectsMissingPartOne(t *testing.T) {
+	root := t.TempDir()
+	files := []string{"ABC-001-part2.wmv", "ABC-001-part3.wmv"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
+	}
+	videos, _, err := findMediaCandidates(context.Background(), root)
+	if err != nil {
+		t.Fatalf("findMediaCandidates: %v", err)
+	}
+
+	got := findMultipartSet(videos, root, "")
+	if len(got) != 0 {
+		t.Fatalf("len(parts) = %d, want 0 for missing part one", len(got))
 	}
 }
 
