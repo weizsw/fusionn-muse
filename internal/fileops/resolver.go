@@ -39,6 +39,11 @@ type partCandidate struct {
 	order int
 }
 
+type multipartGroupKey struct {
+	code      string
+	extFamily string
+}
+
 var imageExts = map[string]bool{
 	".iso": true,
 	".nrg": true,
@@ -196,14 +201,19 @@ func findMultipartSet(videos []mediaCandidate, folder, torrentName string) []str
 	}
 
 	groups := multipartGroups(videos, folder, torrentName)
-	codes := make([]string, 0, len(groups))
-	for code := range groups {
-		codes = append(codes, code)
+	keys := make([]multipartGroupKey, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
 	}
-	sort.Strings(codes)
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].code != keys[j].code {
+			return keys[i].code < keys[j].code
+		}
+		return keys[i].extFamily < keys[j].extFamily
+	})
 
-	for _, code := range codes {
-		parts := groups[code]
+	for _, key := range keys {
+		parts := groups[key]
 		if len(parts) < 2 {
 			continue
 		}
@@ -223,15 +233,15 @@ func findMultipartSet(videos []mediaCandidate, folder, torrentName string) []str
 
 func hasIncompleteMultipartSet(videos []mediaCandidate, folder, torrentName string) bool {
 	for _, parts := range multipartGroups(videos, folder, torrentName) {
-		if len(parts) > 1 && !validPartOrders(parts) {
+		if len(parts) > 0 && !validPartOrders(parts) {
 			return true
 		}
 	}
 	return false
 }
 
-func multipartGroups(videos []mediaCandidate, folder, torrentName string) map[string][]partCandidate {
-	groups := make(map[string][]partCandidate)
+func multipartGroups(videos []mediaCandidate, folder, torrentName string) map[multipartGroupKey][]partCandidate {
+	groups := make(map[multipartGroupKey][]partCandidate)
 	for _, video := range videos {
 		code := video.Code
 		if code == "" {
@@ -246,10 +256,15 @@ func multipartGroups(videos []mediaCandidate, folder, torrentName string) map[st
 		if !ok {
 			continue
 		}
-		groups[code] = append(groups[code], partCandidate{path: video.Path, order: order})
+		key := multipartGroupKey{code: code, extFamily: videoExtensionFamily(video.Path)}
+		groups[key] = append(groups[key], partCandidate{path: video.Path, order: order})
 	}
 
 	return groups
+}
+
+func videoExtensionFamily(path string) string {
+	return strings.ToLower(filepath.Ext(path))
 }
 
 func detectPartOrder(name string) (int, bool) {
