@@ -50,7 +50,7 @@ func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error
 }
 
 func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) {
-	code, ok := imageCodeFor(imagePath, req.Path, req.TorrentName)
+	code, ok := imageCodeFor(imagePath, imageFallbackFolder(req.Path), req.TorrentName)
 	if !ok {
 		return nil, fmt.Errorf("no code found in image filename, folder, or torrent name")
 	}
@@ -86,6 +86,14 @@ func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) 
 		Code:               code,
 		HasChineseSubtitle: HasChineseSubtitle(filepath.Base(imagePath)),
 	}, nil
+}
+
+func imageFallbackFolder(path string) string {
+	info, err := os.Stat(path)
+	if err == nil && !info.IsDir() {
+		return filepath.Dir(path)
+	}
+	return path
 }
 
 func concatVideos(ctx context.Context, runner CommandRunner, parts []string, out string) (string, error) {

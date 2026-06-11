@@ -172,6 +172,35 @@ func TestResolveMediaPreparesDirectImageToStaging(t *testing.T) {
 	}
 }
 
+func TestResolveMediaUsesParentCodeForDirectImage(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "SSNI-083")
+	image := filepath.Join(folder, "disc.iso")
+	mustWriteSizedFile(t, image, 1024)
+	staging := filepath.Join(root, "staging")
+	runner := fakeImageRunner(t, func(outDir string) {
+		mustWriteSizedFile(t, filepath.Join(outDir, "BDMV", "STREAM", "00001.m2ts"), MinVideoSize+1)
+	})
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        image,
+		TorrentName: "fallback-name",
+		StagingDir:  staging,
+		Runner:      runner,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+
+	wantPath := filepath.Join(staging, "SSNI-083.mkv")
+	if got.SourcePath != wantPath {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, wantPath)
+	}
+	if got.Code != "SSNI-083" {
+		t.Fatalf("Code = %q, want SSNI-083", got.Code)
+	}
+}
+
 func TestIsImageFileRecognizesImageExtensions(t *testing.T) {
 	tests := []struct {
 		path string
