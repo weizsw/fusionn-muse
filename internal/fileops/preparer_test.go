@@ -101,6 +101,12 @@ func TestConcatVideosFallsBackToTranscode(t *testing.T) {
 	}
 	out := filepath.Join(root, "prepared", "ABC-001.mkv")
 	runner := &fakeRunner{errors: []error{errors.New("copy failed")}}
+	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+	if err := os.WriteFile(out, []byte("partial"), 0644); err != nil {
+		t.Fatalf("write partial output: %v", err)
+	}
 
 	got, err := concatVideos(context.Background(), runner, parts, out)
 	if err != nil {
@@ -121,6 +127,9 @@ func TestConcatVideosFallsBackToTranscode(t *testing.T) {
 	wantSuffix := []string{"-c:v", "libx264", "-c:a", "aac", want}
 	if !reflect.DeepEqual(call.args[len(call.args)-5:], wantSuffix) {
 		t.Fatalf("fallback args suffix = %#v, want %#v", call.args[len(call.args)-5:], wantSuffix)
+	}
+	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial copy output still exists, stat error = %v", err)
 	}
 }
 

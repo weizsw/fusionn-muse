@@ -282,6 +282,25 @@ func TestResolveMediaRejectsMultipartMissingPartOne(t *testing.T) {
 	}
 }
 
+func TestResolveMediaRejectsLoneNonFirstMultipart(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "SSNI-083")
+	mustWriteSizedFile(t, filepath.Join(folder, "movie-part2.m2ts"), MinVideoSize+1)
+
+	_, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      &fakeRunner{},
+	})
+	if err == nil {
+		t.Fatal("ResolveMedia returned nil error, want incomplete multipart error")
+	}
+	if !strings.Contains(err.Error(), "incomplete multipart") {
+		t.Fatalf("error = %q, want incomplete multipart error", err)
+	}
+}
+
 func TestFindMultipartSetLetterOrder(t *testing.T) {
 	root := t.TempDir()
 	files := []string{"pppd176A.FHD.wmv", "pppd176B.FHD.wmv", "pppd176C.FHD.wmv"}
@@ -322,6 +341,23 @@ func TestFindMultipartSetHyphenatedLetterOrder(t *testing.T) {
 	}
 	if filepath.Base(got[0]) != "ABC-001A.wmv" || filepath.Base(got[1]) != "ABC-001B.wmv" {
 		t.Fatalf("parts order = %v, want hyphenated letter order", got)
+	}
+}
+
+func TestFindMultipartSetRejectsMixedExtensions(t *testing.T) {
+	root := t.TempDir()
+	files := []string{"ABC-001-part1.wmv", "ABC-001-part2.mp4"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
+	}
+	videos, _, err := findMediaCandidates(context.Background(), root)
+	if err != nil {
+		t.Fatalf("findMediaCandidates: %v", err)
+	}
+
+	got := findMultipartSet(videos, root, "")
+	if len(got) != 0 {
+		t.Fatalf("len(parts) = %d, want 0 for mixed extensions", len(got))
 	}
 }
 

@@ -2,6 +2,7 @@ package fileops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -59,6 +60,9 @@ func concatVideos(ctx context.Context, runner CommandRunner, parts []string, out
 	}
 
 	if err := runner.Run(ctx, "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", out); err != nil {
+		if removeErr := os.Remove(out); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return "", fmt.Errorf("remove partial concat output: %w", removeErr)
+		}
 		mp4Out := ChangeExtension(out, ".mp4")
 		if transcodeErr := runner.Run(ctx, "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:v", "libx264", "-c:a", "aac", mp4Out); transcodeErr != nil {
 			return "", fmt.Errorf("concat copy failed: %w; transcode failed: %w", err, transcodeErr)
