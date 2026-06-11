@@ -136,6 +136,7 @@ func IsVideoFile(path string) bool {
 		".webm": true,
 		".m4v":  true,
 		".ts":   true,
+		".m2ts": true,
 	}
 	return videoExts[ext]
 }
