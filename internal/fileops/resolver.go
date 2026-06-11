@@ -84,7 +84,7 @@ func ResolveMedia(req ResolveRequest) (*ResolvedMedia, error) {
 			return resolveSingleVideo(req.Path, req.TorrentName, false)
 		}
 		if IsImageFile(req.Path) {
-			return nil, fmt.Errorf("image preparation not implemented")
+			return prepareImage(req, req.Path)
 		}
 		return nil, fmt.Errorf("unsupported media path: %s", req.Path)
 	}
@@ -116,7 +116,7 @@ func resolveSelectedVideo(path, code string) *ResolvedMedia {
 }
 
 func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
-	videos, _, err := findMediaCandidates(req.Context, req.Path)
+	videos, images, err := findMediaCandidates(req.Context, req.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +131,10 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 
 	if best := bestVideoCandidate(videos, req.Path, req.TorrentName); best != nil {
 		return resolveSelectedVideo(best.Path, best.Code), nil
+	}
+
+	if image := bestImageCandidate(images, req.TorrentName); image != nil {
+		return prepareImage(req, image.Path)
 	}
 
 	return nil, fmt.Errorf("no valid video file found (need code pattern + size > %dMB)", MinVideoSize/(1024*1024))
@@ -193,6 +197,26 @@ func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *me
 	sort.Slice(videos, func(i, j int) bool { return videos[i].Size > videos[j].Size })
 	videos[0].Code = code
 	return &videos[0]
+}
+
+func bestImageCandidate(images []mediaCandidate, torrentName string) *mediaCandidate {
+	if len(images) == 0 {
+		return nil
+	}
+
+	var coded []mediaCandidate
+	for _, image := range images {
+		if _, ok := bestCodeFor(image.Path, torrentName); ok {
+			coded = append(coded, image)
+		}
+	}
+	if len(coded) > 0 {
+		sort.Slice(coded, func(i, j int) bool { return coded[i].Size > coded[j].Size })
+		return &coded[0]
+	}
+
+	sort.Slice(images, func(i, j int) bool { return images[i].Size > images[j].Size })
+	return &images[0]
 }
 
 func findMultipartSet(videos []mediaCandidate, folder, torrentName string) []string {
@@ -307,6 +331,88 @@ func validPartOrders(parts []partCandidate) bool {
 		}
 	}
 	return true
+}
+
+func selectExtractedMedia(ctx context.Context, dir string) ([]string, error) {
+	if parts := selectDVDTitleChain(dir); len(parts) > 0 {
+		return parts, nil
+	}
+	if stream := selectLargestByGlob(
+		filepath.Join(dir, "BDMV", "STREAM", "*.m2ts"),
+		filepath.Join(dir, "BDMV", "STREAM", "*.M2TS"),
+	); stream != "" {
+		return []string{stream}, nil
+	}
+
+	videos, _, err := findMediaCandidates(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	if parts := findMultipartSet(videos, dir, ""); len(parts) > 1 {
+		return parts, nil
+	}
+	if hasIncompleteMultipartSet(videos, dir, "") {
+		return nil, fmt.Errorf("incomplete multipart video set in extracted image")
+	}
+	if best := bestVideoCandidate(videos, dir, ""); best != nil {
+		return []string{best.Path}, nil
+	}
+
+	return nil, fmt.Errorf("no media found in extracted image")
+}
+
+func selectDVDTitleChain(dir string) []string {
+	matches, _ := filepath.Glob(filepath.Join(dir, "VIDEO_TS", "VTS_*_*.VOB"))
+	if len(matches) == 0 {
+		return nil
+	}
+
+	groups := make(map[string][]string)
+	for _, path := range matches {
+		name := strings.ToUpper(filepath.Base(path))
+		if strings.HasSuffix(name, "_0.VOB") {
+			continue
+		}
+		if len(name) < len("VTS_01_1.VOB") {
+			continue
+		}
+		groups[name[:6]] = append(groups[name[:6]], path)
+	}
+
+	var best []string
+	var bestSize int64
+	for _, group := range groups {
+		sort.Strings(group)
+		var size int64
+		for _, path := range group {
+			info, err := os.Stat(path)
+			if err == nil {
+				size += info.Size()
+			}
+		}
+		if size > bestSize {
+			best = group
+			bestSize = size
+		}
+	}
+
+	return best
+}
+
+func selectLargestByGlob(patterns ...string) string {
+	var best string
+	var bestSize int64
+	for _, pattern := range patterns {
+		matches, _ := filepath.Glob(pattern)
+		for _, path := range matches {
+			info, err := os.Stat(path)
+			if err == nil && info.Size() > bestSize {
+				best = path
+				bestSize = info.Size()
+			}
+		}
+	}
+	return best
 }
 
 func bestCodeFor(path, torrentName string) (string, bool) {

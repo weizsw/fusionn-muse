@@ -13,6 +13,7 @@ import (
 type fakeRunner struct {
 	calls  []commandCall
 	errors []error
+	onRun  func(name string, args ...string) error
 }
 
 type commandCall struct {
@@ -25,7 +26,12 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) error {
 	if len(r.errors) > 0 {
 		err := r.errors[0]
 		r.errors = r.errors[1:]
-		return err
+		if err != nil {
+			return err
+		}
+	}
+	if r.onRun != nil {
+		return r.onRun(name, args...)
 	}
 	return nil
 }
@@ -130,6 +136,36 @@ func TestConcatVideosFallsBackToTranscode(t *testing.T) {
 	}
 	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("partial copy output still exists, stat error = %v", err)
+	}
+}
+
+func TestRemuxVideoFallsBackToTranscode(t *testing.T) {
+	root := t.TempDir()
+	in := filepath.Join(root, "BDMV", "STREAM", "00002.m2ts")
+	out := filepath.Join(root, "prepared", "ABC-001.mkv")
+	runner := &fakeRunner{errors: []error{errors.New("copy failed")}}
+
+	got, err := remuxVideo(context.Background(), runner, in, out)
+	if err != nil {
+		t.Fatalf("remuxVideo returned error: %v", err)
+	}
+
+	want := filepath.Join(root, "prepared", "ABC-001.mp4")
+	if got != want {
+		t.Fatalf("prepared path = %q, want %q", got, want)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("runner calls = %d, want 2", len(runner.calls))
+	}
+	copyCall := runner.calls[0]
+	wantCopyArgs := []string{"-y", "-i", in, "-map", "0:v:0", "-map", "0:a?", "-c", "copy", out}
+	if copyCall.name != "ffmpeg" || !reflect.DeepEqual(copyCall.args, wantCopyArgs) {
+		t.Fatalf("copy call = %#v, want ffmpeg %#v", copyCall, wantCopyArgs)
+	}
+	transcodeCall := runner.calls[1]
+	wantTranscodeArgs := []string{"-y", "-i", in, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-c:a", "aac", want}
+	if transcodeCall.name != "ffmpeg" || !reflect.DeepEqual(transcodeCall.args, wantTranscodeArgs) {
+		t.Fatalf("transcode call = %#v, want ffmpeg %#v", transcodeCall, wantTranscodeArgs)
 	}
 }
 

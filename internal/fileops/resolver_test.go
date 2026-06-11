@@ -136,21 +136,39 @@ func TestResolveMediaAcceptsUppercaseM2TS(t *testing.T) {
 	}
 }
 
-func TestResolveMediaDirectImageReturnsPlaceholderError(t *testing.T) {
+func TestResolveMediaPreparesDirectImageToStaging(t *testing.T) {
 	root := t.TempDir()
 	image := filepath.Join(root, "SSNI-083.iso")
-	mustWriteSizedFile(t, image, 1)
+	mustWriteSizedFile(t, image, 1024)
+	staging := filepath.Join(root, "staging")
+	runner := fakeImageRunner(t, func(outDir string) {
+		mustWriteSizedFile(t, filepath.Join(outDir, "BDMV", "STREAM", "00001.m2ts"), MinVideoSize+1)
+	})
 
-	_, err := ResolveMedia(ResolveRequest{
+	got, err := ResolveMedia(ResolveRequest{
 		Path:        image,
 		TorrentName: "SSNI-083",
-		StagingDir:  filepath.Join(root, "staging"),
+		StagingDir:  staging,
+		Runner:      runner,
 	})
-	if err == nil {
-		t.Fatal("ResolveMedia returned nil error, want image placeholder error")
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "image preparation not implemented") {
-		t.Fatalf("error = %q, want image preparation placeholder", err)
+	wantPath := filepath.Join(staging, "SSNI-083.mkv")
+	if got.SourcePath != wantPath {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, wantPath)
+	}
+	if got.StagingPath != wantPath {
+		t.Fatalf("StagingPath = %q, want %q", got.StagingPath, wantPath)
+	}
+	if got.FileName != "SSNI-083.mkv" {
+		t.Fatalf("FileName = %q, want SSNI-083.mkv", got.FileName)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("runner calls = %d, want extraction and remux", len(runner.calls))
+	}
+	if runner.calls[1].name != "ffmpeg" {
+		t.Fatalf("second command = %q, want ffmpeg", runner.calls[1].name)
 	}
 }
 
@@ -160,6 +178,7 @@ func TestIsImageFileRecognizesImageExtensions(t *testing.T) {
 		want bool
 	}{
 		{path: "disc.iso", want: true},
+		{path: "disc.ISO", want: true},
 		{path: "disc.nrg", want: true},
 		{path: "disc.img", want: true},
 		{path: "disc.mdf", want: true},
@@ -193,6 +212,138 @@ func TestFindMediaCandidatesCollectsImages(t *testing.T) {
 	}
 	if images[0].Name != "SSNI-083.iso" {
 		t.Fatalf("image name = %q, want SSNI-083.iso", images[0].Name)
+	}
+}
+
+func TestResolveMediaUsesImageWhenFolderHasNoVideoCandidate(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "SSNI-083")
+	image := filepath.Join(folder, "disc.iso")
+	mustWriteSizedFile(t, image, 1024)
+	staging := filepath.Join(root, "staging")
+	runner := fakeImageRunner(t, func(outDir string) {
+		mustWriteSizedFile(t, filepath.Join(outDir, "BDMV", "STREAM", "00001.m2ts"), MinVideoSize+1)
+	})
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  staging,
+		Runner:      runner,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+
+	wantPath := filepath.Join(staging, "SSNI-083.mkv")
+	if got.SourcePath != wantPath {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, wantPath)
+	}
+	if got.FileName != "SSNI-083.mkv" {
+		t.Fatalf("FileName = %q, want SSNI-083.mkv", got.FileName)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("runner calls = %d, want extraction and remux", len(runner.calls))
+	}
+}
+
+func TestResolveMediaPrefersNormalVideoOverFolderImage(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "download")
+	video := filepath.Join(folder, "SSNI-083.mp4")
+	image := filepath.Join(folder, "SSNI-083.iso")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+	mustWriteSizedFile(t, image, 1024)
+	runner := &fakeRunner{}
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      runner,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if got.SourcePath != video {
+		t.Fatalf("SourcePath = %q, want normal video %q", got.SourcePath, video)
+	}
+	if got.StagingPath != "" {
+		t.Fatalf("StagingPath = %q, want empty for normal video", got.StagingPath)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %d, want no image preparation", len(runner.calls))
+	}
+}
+
+func TestResolveMediaSelectsLargestBluRayStreamFromImage(t *testing.T) {
+	root := t.TempDir()
+	image := filepath.Join(root, "SSNI-083.iso")
+	mustWriteSizedFile(t, image, 1024)
+	runner := fakeImageRunner(t, func(outDir string) {
+		mustWriteSizedFile(t, filepath.Join(outDir, "BDMV", "STREAM", "00001.m2ts"), MinVideoSize+1)
+		mustWriteSizedFile(t, filepath.Join(outDir, "BDMV", "STREAM", "00002.m2ts"), MinVideoSize+2)
+	})
+
+	_, err := ResolveMedia(ResolveRequest{
+		Path:        image,
+		TorrentName: "SSNI-083",
+		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      runner,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("runner calls = %d, want extraction and remux", len(runner.calls))
+	}
+	wantInput := filepath.Join(root, "staging", "SSNI-083-image", "BDMV", "STREAM", "00002.m2ts")
+	if runner.calls[1].args[2] != wantInput {
+		t.Fatalf("remux input = %q, want largest stream %q", runner.calls[1].args[2], wantInput)
+	}
+}
+
+func TestResolveMediaSelectsLargestDVDTitleChainFromImage(t *testing.T) {
+	root := t.TempDir()
+	image := filepath.Join(root, "SSNI-083.iso")
+	mustWriteSizedFile(t, image, 1024)
+	runner := fakeImageRunner(t, func(outDir string) {
+		videoTS := filepath.Join(outDir, "VIDEO_TS")
+		mustWriteSizedFile(t, filepath.Join(videoTS, "VTS_01_0.VOB"), MinVideoSize+50)
+		mustWriteSizedFile(t, filepath.Join(videoTS, "VTS_01_1.VOB"), MinVideoSize+1)
+		mustWriteSizedFile(t, filepath.Join(videoTS, "VTS_02_0.VOB"), 1)
+		mustWriteSizedFile(t, filepath.Join(videoTS, "VTS_02_1.VOB"), MinVideoSize+2)
+		mustWriteSizedFile(t, filepath.Join(videoTS, "VTS_02_2.VOB"), MinVideoSize+2)
+	})
+
+	_, err := ResolveMedia(ResolveRequest{
+		Path:        image,
+		TorrentName: "SSNI-083",
+		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      runner,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("runner calls = %d, want extraction and concat", len(runner.calls))
+	}
+	listPath := runner.calls[1].args[6]
+	data, err := os.ReadFile(listPath)
+	if err != nil {
+		t.Fatalf("read concat list: %v", err)
+	}
+	got := string(data)
+	first := filepath.Join(root, "staging", "SSNI-083-image", "VIDEO_TS", "VTS_02_1.VOB")
+	second := filepath.Join(root, "staging", "SSNI-083-image", "VIDEO_TS", "VTS_02_2.VOB")
+	if !strings.Contains(got, first) || !strings.Contains(got, second) {
+		t.Fatalf("concat list = %q, want largest VTS_02 chain", got)
+	}
+	if strings.Contains(got, "VTS_01_0.VOB") || strings.Contains(got, "VTS_02_0.VOB") {
+		t.Fatalf("concat list = %q, want menu VOBs ignored", got)
+	}
+	if strings.Index(got, "VTS_02_1.VOB") > strings.Index(got, "VTS_02_2.VOB") {
+		t.Fatalf("concat list = %q, want VTS_02 parts ordered by filename", got)
 	}
 }
 
@@ -489,5 +640,30 @@ func mustWriteSizedFile(t *testing.T, path string, size int64) {
 	}
 	if err := f.Close(); err != nil {
 		t.Fatalf("close %s: %v", path, err)
+	}
+}
+
+func fakeImageRunner(t *testing.T, writeExtractedMedia func(outDir string)) *fakeRunner {
+	t.Helper()
+	return &fakeRunner{
+		onRun: func(name string, args ...string) error {
+			switch name {
+			case "bsdtar":
+				for i := 0; i < len(args)-1; i++ {
+					if args[i] == "-C" {
+						writeExtractedMedia(args[i+1])
+						return nil
+					}
+				}
+			case "7z":
+				for _, arg := range args {
+					if strings.HasPrefix(arg, "-o") {
+						writeExtractedMedia(strings.TrimPrefix(arg, "-o"))
+						return nil
+					}
+				}
+			}
+			return nil
+		},
 	}
 }
