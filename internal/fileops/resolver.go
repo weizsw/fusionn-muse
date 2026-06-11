@@ -76,8 +76,12 @@ func resolveSingleVideo(path, torrentName string, requireCode bool) (*ResolvedMe
 		return nil, fmt.Errorf("no code found in filename, folder, or torrent name")
 	}
 
+	return resolveSelectedVideo(path, code), nil
+}
+
+func resolveSelectedVideo(path, code string) *ResolvedMedia {
 	fileName := filepath.Base(path)
-	if ok {
+	if code != "" {
 		fileName = code + strings.ToLower(filepath.Ext(path))
 	}
 
@@ -86,7 +90,7 @@ func resolveSingleVideo(path, torrentName string, requireCode bool) (*ResolvedMe
 		FileName:           fileName,
 		Code:               code,
 		HasChineseSubtitle: HasChineseSubtitle(filepath.Base(path)),
-	}, nil
+	}
 }
 
 func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
@@ -96,7 +100,7 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 	}
 
 	if best := bestVideoCandidate(videos, req.Path, req.TorrentName); best != nil {
-		return resolveSingleVideo(best.Path, req.TorrentName, true)
+		return resolveSelectedVideo(best.Path, best.Code), nil
 	}
 
 	return nil, fmt.Errorf("no valid video file found (need code pattern + size > %dMB)", MinVideoSize/(1024*1024))
@@ -146,11 +150,13 @@ func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *me
 		return &coded[0]
 	}
 
-	if _, ok := fallbackCode(folder, torrentName); !ok {
+	code, ok := fallbackCode(folder, torrentName)
+	if !ok {
 		return nil
 	}
 
 	sort.Slice(videos, func(i, j int) bool { return videos[i].Size > videos[j].Size })
+	videos[0].Code = code
 	return &videos[0]
 }
 

@@ -3,6 +3,7 @@ package fileops
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -68,6 +69,46 @@ func TestResolveMediaRejectsFolderWithoutCode(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("ResolveMedia returned nil error, want missing code error")
+	}
+}
+
+func TestResolveMediaUsesRootFolderCodeForNestedVideo(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "SSNI-083")
+	video := filepath.Join(folder, "BDMV", "STREAM", "00001.m2ts")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if got.SourcePath != video {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, video)
+	}
+	if got.FileName != "SSNI-083.m2ts" {
+		t.Fatalf("FileName = %q, want SSNI-083.m2ts", got.FileName)
+	}
+}
+
+func TestResolveMediaDirectImageReturnsPlaceholderError(t *testing.T) {
+	root := t.TempDir()
+	image := filepath.Join(root, "SSNI-083.iso")
+	mustWriteSizedFile(t, image, 1)
+
+	_, err := ResolveMedia(ResolveRequest{
+		Path:        image,
+		TorrentName: "SSNI-083",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err == nil {
+		t.Fatal("ResolveMedia returned nil error, want image placeholder error")
+	}
+	if !strings.Contains(err.Error(), "image preparation not implemented") {
+		t.Fatalf("error = %q, want image preparation placeholder", err)
 	}
 }
 
