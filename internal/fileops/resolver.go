@@ -35,7 +35,6 @@ type mediaCandidate struct {
 
 type partCandidate struct {
 	path  string
-	code  string
 	order int
 }
 
@@ -48,9 +47,9 @@ var imageExts = map[string]bool{
 }
 
 var (
-	partWordPattern    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(part|cd|disc)0*([1-9][0-9]*)(?:[^a-z0-9]|$)`)
-	trailingNumberPart = regexp.MustCompile(`(?i)([a-z]+)0*\d{3,5}[a-z]*([1-9][0-9]*)$`) //nolint:gocritic // Keep plan-specified pattern.
-	trailingLetterPart = regexp.MustCompile(`(?i)([a-z]+)0*\d{3,5}([a-z])(?:[^a-z0-9].*)?$`)
+	partWordPattern    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(part|cd|disc)0*([1-9]\d*)(?:[^a-z0-9]|$)`)
+	trailingNumberPart = regexp.MustCompile(`(?i)([a-z]+)0*\d{3,5}[a-z]*([1-9]\d*)$`)
+	trailingLetterPart = regexp.MustCompile(`(?i)([a-z]+)-?0*\d{3,5}([a-z])(?:[^a-z0-9].*)?$`)
 )
 
 // IsImageFile checks for disc/archive image sources that may contain playable media.
@@ -199,10 +198,17 @@ func findMultipartSet(videos []mediaCandidate, folder, torrentName string) []str
 		if !ok {
 			continue
 		}
-		groups[code] = append(groups[code], partCandidate{path: video.Path, code: code, order: order})
+		groups[code] = append(groups[code], partCandidate{path: video.Path, order: order})
 	}
 
-	for _, parts := range groups {
+	codes := make([]string, 0, len(groups))
+	for code := range groups {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+
+	for _, code := range codes {
+		parts := groups[code]
 		if len(parts) < 2 {
 			continue
 		}
