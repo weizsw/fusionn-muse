@@ -49,6 +49,42 @@ func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error
 	}, nil
 }
 
+func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) {
+	code, ok := bestCodeFor(imagePath, req.TorrentName)
+	if !ok {
+		return nil, fmt.Errorf("no code found in image filename, folder, or torrent name")
+	}
+
+	extractDir := filepath.Join(req.StagingDir, code+"-image")
+	if err := extractImage(req.Context, req.Runner, imagePath, extractDir); err != nil {
+		return nil, fmt.Errorf("image extraction failed: %w", err)
+	}
+
+	out := filepath.Join(req.StagingDir, code+".mkv")
+	parts, err := selectExtractedMedia(req.Context, extractDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var prepared string
+	if len(parts) == 1 {
+		prepared, err = remuxVideo(req.Context, req.Runner, parts[0], out)
+	} else {
+		prepared, err = concatVideos(req.Context, req.Runner, parts, out)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &ResolvedMedia{
+		SourcePath:         prepared,
+		FileName:           filepath.Base(prepared),
+		StagingPath:        prepared,
+		Code:               code,
+		HasChineseSubtitle: HasChineseSubtitle(filepath.Base(imagePath)),
+	}, nil
+}
+
 func concatVideos(ctx context.Context, runner CommandRunner, parts []string, out string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
 		return "", fmt.Errorf("create staging dir: %w", err)
@@ -66,6 +102,25 @@ func concatVideos(ctx context.Context, runner CommandRunner, parts []string, out
 		mp4Out := ChangeExtension(out, ".mp4")
 		if transcodeErr := runner.Run(ctx, "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:v", "libx264", "-c:a", "aac", mp4Out); transcodeErr != nil {
 			return "", fmt.Errorf("concat copy failed: %w; transcode failed: %w", err, transcodeErr)
+		}
+		return mp4Out, nil
+	}
+
+	return out, nil
+}
+
+func remuxVideo(ctx context.Context, runner CommandRunner, in, out string) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+		return "", fmt.Errorf("create staging dir: %w", err)
+	}
+
+	if err := runner.Run(ctx, "ffmpeg", "-y", "-i", in, "-map", "0:v:0", "-map", "0:a?", "-c", "copy", out); err != nil {
+		if removeErr := os.Remove(out); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return "", fmt.Errorf("remove partial remux output: %w", removeErr)
+		}
+		mp4Out := ChangeExtension(out, ".mp4")
+		if transcodeErr := runner.Run(ctx, "ffmpeg", "-y", "-i", in, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-c:a", "aac", mp4Out); transcodeErr != nil {
+			return "", fmt.Errorf("remux copy failed: %w; transcode failed: %w", err, transcodeErr)
 		}
 		return mp4Out, nil
 	}
