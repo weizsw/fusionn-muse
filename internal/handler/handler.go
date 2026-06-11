@@ -86,15 +86,14 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 
 	logger.Infof("📥 Webhook received: %s", req.Path)
 
-	var videoPath string
-
-	if fileops.IsVideoFile(req.Path) {
-		// Direct file path: process without filtering (preserve existing behavior)
-		videoPath = req.Path
-	} else if fileops.Exists(req.Path) {
-		// Folder path: find single valid video (filter by code pattern + size)
-		validPath, err := fileops.FindValidVideoFile(req.Path)
-		if err != nil {
+	resolved, err := fileops.ResolveMedia(fileops.ResolveRequest{
+		Context:     c.Request.Context(),
+		Path:        req.Path,
+		TorrentName: req.Name,
+		StagingDir:  h.folders.Staging,
+	})
+	if err != nil {
+		if fileops.Exists(req.Path) {
 			logger.Warnf("⚠️ %v in: %s", err, req.Path)
 			c.JSON(http.StatusOK, gin.H{
 				"message": "no valid video files found",
@@ -102,20 +101,17 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 			})
 			return
 		}
-		videoPath = validPath
-	} else {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "path does not exist"})
 		return
 	}
 
 	jobID := uuid.New().String()[:8]
-	fileName := filepath.Base(videoPath)
+	fileName := resolved.FileName
+	isLight := resolved.HasChineseSubtitle
 
-	// Detect if this is a "light" job (Chinese subtitle detected)
-	isLight := fileops.HasChineseSubtitle(fileName)
-
-	job := queue.NewJob(jobID, videoPath, fileName, req.Name, req.Category)
+	job := queue.NewJob(jobID, resolved.SourcePath, fileName, req.Name, req.Category)
 	job.IsLight = isLight
+	job.StagingPath = resolved.StagingPath
 
 	if isLight {
 		// Light job: process immediately in background (no queue wait)
