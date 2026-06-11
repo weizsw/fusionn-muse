@@ -15,10 +15,6 @@ import (
 // Files smaller than this are likely ads, samples, or bonus content.
 const MinVideoSize int64 = 200 * 1024 * 1024
 
-// codePattern matches video codes like SONE-269, JUR-123
-// Format: [2-5 letters]-[3-5 digits]
-var codePattern = regexp.MustCompile(`([A-Z]{2,5}-\d{3,5})`)
-
 // chineseSubtitlePatterns detects Chinese subtitle indicators in filenames.
 // Matches -C/_C anywhere (bounded), language codes, and Chinese terms.
 var chineseSubtitlePatterns = []*regexp.Regexp{
@@ -162,9 +158,10 @@ func FindVideoFiles(dir string) ([]string, error) {
 }
 
 // HasVideoCode checks if a filename contains a valid video code pattern.
-// Matches codes like SONE-269, JUR-123 anywhere in the filename (handles prefixes).
+// Matches hyphenated codes like SONE-269 and compact codes like sone00269.
 func HasVideoCode(filename string) bool {
-	return codePattern.MatchString(strings.ToUpper(filename))
+	_, ok := ExtractVideoCode(filename)
+	return ok
 }
 
 // FindValidVideoFile finds the single valid video file in a directory.
@@ -263,11 +260,11 @@ func HasChineseSubtitle(filename string) bool {
 // Returns original filename if no code pattern found.
 func CleanVideoFilename(filename string) string {
 	ext := strings.ToLower(filepath.Ext(filename))
-	match := codePattern.FindString(strings.ToUpper(filename))
-	if match == "" {
-		return filename // No pattern found, return as-is
+	code, ok := ExtractVideoCode(filename)
+	if !ok {
+		return filename
 	}
-	return match + ext
+	return code + ext
 }
 
 // WriteDummySubtitle creates a dummy SRT file for dry-run testing.
