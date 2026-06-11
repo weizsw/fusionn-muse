@@ -116,8 +116,12 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 		return nil, err
 	}
 
-	if parts := findMultipartSet(videos, req.Path, req.TorrentName); len(parts) > 1 {
+	parts := findMultipartSet(videos, req.Path, req.TorrentName)
+	if len(parts) > 1 {
 		return prepareMultipart(req, parts)
+	}
+	if hasIncompleteMultipartSet(videos, req.Path, req.TorrentName) {
+		return nil, fmt.Errorf("incomplete multipart video set")
 	}
 
 	if best := bestVideoCandidate(videos, req.Path, req.TorrentName); best != nil {
@@ -191,24 +195,7 @@ func findMultipartSet(videos []mediaCandidate, folder, torrentName string) []str
 		return nil
 	}
 
-	groups := make(map[string][]partCandidate)
-	for _, video := range videos {
-		code := video.Code
-		if code == "" {
-			if fallback, ok := fallbackCode(folder, torrentName); ok {
-				code = fallback
-			}
-		}
-		if code == "" {
-			continue
-		}
-		order, ok := detectPartOrder(video.Name)
-		if !ok {
-			continue
-		}
-		groups[code] = append(groups[code], partCandidate{path: video.Path, order: order})
-	}
-
+	groups := multipartGroups(videos, folder, torrentName)
 	codes := make([]string, 0, len(groups))
 	for code := range groups {
 		codes = append(codes, code)
@@ -234,6 +221,37 @@ func findMultipartSet(videos []mediaCandidate, folder, torrentName string) []str
 	return nil
 }
 
+func hasIncompleteMultipartSet(videos []mediaCandidate, folder, torrentName string) bool {
+	for _, parts := range multipartGroups(videos, folder, torrentName) {
+		if len(parts) > 1 && !validPartOrders(parts) {
+			return true
+		}
+	}
+	return false
+}
+
+func multipartGroups(videos []mediaCandidate, folder, torrentName string) map[string][]partCandidate {
+	groups := make(map[string][]partCandidate)
+	for _, video := range videos {
+		code := video.Code
+		if code == "" {
+			if fallback, ok := fallbackCode(folder, torrentName); ok {
+				code = fallback
+			}
+		}
+		if code == "" {
+			continue
+		}
+		order, ok := detectPartOrder(video.Name)
+		if !ok {
+			continue
+		}
+		groups[code] = append(groups[code], partCandidate{path: video.Path, order: order})
+	}
+
+	return groups
+}
+
 func detectPartOrder(name string) (int, bool) {
 	base := strings.TrimSuffix(name, filepath.Ext(name))
 	if match := partWordPattern.FindStringSubmatch(base); match != nil {
@@ -255,11 +273,23 @@ func detectPartOrder(name string) (int, bool) {
 
 func validPartOrders(parts []partCandidate) bool {
 	seen := make(map[int]bool, len(parts))
+	maxOrder := 0
 	for _, part := range parts {
 		if seen[part.order] {
 			return false
 		}
 		seen[part.order] = true
+		if part.order > maxOrder {
+			maxOrder = part.order
+		}
+	}
+	if maxOrder != len(parts) {
+		return false
+	}
+	for order := 1; order <= maxOrder; order++ {
+		if !seen[order] {
+			return false
+		}
 	}
 	return true
 }

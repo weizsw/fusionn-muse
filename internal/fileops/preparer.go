@@ -25,7 +25,10 @@ func (ExecCommandRunner) Run(ctx context.Context, name string, args ...string) e
 }
 
 func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error) {
-	code, ok := bestCodeFor(parts[0], req.TorrentName)
+	code, ok := ExtractVideoCode(filepath.Base(parts[0]))
+	if !ok {
+		code, ok = fallbackCode(req.Path, req.TorrentName)
+	}
 	if !ok {
 		return nil, fmt.Errorf("no code found for multipart video")
 	}
@@ -92,7 +95,7 @@ func extractImage(ctx context.Context, runner CommandRunner, imagePath, outDir s
 		if err := runner.Run(ctx, "7z", "x", "-y", "-o"+outDir, imagePath); err == nil {
 			return nil
 		}
-		isoPath := ChangeExtension(imagePath, ".iso")
+		isoPath := filepath.Join(outDir, strings.TrimSuffix(filepath.Base(imagePath), filepath.Ext(imagePath))+".iso")
 		if err := runner.Run(ctx, "nrg2iso", imagePath, isoPath); err != nil {
 			return err
 		}
