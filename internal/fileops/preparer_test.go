@@ -144,6 +144,12 @@ func TestRemuxVideoFallsBackToTranscode(t *testing.T) {
 	in := filepath.Join(root, "BDMV", "STREAM", "00002.m2ts")
 	out := filepath.Join(root, "prepared", "ABC-001.mkv")
 	runner := &fakeRunner{errors: []error{errors.New("copy failed")}}
+	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+	if err := os.WriteFile(out, []byte("partial"), 0644); err != nil {
+		t.Fatalf("write partial output: %v", err)
+	}
 
 	got, err := remuxVideo(context.Background(), runner, in, out)
 	if err != nil {
@@ -166,6 +172,9 @@ func TestRemuxVideoFallsBackToTranscode(t *testing.T) {
 	wantTranscodeArgs := []string{"-y", "-i", in, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-c:a", "aac", want}
 	if transcodeCall.name != "ffmpeg" || !reflect.DeepEqual(transcodeCall.args, wantTranscodeArgs) {
 		t.Fatalf("transcode call = %#v, want ffmpeg %#v", transcodeCall, wantTranscodeArgs)
+	}
+	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial remux output still exists, stat error = %v", err)
 	}
 }
 
