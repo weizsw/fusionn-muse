@@ -40,9 +40,15 @@ type partCandidate struct {
 }
 
 type multipartGroupKey struct {
+	codeRank  int
 	code      string
 	extFamily string
 	partBase  string
+}
+
+type codeMatch struct {
+	code string
+	rank int
 }
 
 var imageExts = map[string]bool{
@@ -55,7 +61,7 @@ var imageExts = map[string]bool{
 
 var (
 	partWordPattern    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(part|cd|disc)0*([1-9]\d*)(?:[^a-z0-9]|$)`)
-	trailingNumberPart = regexp.MustCompile(`(?i)([a-z]+)0*\d{3,5}[a-z]*([1-9]\d*)$`)
+	trailingNumberPart = regexp.MustCompile(`(?i)([a-z]+)0*\d{3,5}[a-z]+([1-9]\d*)$`)
 	trailingLetterPart = regexp.MustCompile(`(?i)([a-z]+)-?0*\d{3,5}([a-z])(?:[^a-z0-9].*)?$`)
 )
 
@@ -180,9 +186,17 @@ func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *me
 	}
 
 	var coded []mediaCandidate
+	bestRank := 0
 	for _, video := range videos {
-		if code, ok := mediaCodeFor(video.Path, folder, torrentName); ok {
-			video.Code = code
+		if match, ok := mediaCodeMatchFor(video.Path, folder, torrentName); ok {
+			video.Code = match.code
+			if len(coded) == 0 || match.rank < bestRank {
+				bestRank = match.rank
+				coded = coded[:0]
+			}
+			if match.rank != bestRank {
+				continue
+			}
 			coded = append(coded, video)
 		}
 	}
@@ -199,8 +213,16 @@ func bestImageCandidate(images []mediaCandidate, folder, torrentName string) *me
 	}
 
 	var coded []mediaCandidate
+	bestRank := 0
 	for _, image := range images {
-		if _, ok := mediaCodeFor(image.Path, folder, torrentName); ok {
+		if match, ok := mediaCodeMatchFor(image.Path, folder, torrentName); ok {
+			if len(coded) == 0 || match.rank < bestRank {
+				bestRank = match.rank
+				coded = coded[:0]
+			}
+			if match.rank != bestRank {
+				continue
+			}
 			coded = append(coded, image)
 		}
 	}
@@ -224,6 +246,9 @@ func findMultipartSet(videos []mediaCandidate, folder, torrentName string) []str
 		keys = append(keys, key)
 	}
 	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].codeRank != keys[j].codeRank {
+			return keys[i].codeRank < keys[j].codeRank
+		}
 		if keys[i].code != keys[j].code {
 			return keys[i].code < keys[j].code
 		}
@@ -264,7 +289,7 @@ func hasIncompleteMultipartSet(videos []mediaCandidate, folder, torrentName stri
 func multipartGroups(videos []mediaCandidate, folder, torrentName string) map[multipartGroupKey][]partCandidate {
 	groups := make(map[multipartGroupKey][]partCandidate)
 	for _, video := range videos {
-		code, ok := mediaCodeFor(video.Path, folder, torrentName)
+		match, ok := mediaCodeMatchFor(video.Path, folder, torrentName)
 		if !ok {
 			continue
 		}
@@ -272,7 +297,7 @@ func multipartGroups(videos []mediaCandidate, folder, torrentName string) map[mu
 		if !ok {
 			continue
 		}
-		key := multipartGroupKey{code: code, extFamily: videoExtensionFamily(video.Path), partBase: partBase}
+		key := multipartGroupKey{codeRank: match.rank, code: match.code, extFamily: videoExtensionFamily(video.Path), partBase: partBase}
 		groups[key] = append(groups[key], partCandidate{path: video.Path, order: order})
 	}
 
@@ -284,18 +309,23 @@ func videoExtensionFamily(path string) string {
 }
 
 func mediaCodeFor(path, folder, torrentName string) (string, bool) {
+	match, ok := mediaCodeMatchFor(path, folder, torrentName)
+	return match.code, ok
+}
+
+func mediaCodeMatchFor(path, folder, torrentName string) (codeMatch, bool) {
 	if code, ok := ExtractVideoCode(filepath.Base(path)); ok {
-		return code, true
+		return codeMatch{code: code, rank: 0}, true
 	}
 	for _, dir := range candidateCodeFolders(path, folder) {
 		if code, ok := ExtractVideoCode(filepath.Base(dir)); ok {
-			return code, true
+			return codeMatch{code: code, rank: 1}, true
 		}
 	}
 	if code, ok := ExtractVideoCode(torrentName); ok {
-		return code, true
+		return codeMatch{code: code, rank: 2}, true
 	}
-	return "", false
+	return codeMatch{}, false
 }
 
 func candidateCodeFolders(path, requestPath string) []string {

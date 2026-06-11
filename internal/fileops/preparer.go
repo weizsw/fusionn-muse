@@ -52,13 +52,16 @@ func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) 
 		return nil, fmt.Errorf("no code found in image filename, folder, or torrent name")
 	}
 
-	extractDir := filepath.Join(req.StagingDir, code+"-image")
+	extractDir := imageExtractionDir(req.StagingDir, code)
 	if imageExtractionOverlapsSource(extractDir, imagePath) || imageExtractionOverlapsSource(extractDir, req.Path) {
 		return nil, fmt.Errorf("image extraction dir overlaps source path: %s", extractDir)
 	}
 	if err := os.RemoveAll(extractDir); err != nil {
 		return nil, fmt.Errorf("clear image extraction dir: %w", err)
 	}
+	defer func() {
+		_ = os.RemoveAll(extractDir)
+	}()
 	if err := extractImage(req.Context, req.Runner, imagePath, extractDir); err != nil {
 		return nil, fmt.Errorf("image extraction failed: %w", err)
 	}
@@ -94,6 +97,10 @@ func imageFallbackFolder(path string) string {
 		return filepath.Dir(path)
 	}
 	return path
+}
+
+func imageExtractionDir(stagingDir, code string) string {
+	return filepath.Join(filepath.Dir(stagingDir), "media-extract", code+"-image")
 }
 
 func imageExtractionOverlapsSource(extractDir, sourcePath string) bool {
@@ -132,6 +139,7 @@ func concatVideos(ctx context.Context, runner CommandRunner, parts []string, out
 		}
 		mp4Out := ChangeExtension(out, ".mp4")
 		if transcodeErr := runner.Run(ctx, "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:v", "libx264", "-c:a", "aac", mp4Out); transcodeErr != nil {
+			_ = os.Remove(mp4Out)
 			return "", fmt.Errorf("concat copy failed: %w; transcode failed: %w", err, transcodeErr)
 		}
 		return mp4Out, nil
@@ -151,6 +159,7 @@ func remuxVideo(ctx context.Context, runner CommandRunner, in, out string) (stri
 		}
 		mp4Out := ChangeExtension(out, ".mp4")
 		if transcodeErr := runner.Run(ctx, "ffmpeg", "-y", "-i", in, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-c:a", "aac", mp4Out); transcodeErr != nil {
+			_ = os.Remove(mp4Out)
 			return "", fmt.Errorf("remux copy failed: %w; transcode failed: %w", err, transcodeErr)
 		}
 		return mp4Out, nil

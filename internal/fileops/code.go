@@ -36,9 +36,10 @@ func hyphenatedPrefix(prefix string) string {
 		return prefix
 	}
 
+	upper := strings.ToUpper(prefix)
 	start := len(prefix)
 	for start > 0 {
-		ch := prefix[start-1]
+		ch := upper[start-1]
 		if ch < 'A' || ch > 'Z' {
 			break
 		}
@@ -46,6 +47,11 @@ func hyphenatedPrefix(prefix string) string {
 	}
 	if trailingLen := len(prefix) - start; trailingLen >= 2 && trailingLen <= 5 {
 		return prefix[start:]
+	}
+
+	trimmed := strings.TrimLeft(strings.ToLower(prefix), "x")
+	if len(trimmed) >= 2 && len(trimmed) <= 5 && len(trimmed) < len(prefix) {
+		return prefix[len(prefix)-len(trimmed):]
 	}
 
 	return prefix[len(prefix)-5:]
