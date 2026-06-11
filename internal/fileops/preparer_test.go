@@ -139,6 +139,31 @@ func TestConcatVideosFallsBackToTranscode(t *testing.T) {
 	}
 }
 
+func TestConcatVideosRemovesPartialTranscodeOutputOnFailure(t *testing.T) {
+	root := t.TempDir()
+	parts := []string{
+		filepath.Join(root, "ABC-001-part1.mkv"),
+		filepath.Join(root, "ABC-001-part2.mkv"),
+	}
+	out := filepath.Join(root, "prepared", "ABC-001.mkv")
+	mp4Out := filepath.Join(root, "prepared", "ABC-001.mp4")
+	runner := &fakeRunner{errors: []error{errors.New("copy failed"), errors.New("transcode failed")}}
+	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+	if err := os.WriteFile(mp4Out, []byte("partial mp4"), 0644); err != nil {
+		t.Fatalf("write partial mp4 output: %v", err)
+	}
+
+	_, err := concatVideos(context.Background(), runner, parts, out)
+	if err == nil {
+		t.Fatal("concatVideos returned nil error, want transcode failure")
+	}
+	if _, err := os.Stat(mp4Out); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial transcode output still exists, stat error = %v", err)
+	}
+}
+
 func TestRemuxVideoFallsBackToTranscode(t *testing.T) {
 	root := t.TempDir()
 	in := filepath.Join(root, "BDMV", "STREAM", "00002.m2ts")
@@ -175,6 +200,28 @@ func TestRemuxVideoFallsBackToTranscode(t *testing.T) {
 	}
 	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("partial remux output still exists, stat error = %v", err)
+	}
+}
+
+func TestRemuxVideoRemovesPartialTranscodeOutputOnFailure(t *testing.T) {
+	root := t.TempDir()
+	in := filepath.Join(root, "BDMV", "STREAM", "00002.m2ts")
+	out := filepath.Join(root, "prepared", "ABC-001.mkv")
+	mp4Out := filepath.Join(root, "prepared", "ABC-001.mp4")
+	runner := &fakeRunner{errors: []error{errors.New("copy failed"), errors.New("transcode failed")}}
+	if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+	if err := os.WriteFile(mp4Out, []byte("partial mp4"), 0644); err != nil {
+		t.Fatalf("write partial mp4 output: %v", err)
+	}
+
+	_, err := remuxVideo(context.Background(), runner, in, out)
+	if err == nil {
+		t.Fatal("remuxVideo returned nil error, want transcode failure")
+	}
+	if _, err := os.Stat(mp4Out); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial transcode output still exists, stat error = %v", err)
 	}
 }
 
