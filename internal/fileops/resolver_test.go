@@ -1,6 +1,8 @@
 package fileops
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +39,7 @@ func TestResolveMediaFallsBackToTorrentName(t *testing.T) {
 	root := t.TempDir()
 	folder := filepath.Join(root, "download")
 	mustMkdir(t, folder)
-	video := filepath.Join(folder, "ssni00083hhb.mp4")
+	video := filepath.Join(folder, "movie.mp4")
 	mustWriteSizedFile(t, video, MinVideoSize+1)
 
 	got, err := ResolveMedia(ResolveRequest{
@@ -53,6 +55,24 @@ func TestResolveMediaFallsBackToTorrentName(t *testing.T) {
 	}
 	if got.FileName != "SSNI-083.mp4" {
 		t.Fatalf("FileName = %q, want SSNI-083.mp4", got.FileName)
+	}
+}
+
+func TestResolveMediaReturnsCancelledContextError(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "SSNI-083")
+	mustWriteSizedFile(t, filepath.Join(folder, "movie.mp4"), MinVideoSize+1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ResolveMedia(ResolveRequest{
+		Context:     ctx,
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ResolveMedia error = %v, want context.Canceled", err)
 	}
 }
 
@@ -153,6 +173,26 @@ func TestIsImageFileRecognizesImageExtensions(t *testing.T) {
 				t.Fatalf("IsImageFile(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFindMediaCandidatesCollectsImages(t *testing.T) {
+	root := t.TempDir()
+	image := filepath.Join(root, "SSNI-083.iso")
+	mustWriteSizedFile(t, image, 1)
+
+	_, images, err := findMediaCandidates(context.Background(), root)
+	if err != nil {
+		t.Fatalf("findMediaCandidates returned error: %v", err)
+	}
+	if len(images) != 1 {
+		t.Fatalf("len(images) = %d, want 1", len(images))
+	}
+	if images[0].Path != image {
+		t.Fatalf("image path = %q, want %q", images[0].Path, image)
+	}
+	if images[0].Name != "SSNI-083.iso" {
+		t.Fatalf("image name = %q, want SSNI-083.iso", images[0].Name)
 	}
 }
 
