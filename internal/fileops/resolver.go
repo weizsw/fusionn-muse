@@ -16,6 +16,7 @@ type ResolveRequest struct {
 	Path        string
 	TorrentName string
 	StagingDir  string
+	Runner      CommandRunner
 }
 
 type ResolvedMedia struct {
@@ -60,6 +61,9 @@ func IsImageFile(path string) bool {
 func ResolveMedia(req ResolveRequest) (*ResolvedMedia, error) {
 	if req.Context == nil {
 		req.Context = context.Background()
+	}
+	if req.Runner == nil {
+		req.Runner = ExecCommandRunner{}
 	}
 	if req.StagingDir == "" {
 		return nil, fmt.Errorf("staging dir required")
@@ -110,6 +114,10 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 	videos, _, err := findMediaCandidates(req.Context, req.Path)
 	if err != nil {
 		return nil, err
+	}
+
+	if parts := findMultipartSet(videos, req.Path, req.TorrentName); len(parts) > 1 {
+		return prepareMultipart(req, parts)
 	}
 
 	if best := bestVideoCandidate(videos, req.Path, req.TorrentName); best != nil {

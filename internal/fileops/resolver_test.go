@@ -196,6 +196,41 @@ func TestFindMediaCandidatesCollectsImages(t *testing.T) {
 	}
 }
 
+func TestResolveMediaPreparesMultipartToStaging(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "download")
+	files := []string{"ABC-001-part1.wmv", "ABC-001-part2.wmv"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(folder, name), MinVideoSize+1)
+	}
+	staging := filepath.Join(root, "staging")
+	runner := &fakeRunner{}
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  staging,
+		Runner:      runner,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+
+	wantPath := filepath.Join(staging, "ABC-001.mkv")
+	if got.SourcePath != wantPath {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, wantPath)
+	}
+	if got.StagingPath != wantPath {
+		t.Fatalf("StagingPath = %q, want %q", got.StagingPath, wantPath)
+	}
+	if got.FileName != "ABC-001.mkv" {
+		t.Fatalf("FileName = %q, want ABC-001.mkv", got.FileName)
+	}
+	if len(runner.calls) != 1 || runner.calls[0].name != "ffmpeg" {
+		t.Fatalf("runner calls = %#v, want one ffmpeg call", runner.calls)
+	}
+}
+
 func TestFindMultipartSetLetterOrder(t *testing.T) {
 	root := t.TempDir()
 	files := []string{"pppd176A.FHD.wmv", "pppd176B.FHD.wmv", "pppd176C.FHD.wmv"}
