@@ -42,6 +42,7 @@ type partCandidate struct {
 type multipartGroupKey struct {
 	code      string
 	extFamily string
+	partBase  string
 }
 
 var imageExts = map[string]bool{
@@ -180,7 +181,8 @@ func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *me
 
 	var coded []mediaCandidate
 	for _, video := range videos {
-		if video.Code != "" {
+		if code, ok := mediaCodeFor(video.Path, folder, torrentName); ok {
+			video.Code = code
 			coded = append(coded, video)
 		}
 	}
@@ -188,15 +190,7 @@ func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *me
 		sort.Slice(coded, func(i, j int) bool { return coded[i].Size > coded[j].Size })
 		return &coded[0]
 	}
-
-	code, ok := fallbackCode(folder, torrentName)
-	if !ok {
-		return nil
-	}
-
-	sort.Slice(videos, func(i, j int) bool { return videos[i].Size > videos[j].Size })
-	videos[0].Code = code
-	return &videos[0]
+	return nil
 }
 
 func bestImageCandidate(images []mediaCandidate, folder, torrentName string) *mediaCandidate {
@@ -206,7 +200,7 @@ func bestImageCandidate(images []mediaCandidate, folder, torrentName string) *me
 
 	var coded []mediaCandidate
 	for _, image := range images {
-		if _, ok := imageCodeFor(image.Path, folder, torrentName); ok {
+		if _, ok := mediaCodeFor(image.Path, folder, torrentName); ok {
 			coded = append(coded, image)
 		}
 	}
@@ -233,7 +227,10 @@ func findMultipartSet(videos []mediaCandidate, folder, torrentName string) []str
 		if keys[i].code != keys[j].code {
 			return keys[i].code < keys[j].code
 		}
-		return keys[i].extFamily < keys[j].extFamily
+		if keys[i].extFamily != keys[j].extFamily {
+			return keys[i].extFamily < keys[j].extFamily
+		}
+		return keys[i].partBase < keys[j].partBase
 	})
 
 	for _, key := range keys {
@@ -267,20 +264,15 @@ func hasIncompleteMultipartSet(videos []mediaCandidate, folder, torrentName stri
 func multipartGroups(videos []mediaCandidate, folder, torrentName string) map[multipartGroupKey][]partCandidate {
 	groups := make(map[multipartGroupKey][]partCandidate)
 	for _, video := range videos {
-		code := video.Code
-		if code == "" {
-			if fallback, ok := fallbackCode(folder, torrentName); ok {
-				code = fallback
-			}
-		}
-		if code == "" {
-			continue
-		}
-		order, ok := detectPartOrder(video.Name)
+		code, ok := mediaCodeFor(video.Path, folder, torrentName)
 		if !ok {
 			continue
 		}
-		key := multipartGroupKey{code: code, extFamily: videoExtensionFamily(video.Path)}
+		order, partBase, ok := detectPartInfo(video.Name)
+		if !ok {
+			continue
+		}
+		key := multipartGroupKey{code: code, extFamily: videoExtensionFamily(video.Path), partBase: partBase}
 		groups[key] = append(groups[key], partCandidate{path: video.Path, order: order})
 	}
 
@@ -291,11 +283,11 @@ func videoExtensionFamily(path string) string {
 	return strings.ToLower(filepath.Ext(path))
 }
 
-func imageCodeFor(imagePath, folder, torrentName string) (string, bool) {
-	if code, ok := ExtractVideoCode(filepath.Base(imagePath)); ok {
+func mediaCodeFor(path, folder, torrentName string) (string, bool) {
+	if code, ok := ExtractVideoCode(filepath.Base(path)); ok {
 		return code, true
 	}
-	for _, dir := range imageCodeFolders(imagePath, folder) {
+	for _, dir := range candidateCodeFolders(path, folder) {
 		if code, ok := ExtractVideoCode(filepath.Base(dir)); ok {
 			return code, true
 		}
@@ -306,11 +298,11 @@ func imageCodeFor(imagePath, folder, torrentName string) (string, bool) {
 	return "", false
 }
 
-func imageCodeFolders(imagePath, requestPath string) []string {
-	imageDir := filepath.Clean(filepath.Dir(imagePath))
+func candidateCodeFolders(path, requestPath string) []string {
+	candidateDir := filepath.Clean(filepath.Dir(path))
 	requestDir := filepath.Clean(imageFallbackFolder(requestPath))
 	var dirs []string
-	for dir := imageDir; ; dir = filepath.Dir(dir) {
+	for dir := candidateDir; ; dir = filepath.Dir(dir) {
 		dirs = append(dirs, dir)
 		if dir == requestDir {
 			break
@@ -323,23 +315,37 @@ func imageCodeFolders(imagePath, requestPath string) []string {
 	return dirs
 }
 
-func detectPartOrder(name string) (int, bool) {
+func detectPartInfo(name string) (int, string, bool) {
 	base := strings.TrimSuffix(name, filepath.Ext(name))
-	if match := partWordPattern.FindStringSubmatch(base); match != nil {
-		n, err := strconv.Atoi(match[2])
-		return n, err == nil
+	if match := partWordPattern.FindStringSubmatchIndex(base); match != nil {
+		n, err := strconv.Atoi(base[match[4]:match[5]])
+		if err != nil {
+			return 0, "", false
+		}
+		return n, normalizePartBase(base[:match[0]] + base[match[1]:]), true
 	}
-	if match := trailingNumberPart.FindStringSubmatch(base); match != nil {
-		n, err := strconv.Atoi(match[2])
-		return n, err == nil
+	if match := trailingNumberPart.FindStringSubmatchIndex(base); match != nil {
+		n, err := strconv.Atoi(base[match[4]:match[5]])
+		if err != nil {
+			return 0, "", false
+		}
+		return n, normalizePartBase(base[:match[4]] + base[match[5]:]), true
 	}
-	if match := trailingLetterPart.FindStringSubmatch(base); match != nil {
-		letter := strings.ToUpper(match[2])
+	if match := trailingLetterPart.FindStringSubmatchIndex(base); match != nil {
+		letter := strings.ToUpper(base[match[4]:match[5]])
 		if len(letter) == 1 && letter[0] >= 'A' && letter[0] <= 'Z' {
-			return int(letter[0]-'A') + 1, true
+			return int(letter[0]-'A') + 1, normalizePartBase(base[:match[4]] + base[match[5]:]), true
 		}
 	}
-	return 0, false
+	return 0, "", false
+}
+
+func normalizePartBase(base string) string {
+	base = strings.Trim(strings.ToLower(base), " ._-")
+	fields := strings.FieldsFunc(base, func(r rune) bool {
+		return r == ' ' || r == '.' || r == '_' || r == '-'
+	})
+	return strings.Join(fields, "-")
 }
 
 func validPartOrders(parts []partCandidate) bool {

@@ -114,6 +114,28 @@ func TestResolveMediaUsesRootFolderCodeForNestedVideo(t *testing.T) {
 	}
 }
 
+func TestResolveMediaUsesCandidateParentCodeForNestedVideo(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "download")
+	video := filepath.Join(folder, "SSNI-083", "movie.mp4")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if got.SourcePath != video {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, video)
+	}
+	if got.FileName != "SSNI-083.mp4" {
+		t.Fatalf("FileName = %q, want SSNI-083.mp4", got.FileName)
+	}
+}
+
 func TestResolveMediaAcceptsUppercaseM2TS(t *testing.T) {
 	root := t.TempDir()
 	folder := filepath.Join(root, "SSNI-083")
@@ -694,6 +716,35 @@ func TestResolveMediaPreparesNestedMultipartWithRootCode(t *testing.T) {
 	}
 }
 
+func TestResolveMediaPreparesMultipartWithCandidateParentCode(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "download")
+	files := []string{"movie-part1.m2ts", "movie-part2.m2ts"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(folder, "SSNI-083", name), MinVideoSize+1)
+	}
+	staging := filepath.Join(root, "staging")
+	runner := &fakeRunner{}
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  staging,
+		Runner:      runner,
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+
+	wantPath := filepath.Join(staging, "SSNI-083.mkv")
+	if got.SourcePath != wantPath {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, wantPath)
+	}
+	if got.Code != "SSNI-083" {
+		t.Fatalf("Code = %q, want SSNI-083", got.Code)
+	}
+}
+
 func TestResolveMediaRejectsMultipartMissingPartOne(t *testing.T) {
 	root := t.TempDir()
 	folder := filepath.Join(root, "SSNI-083")
@@ -792,6 +843,23 @@ func TestFindMultipartSetRejectsMixedExtensions(t *testing.T) {
 	got := findMultipartSet(videos, root, "")
 	if len(got) != 0 {
 		t.Fatalf("len(parts) = %d, want 0 for mixed extensions", len(got))
+	}
+}
+
+func TestFindMultipartSetRejectsDifferentPartBases(t *testing.T) {
+	root := t.TempDir()
+	files := []string{"ABC-001-feature-part1.wmv", "ABC-001-bonus-part2.wmv"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
+	}
+	videos, _, err := findMediaCandidates(context.Background(), root)
+	if err != nil {
+		t.Fatalf("findMediaCandidates: %v", err)
+	}
+
+	got := findMultipartSet(videos, root, "")
+	if len(got) != 0 {
+		t.Fatalf("len(parts) = %d, want 0 for different part bases", len(got))
 	}
 }
 

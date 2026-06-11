@@ -111,11 +111,14 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	logger.Infof("📦 Step 2: Moving to processing...")
 	t := startStep("Move to processing")
 
-	if err := fileops.Move(stagingPath, processingPath); err != nil {
+	preserveStaging, err := moveToProcessing(job, stagingPath, processingPath)
+	if err != nil {
 		return s.handleError(job, "move to processing", err)
 	}
 	job.ProcessingPath = processingPath
-	job.StagingPath = ""
+	if !preserveStaging {
+		job.StagingPath = ""
+	}
 	durations["move_to_processing"] = t.done()
 
 	var subtitlePath, translatedPath string
@@ -197,6 +200,12 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	if err := fileops.Move(processingPath, scrapingPath); err != nil {
 		return s.handleError(job, "move video to scraping", err)
 	}
+	if preserveStaging {
+		if err := fileops.Remove(stagingPath); err != nil {
+			logger.Warnf("⚠️ Failed to remove preserved staging file: %v", err)
+		}
+		job.StagingPath = ""
+	}
 	durations["move_to_scraping"] = t.done()
 
 	// Step 7: Send success notification
@@ -219,6 +228,21 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	return nil
+}
+
+func moveToProcessing(job *queue.Job, stagingPath, processingPath string) (bool, error) {
+	preserveStaging := samePath(job.SourcePath, stagingPath) && samePath(job.StagingPath, stagingPath)
+	if preserveStaging {
+		return true, fileops.HardlinkOrCopy(stagingPath, processingPath)
+	}
+	return false, fileops.Move(stagingPath, processingPath)
+}
+
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // moveToFailed moves the file to failed folder for manual inspection.
