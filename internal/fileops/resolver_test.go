@@ -196,6 +196,66 @@ func TestFindMediaCandidatesCollectsImages(t *testing.T) {
 	}
 }
 
+func TestFindMultipartSetLetterOrder(t *testing.T) {
+	root := t.TempDir()
+	files := []string{"pppd176A.FHD.wmv", "pppd176B.FHD.wmv", "pppd176C.FHD.wmv"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
+	}
+	videos, _, err := findMediaCandidates(context.Background(), root)
+	if err != nil {
+		t.Fatalf("findMediaCandidates: %v", err)
+	}
+
+	got := findMultipartSet(videos, root, "")
+	if len(got) != 3 {
+		t.Fatalf("len(parts) = %d, want 3", len(got))
+	}
+	want := []string{"pppd176A.FHD.wmv", "pppd176B.FHD.wmv", "pppd176C.FHD.wmv"}
+	for i := range want {
+		if filepath.Base(got[i]) != want[i] {
+			t.Fatalf("part %d = %q, want %q", i, filepath.Base(got[i]), want[i])
+		}
+	}
+}
+
+func TestFindMultipartSetNumericOrder(t *testing.T) {
+	root := t.TempDir()
+	files := []string{"soe00967hhb2.wmv", "soe00967hhb1.wmv"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
+	}
+	videos, _, err := findMediaCandidates(context.Background(), root)
+	if err != nil {
+		t.Fatalf("findMediaCandidates: %v", err)
+	}
+
+	got := findMultipartSet(videos, root, "")
+	if len(got) != 2 {
+		t.Fatalf("len(parts) = %d, want 2", len(got))
+	}
+	if filepath.Base(got[0]) != "soe00967hhb1.wmv" || filepath.Base(got[1]) != "soe00967hhb2.wmv" {
+		t.Fatalf("parts order = %v, want numeric order", got)
+	}
+}
+
+func TestFindMultipartSetRejectsDuplicateMarkers(t *testing.T) {
+	root := t.TempDir()
+	files := []string{"soe00967hhb1.wmv", "SOE-967-part1.wmv"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
+	}
+	videos, _, err := findMediaCandidates(context.Background(), root)
+	if err != nil {
+		t.Fatalf("findMediaCandidates: %v", err)
+	}
+
+	got := findMultipartSet(videos, root, "")
+	if len(got) != 0 {
+		t.Fatalf("len(parts) = %d, want 0 for duplicate markers", len(got))
+	}
+}
+
 func mustMkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0755); err != nil {

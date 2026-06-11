@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -31,6 +33,12 @@ type mediaCandidate struct {
 	Code string
 }
 
+type partCandidate struct {
+	path  string
+	code  string
+	order int
+}
+
 var imageExts = map[string]bool{
 	".iso": true,
 	".nrg": true,
@@ -38,6 +46,12 @@ var imageExts = map[string]bool{
 	".mdf": true,
 	".bin": true,
 }
+
+var (
+	partWordPattern    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(part|cd|disc)0*([1-9][0-9]*)(?:[^a-z0-9]|$)`)
+	trailingNumberPart = regexp.MustCompile(`(?i)([a-z]+)0*\d{3,5}[a-z]*([1-9][0-9]*)$`) //nolint:gocritic // Keep plan-specified pattern.
+	trailingLetterPart = regexp.MustCompile(`(?i)([a-z]+)0*\d{3,5}([a-z])(?:[^a-z0-9].*)?$`)
+)
 
 // IsImageFile checks for disc/archive image sources that may contain playable media.
 func IsImageFile(path string) bool {
@@ -163,6 +177,77 @@ func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *me
 	sort.Slice(videos, func(i, j int) bool { return videos[i].Size > videos[j].Size })
 	videos[0].Code = code
 	return &videos[0]
+}
+
+func findMultipartSet(videos []mediaCandidate, folder, torrentName string) []string {
+	if len(videos) < 2 {
+		return nil
+	}
+
+	groups := make(map[string][]partCandidate)
+	for _, video := range videos {
+		code := video.Code
+		if code == "" {
+			if fallback, ok := fallbackCode(folder, torrentName); ok {
+				code = fallback
+			}
+		}
+		if code == "" {
+			continue
+		}
+		order, ok := detectPartOrder(video.Name)
+		if !ok {
+			continue
+		}
+		groups[code] = append(groups[code], partCandidate{path: video.Path, code: code, order: order})
+	}
+
+	for _, parts := range groups {
+		if len(parts) < 2 {
+			continue
+		}
+		if !validPartOrders(parts) {
+			continue
+		}
+		sort.Slice(parts, func(i, j int) bool { return parts[i].order < parts[j].order })
+		result := make([]string, 0, len(parts))
+		for _, part := range parts {
+			result = append(result, part.path)
+		}
+		return result
+	}
+
+	return nil
+}
+
+func detectPartOrder(name string) (int, bool) {
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	if match := partWordPattern.FindStringSubmatch(base); match != nil {
+		n, err := strconv.Atoi(match[2])
+		return n, err == nil
+	}
+	if match := trailingNumberPart.FindStringSubmatch(base); match != nil {
+		n, err := strconv.Atoi(match[2])
+		return n, err == nil
+	}
+	if match := trailingLetterPart.FindStringSubmatch(base); match != nil {
+		letter := strings.ToUpper(match[2])
+		if len(letter) == 1 && letter[0] >= 'A' && letter[0] <= 'Z' {
+			return int(letter[0]-'A') + 1, true
+		}
+	}
+	return 0, false
+}
+
+func validPartOrders(parts []partCandidate) bool {
+	seen := make(map[int]bool, len(parts))
+	for _, part := range parts {
+		if seen[part.order] {
+			return false
+		}
+		seen[part.order] = true
+	}
+	return true
 }
 
 func bestCodeFor(path, torrentName string) (string, bool) {
