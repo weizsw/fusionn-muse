@@ -23,19 +23,19 @@ func ExtractVideoCode(name string) (string, bool) {
 		return normalizeVideoCode(match[2], match[3])
 	}
 	if match := compactCodePattern.FindStringSubmatch(upper); match != nil {
-		prefix := match[2]
-		if technicalPrefixes[prefix] {
-			return "", false
-		}
-		return normalizeVideoCode(prefix, match[3])
+		return normalizeVideoCode(match[2], match[3])
 	}
 	return "", false
 }
 
 func normalizeVideoCode(prefix, digits string) (string, bool) {
+	upperPrefix := strings.ToUpper(prefix)
+	if technicalPrefixes[upperPrefix] {
+		return "", false
+	}
 	n, err := strconv.Atoi(digits)
 	if err != nil {
 		return "", false
 	}
-	return fmt.Sprintf("%s-%03d", strings.ToUpper(prefix), n), true
+	return fmt.Sprintf("%s-%03d", upperPrefix, n), true
 }

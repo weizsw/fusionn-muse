@@ -15,6 +15,9 @@ func TestExtractVideoCode(t *testing.T) {
 		{name: "compact no padding", in: "pppd176A.FHD.wmv", want: "PPPD-176", ok: true},
 		{name: "compact padded numeric part", in: "soe00967hhb1.wmv", want: "SOE-967", ok: true},
 		{name: "technical token rejected", in: "movie.FHD1080.x265.mp4", want: "", ok: false},
+		{name: "hyphenated hd technical prefix rejected", in: "HD-108.mp4", want: "", ok: false},
+		{name: "hyphenated fhd technical prefix rejected", in: "FHD-1080.mp4", want: "", ok: false},
+		{name: "hyphenated avc technical prefix rejected", in: "AVC-123.mp4", want: "", ok: false},
 		{name: "no code", in: "sample-video.mp4", want: "", ok: false},
 	}
 
