@@ -219,6 +219,26 @@ func TestFindMultipartSetLetterOrder(t *testing.T) {
 	}
 }
 
+func TestFindMultipartSetHyphenatedLetterOrder(t *testing.T) {
+	root := t.TempDir()
+	files := []string{"ABC-001B.wmv", "ABC-001A.wmv"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
+	}
+	videos, _, err := findMediaCandidates(context.Background(), root)
+	if err != nil {
+		t.Fatalf("findMediaCandidates: %v", err)
+	}
+
+	got := findMultipartSet(videos, root, "")
+	if len(got) != 2 {
+		t.Fatalf("len(parts) = %d, want 2", len(got))
+	}
+	if filepath.Base(got[0]) != "ABC-001A.wmv" || filepath.Base(got[1]) != "ABC-001B.wmv" {
+		t.Fatalf("parts order = %v, want hyphenated letter order", got)
+	}
+}
+
 func TestFindMultipartSetNumericOrder(t *testing.T) {
 	root := t.TempDir()
 	files := []string{"soe00967hhb2.wmv", "soe00967hhb1.wmv"}
@@ -236,6 +256,58 @@ func TestFindMultipartSetNumericOrder(t *testing.T) {
 	}
 	if filepath.Base(got[0]) != "soe00967hhb1.wmv" || filepath.Base(got[1]) != "soe00967hhb2.wmv" {
 		t.Fatalf("parts order = %v, want numeric order", got)
+	}
+}
+
+func TestFindMultipartSetExplicitMarkers(t *testing.T) {
+	tests := []struct {
+		name  string
+		files []string
+	}{
+		{name: "part", files: []string{"ABC-001-part2.wmv", "ABC-001-part1.wmv"}},
+		{name: "cd", files: []string{"ABC-001-cd2.wmv", "ABC-001-cd1.wmv"}},
+		{name: "disc", files: []string{"ABC-001-disc2.wmv", "ABC-001-disc1.wmv"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, name := range tt.files {
+				mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
+			}
+			videos, _, err := findMediaCandidates(context.Background(), root)
+			if err != nil {
+				t.Fatalf("findMediaCandidates: %v", err)
+			}
+
+			got := findMultipartSet(videos, root, "")
+			if len(got) != 2 {
+				t.Fatalf("len(parts) = %d, want 2", len(got))
+			}
+			if filepath.Base(got[0]) != tt.files[1] || filepath.Base(got[1]) != tt.files[0] {
+				t.Fatalf("parts order = %v, want explicit marker order", got)
+			}
+		})
+	}
+}
+
+func TestFindMultipartSetUsesTorrentNameCodeFallback(t *testing.T) {
+	root := t.TempDir()
+	files := []string{"movie-part2.wmv", "movie-part1.wmv"}
+	for _, name := range files {
+		mustWriteSizedFile(t, filepath.Join(root, name), MinVideoSize+1)
+	}
+	videos, _, err := findMediaCandidates(context.Background(), root)
+	if err != nil {
+		t.Fatalf("findMediaCandidates: %v", err)
+	}
+
+	got := findMultipartSet(videos, root, "ABC-001")
+	if len(got) != 2 {
+		t.Fatalf("len(parts) = %d, want 2", len(got))
+	}
+	if filepath.Base(got[0]) != "movie-part1.wmv" || filepath.Base(got[1]) != "movie-part2.wmv" {
+		t.Fatalf("parts order = %v, want torrent fallback order", got)
 	}
 }
 
