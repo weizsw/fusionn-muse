@@ -124,7 +124,7 @@ Fusionn-Muse detects codes from both hyphenated and compact filenames:
 - `ssni00083hhb.mp4` -> `SSNI-083`
 - `pppd176A.FHD.wmv` -> `PPPD-176`
 
-Ordered multipart videos such as `ABC-001A.wmv`, `ABC-001B.wmv`, or `abc00001hhb1.wmv`, `abc00001hhb2.wmv` are assembled into one `.mkv` before processing. Playable disc/archive image sources such as `.iso`, `.nrg`, `.img`, `.mdf`, and `.bin` are extracted without Docker loop mounts and remuxed to `.mkv` when possible.
+Ordered multipart videos such as `ABC-001A.wmv`, `ABC-001B.wmv`, or `abc00001hhb1.wmv`, `abc00001hhb2.wmv` are assembled into one staged video before processing, preferring `.mkv` and falling back to `.mp4` when transcode is needed. Playable disc/archive image sources such as `.iso`, `.nrg`, `.img`, `.mdf`, and `.bin` are extracted without Docker loop mounts and remuxed to `.mkv` when possible.
 
 ### Chinese Subtitle Detection
 
