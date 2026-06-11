@@ -61,7 +61,7 @@ var imageExts = map[string]bool{
 
 var (
 	partWordPattern    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(part|cd|disc)0*([1-9]\d*)(?:[^a-z0-9]|$)`)
-	trailingNumberPart = regexp.MustCompile(`(?i)([a-z]+)0*\d{3,5}[a-z]+([1-9]\d*)$`)
+	trailingNumberPart = regexp.MustCompile(`(?i)([a-z]+)0*\d{3,5}[a-z]+([1-9]\d*)(?:[^a-z0-9].*)?$`)
 	trailingLetterPart = regexp.MustCompile(`(?i)([a-z]+)-?0*\d{3,5}([a-z])(?:[^a-z0-9].*)?$`)
 )
 
@@ -128,6 +128,10 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 		return nil, err
 	}
 
+	if best := bestFilenameCodedVideoCandidate(videos); best != nil {
+		return resolveSelectedVideo(best.Path, best.Code), nil
+	}
+
 	parts := findMultipartSet(videos, req.Path, req.TorrentName)
 	if len(parts) > 1 {
 		return prepareMultipart(req, parts)
@@ -178,6 +182,25 @@ func findMediaCandidates(ctx context.Context, dir string) ([]mediaCandidate, []m
 	})
 
 	return videos, images, err
+}
+
+func bestFilenameCodedVideoCandidate(videos []mediaCandidate) *mediaCandidate {
+	var coded []mediaCandidate
+	for _, video := range videos {
+		if video.Code == "" {
+			continue
+		}
+		if _, _, ok := detectPartInfo(video.Name); ok {
+			continue
+		}
+		coded = append(coded, video)
+	}
+	if len(coded) == 0 {
+		return nil
+	}
+
+	sort.Slice(coded, func(i, j int) bool { return coded[i].Size > coded[j].Size })
+	return &coded[0]
 }
 
 func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *mediaCandidate {
