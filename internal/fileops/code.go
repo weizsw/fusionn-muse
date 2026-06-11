@@ -49,16 +49,20 @@ func hyphenatedPrefix(prefix string) string {
 		return prefix[start:]
 	}
 
-	trimmed := strings.TrimLeft(strings.ToLower(prefix), "x")
-	if len(trimmed) >= 2 && len(trimmed) <= 5 && len(trimmed) < len(prefix) {
+	lowerPrefix := strings.ToLower(prefix)
+	trimmed := strings.TrimLeft(lowerPrefix, "x")
+	if strings.HasPrefix(lowerPrefix, "xx") && len(trimmed) >= 2 && len(trimmed) <= 5 && len(trimmed) < len(prefix) {
 		return prefix[len(prefix)-len(trimmed):]
 	}
 
-	return prefix[len(prefix)-5:]
+	return prefix
 }
 
 func normalizeVideoCode(prefix, digits string) (string, bool) {
 	upperPrefix := strings.ToUpper(prefix)
+	if len(upperPrefix) < 2 || len(upperPrefix) > 5 {
+		return "", false
+	}
 	if technicalPrefixes[upperPrefix] {
 		return "", false
 	}
@@ -66,5 +70,12 @@ func normalizeVideoCode(prefix, digits string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	if isLikelyResolutionToken(upperPrefix, n) {
+		return "", false
+	}
 	return fmt.Sprintf("%s-%03d", upperPrefix, n), true
+}
+
+func isLikelyResolutionToken(prefix string, n int) bool {
+	return n == 720 || n == 1080 || n == 2160 || n == 4320 || strings.EqualFold(prefix, "MOVIE")
 }

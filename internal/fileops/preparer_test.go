@@ -74,6 +74,9 @@ func TestConcatVideosUsesFFmpegCopyFirst(t *testing.T) {
 	if !reflect.DeepEqual(call.args[7:], wantSuffix) {
 		t.Fatalf("ffmpeg args suffix = %#v, want %#v", call.args[7:], wantSuffix)
 	}
+	if _, err := os.Stat(call.args[6]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("concat list still exists, stat error = %v", err)
+	}
 }
 
 func TestExtractISOUsesBsdtar(t *testing.T) {

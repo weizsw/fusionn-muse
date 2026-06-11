@@ -700,6 +700,7 @@ func TestResolveMediaSelectsLargestDVDTitleChainFromImage(t *testing.T) {
 	root := t.TempDir()
 	image := filepath.Join(root, "SSNI-083.iso")
 	mustWriteSizedFile(t, image, 1024)
+	var concatList string
 	runner := fakeImageRunner(t, func(outDir string) {
 		videoTS := filepath.Join(outDir, "VIDEO_TS")
 		mustWriteSizedFile(t, filepath.Join(videoTS, "VTS_01_0.VOB"), MinVideoSize+50)
@@ -708,6 +709,7 @@ func TestResolveMediaSelectsLargestDVDTitleChainFromImage(t *testing.T) {
 		mustWriteSizedFile(t, filepath.Join(videoTS, "VTS_02_1.VOB"), MinVideoSize+2)
 		mustWriteSizedFile(t, filepath.Join(videoTS, "VTS_02_2.VOB"), MinVideoSize+2)
 	})
+	runner.onRun = captureConcatList(t, runner.onRun, &concatList)
 
 	_, err := ResolveMedia(ResolveRequest{
 		Path:        image,
@@ -721,12 +723,7 @@ func TestResolveMediaSelectsLargestDVDTitleChainFromImage(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("runner calls = %d, want extraction and concat", len(runner.calls))
 	}
-	listPath := runner.calls[1].args[6]
-	data, err := os.ReadFile(listPath)
-	if err != nil {
-		t.Fatalf("read concat list: %v", err)
-	}
-	got := string(data)
+	got := concatList
 	extractDir := imageExtractionDir(filepath.Join(root, "staging"), "SSNI-083")
 	first := filepath.Join(extractDir, "VIDEO_TS", "VTS_02_1.VOB")
 	second := filepath.Join(extractDir, "VIDEO_TS", "VTS_02_2.VOB")
@@ -887,6 +884,27 @@ func TestResolveMediaRejectsLoneNonFirstMultipart(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "incomplete multipart") {
 		t.Fatalf("error = %q, want incomplete multipart error", err)
+	}
+}
+
+func TestResolveMediaIgnoresIncompleteMultipartWhenValidNormalCandidateExists(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "SSNI-083")
+	valid := filepath.Join(folder, "SSNI-083.mp4")
+	incomplete := filepath.Join(folder, "bonus-part2.mkv")
+	mustWriteSizedFile(t, valid, MinVideoSize+1)
+	mustWriteSizedFile(t, incomplete, MinVideoSize+2)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if got.SourcePath != valid {
+		t.Fatalf("SourcePath = %q, want valid normal candidate %q", got.SourcePath, valid)
 	}
 }
 
@@ -1120,5 +1138,27 @@ func fakeImageRunner(t *testing.T, writeExtractedMedia func(outDir string)) *fak
 			}
 			return nil
 		},
+	}
+}
+
+func captureConcatList(t *testing.T, next func(name string, args ...string) error, dest *string) func(name string, args ...string) error {
+	t.Helper()
+	return func(name string, args ...string) error {
+		if name == "ffmpeg" {
+			for i := 0; i < len(args)-1; i++ {
+				if args[i] == "-i" {
+					data, err := os.ReadFile(args[i+1])
+					if err != nil {
+						t.Fatalf("read concat list: %v", err)
+					}
+					*dest = string(data)
+					break
+				}
+			}
+		}
+		if next != nil {
+			return next(name, args...)
+		}
+		return nil
 	}
 }
