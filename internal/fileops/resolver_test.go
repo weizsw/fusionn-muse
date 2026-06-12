@@ -35,6 +35,29 @@ func TestResolveMediaUsesFolderCodeForCompactFile(t *testing.T) {
 	}
 }
 
+func TestResolveMediaUsesDelimitedCodeInMessyFilename(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "download")
+	name := "azumi+mizushima+havd+837+reduced+mosaic+new+wife+and+stepfather_720p.mp4"
+	video := filepath.Join(folder, name)
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: name,
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if got.SourcePath != video {
+		t.Fatalf("SourcePath = %q, want %q", got.SourcePath, video)
+	}
+	if got.FileName != "HAVD-837.mp4" {
+		t.Fatalf("FileName = %q, want HAVD-837.mp4", got.FileName)
+	}
+}
+
 func TestResolveMediaFallsBackToTorrentName(t *testing.T) {
 	root := t.TempDir()
 	folder := filepath.Join(root, "download")
