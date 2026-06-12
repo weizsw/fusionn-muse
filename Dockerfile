@@ -39,6 +39,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Based on VideoCaptioner pyproject.toml (excluding GUI packages like PyQt5)
 RUN apt-get update && apt-get install -y --no-install-recommends git && \
     git clone https://github.com/WEIFENG2333/VideoCaptioner.git /app/videocaptioner --depth 1 && \
+    if [ ! -e /app/videocaptioner/app ] && [ -d /app/videocaptioner/videocaptioner ]; then \
+        ln -s /app/videocaptioner/videocaptioner /app/videocaptioner/app; \
+    fi && \
     pip install --no-cache-dir \
         faster-whisper \
         requests \
