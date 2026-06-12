@@ -10,6 +10,7 @@ import (
 var (
 	hyphenatedCodePattern = regexp.MustCompile(`(?i)([a-z]{2,})-(\d{3,5})`)
 	compactCodePattern    = regexp.MustCompile(`(?i)([a-z]{2,5})0*(\d{3,5})([a-z0-9]*)`)
+	delimitedCodePattern  = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])([a-z]{2,5})[+._\s]+0*(\d{3,5})(?:[^a-z0-9]|$)`)
 	technicalPrefixes     = map[string]bool{
 		"HD": true, "FHD": true, "UHD": true, "SD": true,
 		"AVC": true, "HEVC": true, "XVID": true, "X264": true, "X265": true,
@@ -24,6 +25,11 @@ func ExtractVideoCode(name string) (string, bool) {
 		}
 	}
 	for _, match := range compactCodePattern.FindAllStringSubmatch(name, -1) {
+		if code, ok := normalizeVideoCode(match[1], match[2]); ok {
+			return code, true
+		}
+	}
+	for _, match := range delimitedCodePattern.FindAllStringSubmatch(name, -1) {
 		if code, ok := normalizeVideoCode(match[1], match[2]); ok {
 			return code, true
 		}
