@@ -42,3 +42,4 @@ data/
 dist/
 bin/
 .worktrees/
+.codegraph/
