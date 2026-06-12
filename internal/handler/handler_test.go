@@ -29,33 +29,33 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
-func TestTorrentCompleteReturnsOKForNoValidMedia(t *testing.T) {
+func TestTorrentCompleteReturnsAcceptedForNoValidMedia(t *testing.T) {
 	root := t.TempDir()
 	folder := filepath.Join(root, "download")
 	mustWriteSizedHandlerFile(t, filepath.Join(folder, "movie.mp4"), fileops.MinVideoSize+1)
 	handler := newTestHandler(root)
 
 	response := postTorrentComplete(t, handler, `{"path":"`+folder+`","name":"no code here"}`)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", response.Code, http.StatusOK, response.Body.String())
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body = %s", response.Code, http.StatusAccepted, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), "no valid video files found") {
-		t.Fatalf("body = %s, want no valid video response", response.Body.String())
+	if !strings.Contains(response.Body.String(), "webhook accepted") {
+		t.Fatalf("body = %s, want accepted response", response.Body.String())
 	}
 }
 
-func TestTorrentCompleteReturnsServerErrorForMediaPreparationFailure(t *testing.T) {
+func TestTorrentCompleteReturnsAcceptedForMediaPreparationFailure(t *testing.T) {
 	root := t.TempDir()
 	image := filepath.Join(root, "media-extract", "SSNI-083-image", "disc.iso")
 	mustWriteSizedHandlerFile(t, image, 1024)
 	handler := newTestHandler(root)
 
 	response := postTorrentComplete(t, handler, `{"path":"`+image+`","name":"SSNI-083"}`)
-	if response.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d; body = %s", response.Code, http.StatusInternalServerError, response.Body.String())
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body = %s", response.Code, http.StatusAccepted, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), "image extraction dir overlaps source path") {
-		t.Fatalf("body = %s, want preparation failure response", response.Body.String())
+	if !strings.Contains(response.Body.String(), "webhook accepted") {
+		t.Fatalf("body = %s, want accepted response", response.Body.String())
 	}
 }
 
