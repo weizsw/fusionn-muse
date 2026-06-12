@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -88,8 +89,18 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 
 	logger.Infof("📥 Webhook received: %s", req.Path)
 
+	jobID := uuid.New().String()[:8]
+	go h.resolveAndDispatchTorrent(req, jobID)
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"message": "webhook accepted",
+		"job":     jobID,
+	})
+}
+
+func (h *Handler) resolveAndDispatchTorrent(req TorrentCompleteRequest, jobID string) {
 	resolved, err := fileops.ResolveMedia(fileops.ResolveRequest{
-		Context:     c.Request.Context(),
+		Context:     context.Background(),
 		Path:        req.Path,
 		TorrentName: req.Name,
 		StagingDir:  h.folders.Staging,
@@ -97,22 +108,16 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, fileops.ErrNoValidMedia) {
 			logger.Warnf("⚠️ %v in: %s", err, req.Path)
-			c.JSON(http.StatusOK, gin.H{
-				"message": "no valid video files found",
-				"jobs":    []string{},
-			})
 			return
 		}
 		if errors.Is(err, os.ErrNotExist) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "path does not exist"})
+			logger.Warnf("⚠️ Path does not exist for webhook: %s: %v", req.Path, err)
 			return
 		}
-		logger.Errorf("❌ Failed to resolve media: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		logger.Errorf("❌ Failed to resolve media for webhook path %s: %v", req.Path, err)
 		return
 	}
 
-	jobID := uuid.New().String()[:8]
 	fileName := resolved.FileName
 	isLight := resolved.HasChineseSubtitle
 
@@ -125,22 +130,10 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 		logger.Infof("⚡ Light job detected (Chinese subtitle): %s (job: %s)", fileName, jobID)
 		h.queue.RegisterLightJob(job) // Register for tracking, but don't queue
 		go h.processLightJob(job)
-
-		c.JSON(http.StatusAccepted, gin.H{
-			"message":  "light job started (skip transcribe/translate)",
-			"job":      jobID,
-			"job_type": "light",
-		})
 	} else {
 		// Heavy job: queue for sequential processing (transcribe + translate)
 		h.queue.Enqueue(job)
 		logger.Infof("📥 Heavy job queued: %s (job: %s)", fileName, jobID)
-
-		c.JSON(http.StatusAccepted, gin.H{
-			"message":  "heavy job queued (transcribe + translate)",
-			"job":      jobID,
-			"job_type": "heavy",
-		})
 	}
 }
 
