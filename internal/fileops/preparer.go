@@ -147,12 +147,11 @@ func concatVideos(ctx context.Context, runner CommandRunner, parts []string, out
 		if removeErr := os.Remove(out); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return "", fmt.Errorf("remove partial concat output: %w", removeErr)
 		}
-		mp4Out := ChangeExtension(out, ".mp4")
-		if transcodeErr := runner.Run(ctx, "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:v", "libx264", "-c:a", "aac", mp4Out); transcodeErr != nil {
-			_ = os.Remove(mp4Out)
+		if transcodeErr := runner.Run(ctx, "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-c:a", "aac", out); transcodeErr != nil {
+			_ = os.Remove(out)
 			return "", fmt.Errorf("concat copy failed: %w; transcode failed: %w", err, transcodeErr)
 		}
-		return mp4Out, nil
+		return out, nil
 	}
 
 	return out, nil
@@ -167,12 +166,11 @@ func remuxVideo(ctx context.Context, runner CommandRunner, in, out string) (stri
 		if removeErr := os.Remove(out); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return "", fmt.Errorf("remove partial remux output: %w", removeErr)
 		}
-		mp4Out := ChangeExtension(out, ".mp4")
-		if transcodeErr := runner.Run(ctx, "ffmpeg", "-y", "-i", in, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-c:a", "aac", mp4Out); transcodeErr != nil {
-			_ = os.Remove(mp4Out)
+		if transcodeErr := runner.Run(ctx, "ffmpeg", "-y", "-i", in, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-c:a", "aac", out); transcodeErr != nil {
+			_ = os.Remove(out)
 			return "", fmt.Errorf("remux copy failed: %w; transcode failed: %w", err, transcodeErr)
 		}
-		return mp4Out, nil
+		return out, nil
 	}
 
 	return out, nil
