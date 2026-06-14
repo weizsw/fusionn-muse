@@ -59,6 +59,34 @@ func TestTorrentCompleteReturnsAcceptedForMediaPreparationFailure(t *testing.T) 
 	}
 }
 
+func TestProcessLightJobHardlinksPlainSourceToScraping(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "downloads", "SSNI-083-C.mp4")
+	content := []byte("video content")
+	if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
+		t.Fatalf("mkdir source dir: %v", err)
+	}
+	if err := os.WriteFile(source, content, 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	handler := newTestHandler(root)
+	job := queue.NewJob("job1", source, filepath.Base(source), "SSNI-083", "")
+
+	handler.processLightJob(job)
+
+	scrapingPath := filepath.Join(handler.folders.Scraping, fileops.CleanVideoFilename(filepath.Base(source)))
+	if !sameFile(t, source, scrapingPath) {
+		t.Fatal("scraping file is not hard-linked to source")
+	}
+	got, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("source content = %q, want %q", got, content)
+	}
+}
+
 func newTestHandler(root string) *Handler {
 	return &Handler{
 		queue: queue.New(noopProcessor{}, 1, 0),
@@ -98,4 +126,17 @@ func mustWriteSizedHandlerFile(t *testing.T, path string, size int64) {
 	if err := f.Close(); err != nil {
 		t.Fatalf("close %s: %v", path, err)
 	}
+}
+
+func sameFile(t *testing.T, a, b string) bool {
+	t.Helper()
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		t.Fatalf("stat %s: %v", a, err)
+	}
+	bInfo, err := os.Stat(b)
+	if err != nil {
+		t.Fatalf("stat %s: %v", b, err)
+	}
+	return os.SameFile(aInfo, bInfo)
 }
