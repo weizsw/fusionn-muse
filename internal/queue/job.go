@@ -30,6 +30,10 @@ type Job struct {
 
 	// IsLight indicates this job has Chinese subtitle detected and can skip transcription
 	IsLight bool `json:"is_light"`
+	// SubtitleDetectionReason records why the job can skip transcription.
+	SubtitleDetectionReason string `json:"subtitle_detection_reason,omitempty"`
+	// SidecarSubtitlePath points to the real sidecar subtitle to preserve.
+	SidecarSubtitlePath string `json:"sidecar_subtitle_path,omitempty"`
 
 	// Paths set during processing
 	StagingPath    string `json:"staging_path,omitempty"`

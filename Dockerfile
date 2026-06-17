@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libarchive-tools \
     7zip \
     nrg2iso \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone VideoCaptioner and install Python dependencies

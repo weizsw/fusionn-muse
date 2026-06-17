@@ -105,6 +105,24 @@ func Move(src, dst string) error {
 	return nil
 }
 
+// Copy copies src to dst, replacing dst if it exists.
+func Copy(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return fmt.Errorf("create dir: %w", err)
+	}
+	if samePath(src, dst) {
+		return nil
+	}
+	if err := removeExistingDestination(dst); err != nil {
+		return err
+	}
+	if err := copyFile(src, dst); err != nil {
+		return fmt.Errorf("copy: %w", err)
+	}
+	logger.Debugf("📋 Copied: %s → %s", src, dst)
+	return nil
+}
+
 func removeExistingDestination(dst string) error {
 	if _, err := os.Stat(dst); err == nil {
 		if err := os.Remove(dst); err != nil {
