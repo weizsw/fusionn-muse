@@ -37,13 +37,19 @@ func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error
 		return nil, err
 	}
 
-	return &ResolvedMedia{
-		SourcePath:         prepared,
-		FileName:           filepath.Base(prepared),
-		StagingPath:        prepared,
-		Code:               code,
-		HasChineseSubtitle: anyChineseSubtitle(parts),
-	}, nil
+	resolved := &ResolvedMedia{
+		SourcePath:  prepared,
+		FileName:    filepath.Base(prepared),
+		StagingPath: prepared,
+		Code:        code,
+	}
+	if anyChineseSubtitle(parts) {
+		resolved.HasChineseSubtitle = true
+		resolved.SubtitleDetectionReason = SubtitleDetectionFilename
+	} else {
+		detectExistingSubtitle(req.Context, resolved, prepared, req.Path)
+	}
+	return resolved, nil
 }
 
 func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) {
@@ -82,13 +88,19 @@ func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) 
 		return nil, err
 	}
 
-	return &ResolvedMedia{
-		SourcePath:         prepared,
-		FileName:           filepath.Base(prepared),
-		StagingPath:        prepared,
-		Code:               code,
-		HasChineseSubtitle: HasChineseSubtitle(filepath.Base(imagePath)) || anyChineseSubtitle(parts),
-	}, nil
+	resolved := &ResolvedMedia{
+		SourcePath:  prepared,
+		FileName:    filepath.Base(prepared),
+		StagingPath: prepared,
+		Code:        code,
+	}
+	if HasChineseSubtitle(filepath.Base(imagePath)) || anyChineseSubtitle(parts) {
+		resolved.HasChineseSubtitle = true
+		resolved.SubtitleDetectionReason = SubtitleDetectionFilename
+	} else {
+		detectExistingSubtitle(req.Context, resolved, prepared, imageFallbackFolder(req.Path))
+	}
+	return resolved, nil
 }
 
 func imageCodeFor(req ResolveRequest, imagePath string) (string, bool) {

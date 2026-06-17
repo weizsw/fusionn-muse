@@ -124,6 +124,8 @@ func (h *Handler) resolveAndDispatchTorrent(req TorrentCompleteRequest, jobID st
 	job := queue.NewJob(jobID, resolved.SourcePath, fileName, req.Name, req.Category)
 	job.IsLight = isLight
 	job.StagingPath = resolved.StagingPath
+	job.SubtitleDetectionReason = resolved.SubtitleDetectionReason
+	job.SidecarSubtitlePath = resolved.SidecarSubtitlePath
 
 	if isLight {
 		// Light job: process immediately in background (no queue wait)

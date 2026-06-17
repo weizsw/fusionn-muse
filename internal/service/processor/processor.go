@@ -3,9 +3,13 @@ package processor
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/fusionn-muse/internal/client/apprise"
 	"github.com/fusionn-muse/internal/config"
@@ -99,7 +103,11 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	// Step 2: Clean filename and move to processing
 	// Check if filename has Chinese subtitle indicators (skip transcription/translation)
 	originalName := job.FileName
-	hasChineseSub := fileops.HasChineseSubtitle(originalName)
+	hasChineseSub := job.IsLight
+	if !hasChineseSub && fileops.HasChineseSubtitle(originalName) {
+		hasChineseSub = true
+		job.SubtitleDetectionReason = fileops.SubtitleDetectionFilename
+	}
 
 	cleanedName := fileops.CleanVideoFilename(job.FileName)
 	if cleanedName != job.FileName {
@@ -121,23 +129,34 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	}
 	durations["move_to_processing"] = t.done()
 
+	if !cfg.DryRun && !hasChineseSub && hardSubOCREnabled(cfg) {
+		detected, err := detectHardSubOCR(ctx, processingPath)
+		if err != nil {
+			logger.Warnf("⚠️ Hard-sub OCR detection failed for %s: %v", job.FileName, err)
+		} else if detected {
+			hasChineseSub = true
+			job.IsLight = true
+			job.SubtitleDetectionReason = fileops.SubtitleDetectionHardSubOCR
+		}
+	}
+
 	var subtitlePath, translatedPath string
 	skipSubtitle := cfg.DryRun || hasChineseSub
 
 	if skipSubtitle {
 		// Skip transcription and translation
-		if hasChineseSub {
-			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (Chinese subtitle detected)")
-		} else {
+		if cfg.DryRun {
 			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (dry run)")
+			baseName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName))
+			subtitlePath = filepath.Join(filepath.Dir(processingPath), baseName+".srt")
+			if err := fileops.WriteDummySubtitle(subtitlePath); err != nil {
+				s.moveToFailed(job, processingPath)
+				return s.handleError(job, "create dummy subtitle", err)
+			}
+			translatedPath = subtitlePath
+		} else {
+			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (Chinese subtitle detected: %s)", job.SubtitleDetectionReason)
 		}
-		baseName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName))
-		subtitlePath = filepath.Join(filepath.Dir(processingPath), baseName+".srt")
-		if err := fileops.WriteDummySubtitle(subtitlePath); err != nil {
-			s.moveToFailed(job, processingPath)
-			return s.handleError(job, "create dummy subtitle", err)
-		}
-		translatedPath = subtitlePath
 	} else {
 		// Step 3: Transcribe with whisper
 		logger.Infof("🎤 Step 3: Transcribing with Whisper (%s)...", cfg.Whisper.Model)
@@ -167,17 +186,24 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 
 	// Step 5: Move translated subtitle to subtitles folder (skip if no real subtitle)
 	if skipSubtitle {
-		logger.Infof("⏭️  Step 5: Skipping subtitle move")
-		// Clean up dummy subtitle
-		_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
+		if cfg.DryRun {
+			logger.Infof("⏭️  Step 5: Skipping subtitle move")
+			// Clean up dummy subtitle
+			_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
+		} else if job.SubtitleDetectionReason == fileops.SubtitleDetectionSidecar && job.SidecarSubtitlePath != "" {
+			finalSubPath := filepath.Join(s.folders.Subtitles, subtitleOutputName(job.FileName, filepath.Ext(job.SidecarSubtitlePath), cfg.Subtitle.LanguageSuffix))
+			logger.Infof("📦 Step 5: Copying sidecar subtitle to subtitles folder...")
+			t = startStep("Copy sidecar subtitle")
+			if err := fileops.Copy(job.SidecarSubtitlePath, finalSubPath); err != nil {
+				return s.handleError(job, "copy sidecar subtitle", err)
+			}
+			durations["copy_sidecar_subtitle"] = t.done()
+		} else {
+			logger.Infof("⏭️  Step 5: Skipping subtitle move")
+		}
 	} else {
 		// Use cleaned video name as subtitle name with optional language suffix
-		baseName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName))
-		cleanSubName := baseName + ".srt"
-		if cfg.Subtitle.LanguageSuffix != "" {
-			cleanSubName = baseName + "." + cfg.Subtitle.LanguageSuffix + ".srt"
-		}
-		finalSubPath := filepath.Join(s.folders.Subtitles, cleanSubName)
+		finalSubPath := filepath.Join(s.folders.Subtitles, subtitleOutputName(job.FileName, ".srt", cfg.Subtitle.LanguageSuffix))
 		logger.Infof("📦 Step 5: Moving translated subtitle to subtitles folder...")
 		t = startStep("Move subtitle")
 
@@ -236,6 +262,96 @@ func moveToProcessing(job *queue.Job, stagingPath, processingPath string) (bool,
 		return true, fileops.HardlinkOrCopy(stagingPath, processingPath)
 	}
 	return false, fileops.Move(stagingPath, processingPath)
+}
+
+func subtitleOutputName(videoName, subtitleExt, languageSuffix string) string {
+	baseName := strings.TrimSuffix(videoName, filepath.Ext(videoName))
+	if languageSuffix == "" {
+		return baseName + subtitleExt
+	}
+	return baseName + "." + languageSuffix + subtitleExt
+}
+
+func hardSubOCREnabled(cfg *config.Config) bool {
+	return cfg.HardSubOCR.Enabled == nil || *cfg.HardSubOCR.Enabled
+}
+
+func detectHardSubOCR(parent context.Context, videoPath string) (bool, error) {
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
+	defer cancel()
+
+	duration, err := probeDuration(ctx, videoPath)
+	if err != nil {
+		return false, err
+	}
+	tmpDir, err := os.MkdirTemp("", "fusionn-muse-ocr-*")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	hits := 0
+	for i, pct := range []float64{0.15, 0.30, 0.45, 0.60, 0.75} {
+		frame := filepath.Join(tmpDir, fmt.Sprintf("frame-%d.png", i))
+		if err := extractSubtitleBand(ctx, videoPath, duration*pct, frame); err != nil {
+			return false, err
+		}
+		text, err := exec.CommandContext(ctx, "tesseract", frame, "stdout").Output()
+		if err != nil {
+			return false, err
+		}
+		if ocrTextLooksReadable(string(text)) {
+			hits++
+			if hits >= 2 {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func probeDuration(ctx context.Context, videoPath string) (float64, error) {
+	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", videoPath).Output()
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe duration: %w", err)
+	}
+	duration, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("invalid ffprobe duration: %q", strings.TrimSpace(string(out)))
+	}
+	return duration, nil
+}
+
+func extractSubtitleBand(ctx context.Context, videoPath string, seconds float64, outPath string) error {
+	cmd := exec.CommandContext(
+		ctx,
+		"ffmpeg",
+		"-y",
+		"-ss", fmt.Sprintf("%.3f", seconds),
+		"-i", videoPath,
+		"-frames:v", "1",
+		"-vf", "crop=iw:ih*0.4:0:ih*0.6",
+		outPath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("ffmpeg frame extract: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func ocrTextLooksReadable(text string) bool {
+	nonSpace := 0
+	cjk := 0
+	for _, r := range text {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		nonSpace++
+		if (r >= '\u3400' && r <= '\u9fff') || (r >= '\uf900' && r <= '\ufaff') {
+			cjk++
+		}
+	}
+	return cjk >= 4 || nonSpace >= 8
 }
 
 func samePath(a, b string) bool {

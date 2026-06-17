@@ -15,12 +15,13 @@ import (
 
 // Config holds all configuration for the application.
 type Config struct {
-	Server    ServerConfig    `mapstructure:"server"`
-	Whisper   WhisperConfig   `mapstructure:"whisper"`
-	Translate TranslateConfig `mapstructure:"translate"`
-	Subtitle  SubtitleConfig  `mapstructure:"subtitle"`
-	Apprise   AppriseConfig   `mapstructure:"apprise"`
-	Queue     QueueConfig     `mapstructure:"queue"`
+	Server     ServerConfig     `mapstructure:"server"`
+	Whisper    WhisperConfig    `mapstructure:"whisper"`
+	Translate  TranslateConfig  `mapstructure:"translate"`
+	Subtitle   SubtitleConfig   `mapstructure:"subtitle"`
+	HardSubOCR HardSubOCRConfig `mapstructure:"hard_sub_ocr"`
+	Apprise    AppriseConfig    `mapstructure:"apprise"`
+	Queue      QueueConfig      `mapstructure:"queue"`
 
 	// DryRun: skip transcription and translation (for testing file workflow)
 	DryRun bool `mapstructure:"dry_run"`
@@ -121,6 +122,11 @@ type SubtitleConfig struct {
 	// Examples: "zh-CN", "chi", "chs", "zh-Hans", "en"
 	// Leave empty for no suffix (e.g., "movie.srt" instead of "movie.zh-CN.srt")
 	LanguageSuffix string `mapstructure:"language_suffix"`
+}
+
+type HardSubOCRConfig struct {
+	// Enabled: detect hard-subbed video text after cheap subtitle checks fail (default true).
+	Enabled *bool `mapstructure:"enabled"`
 }
 
 // ChangeCallback is called when config changes.

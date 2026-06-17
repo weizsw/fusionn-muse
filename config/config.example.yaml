@@ -142,6 +142,11 @@ subtitle:
   # Leave empty for no suffix (default behavior)
   language_suffix: ""
 
+# Detect burned-in subtitles after filename, sidecar, and embedded subtitle checks fail.
+# Uses ffmpeg frame sampling + default Tesseract OCR; failures fall back to normal transcription.
+hard_sub_ocr:
+  enabled: true
+
 # ─────────────────────────────────────────────────────────────────────────────
 # QUEUE
 # ─────────────────────────────────────────────────────────────────────────────

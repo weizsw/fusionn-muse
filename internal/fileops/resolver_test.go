@@ -81,6 +81,140 @@ func TestResolveMediaFallsBackToTorrentName(t *testing.T) {
 	}
 }
 
+func TestResolveMediaDetectsChineseSidecarSubtitle(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "download")
+	video := filepath.Join(folder, "SSNI-083.mp4")
+	sidecar := filepath.Join(folder, "SSNI-083.srt")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+	mustWriteTextFile(t, sidecar, "1\n00:00:00,000 --> 00:00:01,000\n中文字幕\n")
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if !got.HasChineseSubtitle {
+		t.Fatal("HasChineseSubtitle = false, want true from sidecar subtitle")
+	}
+	if got.SubtitleDetectionReason != SubtitleDetectionSidecar {
+		t.Fatalf("SubtitleDetectionReason = %q, want %q", got.SubtitleDetectionReason, SubtitleDetectionSidecar)
+	}
+	if got.SidecarSubtitlePath != sidecar {
+		t.Fatalf("SidecarSubtitlePath = %q, want %q", got.SidecarSubtitlePath, sidecar)
+	}
+}
+
+func TestResolveMediaDetectsRecursiveCodeMatchedSidecarSubtitle(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "download")
+	video := filepath.Join(folder, "movie.mp4")
+	sidecar := filepath.Join(folder, "Subs", "SSNI-083.vtt")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+	mustWriteTextFile(t, sidecar, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n中文字幕\n")
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "SSNI-083",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if got.SidecarSubtitlePath != sidecar {
+		t.Fatalf("SidecarSubtitlePath = %q, want %q", got.SidecarSubtitlePath, sidecar)
+	}
+}
+
+func TestResolveMediaStopsAtFilenameSubtitleDetection(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "download")
+	video := filepath.Join(folder, "SSNI-083-C.mp4")
+	sidecar := filepath.Join(folder, "SSNI-083-C.srt")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+	mustWriteTextFile(t, sidecar, "中文字幕\n")
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if got.SubtitleDetectionReason != SubtitleDetectionFilename {
+		t.Fatalf("SubtitleDetectionReason = %q, want %q", got.SubtitleDetectionReason, SubtitleDetectionFilename)
+	}
+	if got.SidecarSubtitlePath != "" {
+		t.Fatalf("SidecarSubtitlePath = %q, want empty for filename detection", got.SidecarSubtitlePath)
+	}
+}
+
+func TestResolveMediaDetectsEmbeddedChineseSubtitle(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	mustMkdir(t, bin)
+	ffprobe := filepath.Join(bin, "ffprobe")
+	mustWriteTextFile(t, ffprobe, "#!/bin/sh\nprintf '%s\\n' '{\"streams\":[{\"codec_type\":\"subtitle\",\"tags\":{\"language\":\"zho\",\"title\":\"Chinese\"}}]}'\n")
+	if err := os.Chmod(ffprobe, 0755); err != nil {
+		t.Fatalf("chmod ffprobe: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	video := filepath.Join(root, "SSNI-083.mp4")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        video,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if !got.HasChineseSubtitle {
+		t.Fatal("HasChineseSubtitle = false, want true from embedded subtitle")
+	}
+	if got.SubtitleDetectionReason != SubtitleDetectionEmbedded {
+		t.Fatalf("SubtitleDetectionReason = %q, want %q", got.SubtitleDetectionReason, SubtitleDetectionEmbedded)
+	}
+}
+
+func TestResolveMediaDetectsEmbeddedChineseSubtitleInPreparedMultipart(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	mustMkdir(t, bin)
+	ffprobe := filepath.Join(bin, "ffprobe")
+	mustWriteTextFile(t, ffprobe, "#!/bin/sh\nprintf '%s\\n' '{\"streams\":[{\"codec_type\":\"subtitle\",\"tags\":{\"language\":\"zho\"}}]}'\n")
+	if err := os.Chmod(ffprobe, 0755); err != nil {
+		t.Fatalf("chmod ffprobe: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	folder := filepath.Join(root, "download")
+	mustWriteSizedFile(t, filepath.Join(folder, "SSNI-083-part1.mkv"), MinVideoSize+1)
+	mustWriteSizedFile(t, filepath.Join(folder, "SSNI-083-part2.mkv"), MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      &fakeRunner{},
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if !got.HasChineseSubtitle {
+		t.Fatal("HasChineseSubtitle = false, want true from prepared embedded subtitle")
+	}
+	if got.SubtitleDetectionReason != SubtitleDetectionEmbedded {
+		t.Fatalf("SubtitleDetectionReason = %q, want %q", got.SubtitleDetectionReason, SubtitleDetectionEmbedded)
+	}
+}
+
 func TestResolveMediaUsesAncestorCodeForDirectNestedVideo(t *testing.T) {
 	root := t.TempDir()
 	video := filepath.Join(root, "SSNI-083", "BDMV", "STREAM", "00001.m2ts")
@@ -1253,6 +1387,16 @@ func mustWriteSizedFile(t *testing.T, path string, size int64) {
 	}
 	if err := f.Close(); err != nil {
 		t.Fatalf("close %s: %v", path, err)
+	}
+}
+
+func mustWriteTextFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
 

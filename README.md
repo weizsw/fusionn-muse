@@ -128,11 +128,12 @@ Ordered multipart videos such as `ABC-001A.wmv`, `ABC-001B.wmv`, or `abc00001hhb
 
 ### Chinese Subtitle Detection
 
-Files with Chinese subtitle indicators are skipped (already have subtitles):
+Files are skipped when Fusionn-Muse finds existing Chinese subtitles:
 
-- Suffixes: `-C`, `_C`, `.C`
-- Language codes: `zh`, `chs`, `cht`, `chi`, `cn`, `gb`, `big5`, `sc`, `tc`
-- Chinese terms: `中文`, `简中`, `繁中`, `软中`, `硬中`, `字幕`, `内嵌`, `内封`, `中字`, `国语`, `双语`
+- Filename indicators: `-C`, `_C`, `.C`, `zh`, `chs`, `cht`, `chi`, `cn`, `gb`, `big5`, `sc`, `tc`, `中文`, `简中`, `繁中`, `软中`, `硬中`, `字幕`, `内嵌`, `内封`, `中字`, `国语`, `双语`
+- Sidecar subtitles: `.srt`, `.ass`, `.ssa`, `.vtt` matched by same basename or video code, with Chinese filename/content hints
+- Embedded subtitle streams: `ffprobe` subtitle metadata with Chinese language/title hints
+- Hard subtitles: optional bottom-band OCR with Tesseract after the cheaper checks fail
 
 ## LLM Providers
 
