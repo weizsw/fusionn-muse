@@ -87,8 +87,9 @@ func TestProcessCopiesSidecarSubtitleForLightJob(t *testing.T) {
 	}
 	source := filepath.Join(root, "input", "SSNI-083.mp4")
 	sidecar := filepath.Join(root, "input", "SSNI-083.ass")
+	sidecarContent := "Subtitle: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,中文字幕"
 	mustWriteTestFile(t, source, "video")
-	mustWriteTestFile(t, sidecar, "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,中文字幕")
+	mustWriteTestFile(t, sidecar, sidecarContent)
 
 	svc := New(cfgMgr, nil)
 	svc.folders = folders
@@ -106,7 +107,7 @@ func TestProcessCopiesSidecarSubtitleForLightJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read copied sidecar: %v", err)
 	}
-	if string(got) != "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,中文字幕" {
+	if string(got) != sidecarContent {
 		t.Fatalf("copied sidecar content = %q", got)
 	}
 	if fileExists(filepath.Join(folders.Subtitles, "SSNI-083.zh-CN.srt")) {

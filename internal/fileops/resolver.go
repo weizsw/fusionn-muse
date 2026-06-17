@@ -204,7 +204,10 @@ func findChineseSidecar(root, mediaPath, code string) string {
 	}
 	var candidates []candidate
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil || info.IsDir() || !isSubtitleFile(path) {
+		if err != nil {
+			return err
+		}
+		if info == nil || info.IsDir() || !isSubtitleFile(path) {
 			return nil
 		}
 		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
