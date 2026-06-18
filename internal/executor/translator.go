@@ -1,16 +1,14 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/fusionn-muse/internal/config"
+	"github.com/fusionn-muse/internal/toolrun"
 	"github.com/fusionn-muse/pkg/logger"
 )
 
@@ -41,36 +39,9 @@ func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string
 	logger.Infof("🌐 Translating: %s → %s", filepath.Base(subtitlePath), t.cfg.TargetLang)
 	logger.Debugf("  Command: python3 %s", strings.Join(args, " "))
 
-	cmd := exec.CommandContext(ctx, "python3", args...)
-
-	// Pipe stdout and stderr for real-time logging
-	stdoutPipe, err := cmd.StdoutPipe()
+	_, stderrStr, err := toolrun.ExecRunner{}.Stream(ctx, "python3", args...)
 	if err != nil {
-		return "", fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return "", fmt.Errorf("stderr pipe: %w", err)
-	}
-
-	var stdoutBuf, stderrBuf bytes.Buffer
-	var wg sync.WaitGroup
-
-	// Stream output in dim/grey (like Docker build logs)
-	wg.Add(2)
-	go StreamDimmed(&wg, stdoutPipe, &stdoutBuf)
-	go StreamDimmed(&wg, stderrPipe, &stderrBuf)
-
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start cmd: %w", err)
-	}
-
-	// Wait for output streaming to complete
-	wg.Wait()
-
-	// Wait for command to finish
-	if err := cmd.Wait(); err != nil {
-		stderrStr := strings.TrimSpace(stderrBuf.String())
+		stderrStr := strings.TrimSpace(stderrStr)
 		if stderrStr != "" {
 			logger.Errorf("Script stderr: %s", stderrStr)
 		}
@@ -78,7 +49,6 @@ func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string
 	}
 
 	// Check stderr for error patterns (script may exit 0 but still fail)
-	stderrStr := stderrBuf.String()
 	if strings.Contains(stderrStr, "Error:") || strings.Contains(stderrStr, "Traceback") {
 		return "", fmt.Errorf("translator reported errors:\n%s", stderrStr)
 	}

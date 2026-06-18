@@ -1,16 +1,14 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/fusionn-muse/internal/config"
+	"github.com/fusionn-muse/internal/toolrun"
 	"github.com/fusionn-muse/pkg/logger"
 )
 
@@ -80,37 +78,12 @@ func (w *Whisper) Transcribe(ctx context.Context, videoPath string) (string, err
 	logger.Infof("🎤 Transcribing: %s", filepath.Base(videoPath))
 	logger.Debugf("  Command: python3 %s", strings.Join(args, " "))
 
-	cmd := exec.CommandContext(ctx, "python3", args...)
-
-	// Stream output in real-time
-	stdoutPipe, err := cmd.StdoutPipe()
+	stdoutStr, stderrStr, err := toolrun.ExecRunner{}.Stream(ctx, "python3", args...)
 	if err != nil {
-		return "", fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return "", fmt.Errorf("stderr pipe: %w", err)
-	}
-
-	var stdoutBuf, stderrBuf bytes.Buffer
-	var wg sync.WaitGroup
-
-	wg.Add(2)
-	go StreamDimmed(&wg, stdoutPipe, &stdoutBuf)
-	go StreamDimmed(&wg, stderrPipe, &stderrBuf)
-
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start transcription: %w", err)
-	}
-
-	wg.Wait()
-
-	if err := cmd.Wait(); err != nil {
-		return "", fmt.Errorf("transcription failed: %w\nStderr: %s", err, stderrBuf.String())
+		return "", fmt.Errorf("transcription failed: %w\nStderr: %s", err, stderrStr)
 	}
 
 	// Check stderr for error patterns
-	stderrStr := stderrBuf.String()
 	if strings.Contains(stderrStr, "Error:") || strings.Contains(stderrStr, "Traceback") {
 		return "", fmt.Errorf("transcription reported errors:\n%s", stderrStr)
 	}
@@ -118,10 +91,10 @@ func (w *Whisper) Transcribe(ctx context.Context, videoPath string) (string, err
 	// Verify SRT file was created and has content
 	info, err := os.Stat(srtPath)
 	if err != nil {
-		return "", fmt.Errorf("SRT file not created: %w\nOutput: %s", err, stdoutBuf.String())
+		return "", fmt.Errorf("SRT file not created: %w\nOutput: %s", err, stdoutStr)
 	}
 	if info.Size() == 0 {
-		return "", fmt.Errorf("SRT file is empty (transcription failed)\nOutput: %s", stdoutBuf.String())
+		return "", fmt.Errorf("SRT file is empty (transcription failed)\nOutput: %s", stdoutStr)
 	}
 
 	logger.Infof("✅ Transcription complete: %s", filepath.Base(srtPath))
@@ -212,32 +185,9 @@ func (w *Whisper) postProcessSubtitles(ctx context.Context, srtPath string) (str
 	logger.Infof("📝 Post-processing subtitles...")
 	logger.Debugf("  Command: python3 %s", strings.Join(args, " "))
 
-	cmd := exec.CommandContext(ctx, "python3", args...)
-
-	var stdoutBuf, stderrBuf bytes.Buffer
-	var wg sync.WaitGroup
-
-	stdoutPipe, err := cmd.StdoutPipe()
+	_, stderrStr, err := toolrun.ExecRunner{}.Stream(ctx, "python3", args...)
 	if err != nil {
-		return "", fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return "", fmt.Errorf("stderr pipe: %w", err)
-	}
-
-	wg.Add(2)
-	go StreamDimmed(&wg, stdoutPipe, &stdoutBuf)
-	go StreamDimmed(&wg, stderrPipe, &stderrBuf)
-
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start post-processing: %w", err)
-	}
-
-	wg.Wait()
-
-	if err := cmd.Wait(); err != nil {
-		return "", fmt.Errorf("post-processing failed: %w\nStderr: %s", err, stderrBuf.String())
+		return "", fmt.Errorf("post-processing failed: %w\nStderr: %s", err, stderrStr)
 	}
 
 	logger.Infof("✅ Post-processing complete")

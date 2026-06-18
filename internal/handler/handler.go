@@ -7,13 +7,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/fusionn-muse/internal/config"
-	"github.com/fusionn-muse/internal/fileops"
+	"github.com/fusionn-muse/internal/mediaintake"
 	"github.com/fusionn-muse/internal/queue"
 	"github.com/fusionn-muse/internal/service/processor"
 	"github.com/fusionn-muse/internal/version"
@@ -28,11 +27,11 @@ type Handler struct {
 }
 
 // New creates a new Handler.
-func New(q *queue.Queue, proc *processor.Service) *Handler {
+func New(q *queue.Queue, proc *processor.Service, folders config.FoldersConfig) *Handler {
 	return &Handler{
 		queue:     q,
 		processor: proc,
-		folders:   config.Folders(),
+		folders:   folders,
 	}
 }
 
@@ -99,14 +98,14 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 }
 
 func (h *Handler) resolveAndDispatchTorrent(req TorrentCompleteRequest, jobID string) {
-	resolved, err := fileops.ResolveMedia(fileops.ResolveRequest{
+	resolved, err := mediaintake.ResolveMedia(mediaintake.ResolveRequest{
 		Context:     context.Background(),
 		Path:        req.Path,
 		TorrentName: req.Name,
 		StagingDir:  h.folders.Staging,
 	})
 	if err != nil {
-		if errors.Is(err, fileops.ErrNoValidMedia) {
+		if errors.Is(err, mediaintake.ErrNoValidMedia) {
 			logger.Warnf("⚠️ %v in: %s", err, req.Path)
 			return
 		}
@@ -130,86 +129,11 @@ func (h *Handler) resolveAndDispatchTorrent(req TorrentCompleteRequest, jobID st
 	if isLight {
 		// Light job: process immediately in background (no queue wait)
 		logger.Infof("⚡ Light job detected (Chinese subtitle): %s (job: %s)", fileName, jobID)
-		h.queue.RegisterLightJob(job) // Register for tracking, but don't queue
-		go h.processLightJob(job)
+		h.queue.RunImmediate(job)
 	} else {
 		// Heavy job: queue for sequential processing (transcribe + translate)
 		h.queue.Enqueue(job)
 		logger.Infof("📥 Heavy job queued: %s (job: %s)", fileName, jobID)
-	}
-}
-
-// processLightJob handles light jobs that bypass the queue.
-// Light jobs have Chinese subtitle detected, so they skip transcription/translation.
-func (h *Handler) processLightJob(job *queue.Job) {
-	startTime := time.Now()
-
-	// Update job status
-	job.Status = queue.StatusProcessing
-	job.StartedAt = startTime
-
-	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	logger.Infof("⚡ Light job started: %s", job.FileName)
-	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-	// Step 1: Stage file (hardlink/copy)
-	stagingPath := job.StagingPath
-	if stagingPath == "" {
-		stagingPath = filepath.Join(h.folders.Staging, job.FileName)
-		logger.Infof("📥 Step 1: Staging file...")
-
-		if err := fileops.HardlinkOrCopy(job.SourcePath, stagingPath); err != nil {
-			h.handleLightJobError(job, "staging", err)
-			return
-		}
-		job.StagingPath = stagingPath
-	}
-
-	// Step 2: Clean filename
-	cleanedName := fileops.CleanVideoFilename(job.FileName)
-	if cleanedName != job.FileName {
-		logger.Infof("📝 Cleaned filename: %s → %s", job.FileName, cleanedName)
-		job.FileName = cleanedName
-	}
-
-	// Step 3: Move directly to scraping (skip processing folder, no transcribe/translate)
-	scrapingPath := filepath.Join(h.folders.Scraping, job.FileName)
-	logger.Infof("📦 Step 2: Moving to scraping (skip transcribe/translate)...")
-
-	if err := fileops.Move(stagingPath, scrapingPath); err != nil {
-		h.handleLightJobError(job, "move to scraping", err)
-		return
-	}
-
-	// Mark completed
-	job.Status = queue.StatusCompleted
-	job.CompletedAt = time.Now()
-	h.queue.MarkLightJobCompleted()
-
-	elapsed := time.Since(startTime)
-	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	logger.Infof("✅ Light job completed: %s", job.FileName)
-	logger.Infof("⏱️  Total time: %v", elapsed)
-	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-}
-
-// handleLightJobError handles errors during light job processing.
-func (h *Handler) handleLightJobError(job *queue.Job, step string, err error) {
-	logger.Errorf("❌ Light job %s failed at %s: %v", job.ID, step, err)
-
-	job.Status = queue.StatusFailed
-	job.Error = fmt.Sprintf("%s: %v", step, err)
-	job.CompletedAt = time.Now()
-	h.queue.MarkLightJobFailed()
-
-	// Try to move to failed folder if staging path exists
-	if job.StagingPath != "" && fileops.Exists(job.StagingPath) {
-		failedPath := filepath.Join(h.folders.Failed, job.FileName)
-		if moveErr := fileops.Move(job.StagingPath, failedPath); moveErr != nil {
-			logger.Warnf("⚠️ Failed to move to failed folder: %v", moveErr)
-		} else {
-			logger.Infof("📁 Moved to failed folder: %s", failedPath)
-		}
 	}
 }
 

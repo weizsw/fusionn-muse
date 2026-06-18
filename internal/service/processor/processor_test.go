@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/fusionn-muse/internal/config"
-	"github.com/fusionn-muse/internal/fileops"
+	"github.com/fusionn-muse/internal/mediaintake"
 	"github.com/fusionn-muse/internal/queue"
 	"github.com/fusionn-muse/pkg/logger"
 )
@@ -75,7 +75,7 @@ func TestMoveToProcessingMovesNormalStagingFile(t *testing.T) {
 
 func TestProcessCopiesSidecarSubtitleForLightJob(t *testing.T) {
 	root := t.TempDir()
-	cfgMgr := newTestConfigManager(t, root, false, "zh-CN")
+	cfgMgr := newTestConfigManager(t, root, "zh-CN")
 	defer cfgMgr.Stop()
 
 	folders := config.FoldersConfig{
@@ -91,11 +91,10 @@ func TestProcessCopiesSidecarSubtitleForLightJob(t *testing.T) {
 	mustWriteTestFile(t, source, "video")
 	mustWriteTestFile(t, sidecar, sidecarContent)
 
-	svc := New(cfgMgr, nil)
-	svc.folders = folders
+	svc := New(cfgMgr, nil, folders)
 	job := queue.NewJob("job1", source, "SSNI-083.mp4", "SSNI-083", "")
 	job.IsLight = true
-	job.SubtitleDetectionReason = fileops.SubtitleDetectionSidecar
+	job.SubtitleDetectionReason = mediaintake.SubtitleDetectionSidecar
 	job.SidecarSubtitlePath = sidecar
 
 	if err := svc.Process(context.Background(), job); err != nil {
@@ -124,7 +123,7 @@ func TestProcessUsesOCRToSkipHardSubbedVideo(t *testing.T) {
 	mustWriteExecutable(t, filepath.Join(bin, "tesseract"), "#!/bin/sh\nprintf 'visible subtitle text\\n'\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cfgMgr := newTestConfigManager(t, root, false, "")
+	cfgMgr := newTestConfigManager(t, root, "")
 	defer cfgMgr.Stop()
 	folders := config.FoldersConfig{
 		Staging:   filepath.Join(root, "staging"),
@@ -136,15 +135,14 @@ func TestProcessUsesOCRToSkipHardSubbedVideo(t *testing.T) {
 	source := filepath.Join(root, "input", "SSNI-083.mp4")
 	mustWriteTestFile(t, source, "video")
 
-	svc := New(cfgMgr, nil)
-	svc.folders = folders
+	svc := New(cfgMgr, nil, folders)
 	job := queue.NewJob("job1", source, "SSNI-083.mp4", "SSNI-083", "")
 
 	if err := svc.Process(context.Background(), job); err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
-	if job.SubtitleDetectionReason != fileops.SubtitleDetectionHardSubOCR {
-		t.Fatalf("SubtitleDetectionReason = %q, want %q", job.SubtitleDetectionReason, fileops.SubtitleDetectionHardSubOCR)
+	if job.SubtitleDetectionReason != mediaintake.SubtitleDetectionHardSubOCR {
+		t.Fatalf("SubtitleDetectionReason = %q, want %q", job.SubtitleDetectionReason, mediaintake.SubtitleDetectionHardSubOCR)
 	}
 	if !fileExists(filepath.Join(folders.Scraping, "SSNI-083.mp4")) {
 		t.Fatal("video was not moved to scraping")
@@ -156,7 +154,7 @@ func TestProcessUsesOCRToSkipHardSubbedVideo(t *testing.T) {
 
 func TestProcessDoesNotCreateDummySubtitleForProductionLightJob(t *testing.T) {
 	root := t.TempDir()
-	cfgMgr := newTestConfigManager(t, root, false, "")
+	cfgMgr := newTestConfigManager(t, root, "")
 	defer cfgMgr.Stop()
 	folders := config.FoldersConfig{
 		Staging:   filepath.Join(root, "staging"),
@@ -168,8 +166,7 @@ func TestProcessDoesNotCreateDummySubtitleForProductionLightJob(t *testing.T) {
 	source := filepath.Join(root, "input", "SSNI-083-C.mp4")
 	mustWriteTestFile(t, source, "video")
 
-	svc := New(cfgMgr, nil)
-	svc.folders = folders
+	svc := New(cfgMgr, nil, folders)
 	job := queue.NewJob("job1", source, "SSNI-083-C.mp4", "SSNI-083", "")
 
 	if err := svc.Process(context.Background(), job); err != nil {
@@ -177,6 +174,10 @@ func TestProcessDoesNotCreateDummySubtitleForProductionLightJob(t *testing.T) {
 	}
 	if job.SubtitlePath != "" || job.TranslatedPath != "" {
 		t.Fatalf("subtitle paths = %q/%q, want empty for production light job", job.SubtitlePath, job.TranslatedPath)
+	}
+	scrapingPath := filepath.Join(folders.Scraping, "SSNI-083.mp4")
+	if !sameFile(t, source, scrapingPath) {
+		t.Fatal("scraping file is not hard-linked to source")
 	}
 	if fileExists(filepath.Join(folders.Process, "SSNI-083.srt")) {
 		t.Fatal("dummy subtitle exists in processing folder")
@@ -186,19 +187,41 @@ func TestProcessDoesNotCreateDummySubtitleForProductionLightJob(t *testing.T) {
 	}
 }
 
+func TestNewUsesProvidedFolders(t *testing.T) {
+	root := t.TempDir()
+	cfgMgr := newTestConfigManager(t, root, "")
+	defer cfgMgr.Stop()
+	folders := config.FoldersConfig{Staging: filepath.Join(root, "custom-staging")}
+
+	svc := New(cfgMgr, nil, folders)
+
+	if svc.folders.Staging != folders.Staging {
+		t.Fatalf("Staging folder = %q, want %q", svc.folders.Staging, folders.Staging)
+	}
+}
+
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
 
-func newTestConfigManager(t *testing.T, root string, dryRun bool, suffix string) *config.Manager {
+func sameFile(t *testing.T, a, b string) bool {
+	t.Helper()
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		t.Fatalf("stat %s: %v", a, err)
+	}
+	bInfo, err := os.Stat(b)
+	if err != nil {
+		t.Fatalf("stat %s: %v", b, err)
+	}
+	return os.SameFile(aInfo, bInfo)
+}
+
+func newTestConfigManager(t *testing.T, root string, suffix string) *config.Manager {
 	t.Helper()
 	cfgPath := filepath.Join(root, "config.yaml")
-	dryRunValue := "false"
-	if dryRun {
-		dryRunValue = "true"
-	}
-	mustWriteTestFile(t, cfgPath, "dry_run: "+dryRunValue+"\nsubtitle:\n  language_suffix: "+suffix+"\n")
+	mustWriteTestFile(t, cfgPath, "dry_run: false\nsubtitle:\n  language_suffix: "+suffix+"\n")
 	cfgMgr, err := config.NewManager(cfgPath)
 	if err != nil {
 		t.Fatalf("new config manager: %v", err)

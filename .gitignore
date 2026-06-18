@@ -25,6 +25,8 @@ vendor/
 .vscode/
 *.swp
 *.swo
+.cursor/
+.venv
 
 # OS
 .DS_Store

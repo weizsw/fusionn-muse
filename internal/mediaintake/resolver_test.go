@@ -1,4 +1,4 @@
-package fileops
+package mediaintake
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/fusionn-muse/internal/fileops"
 )
 
 func TestResolveMediaUsesFolderCodeForCompactFile(t *testing.T) {
@@ -592,7 +594,7 @@ func TestResolveMediaExtractsImageOutsideStagingAndCleansUp(t *testing.T) {
 	if pathContains(staging, extractDir) {
 		t.Fatalf("extractDir = %q, want outside staging %q", extractDir, staging)
 	}
-	if Exists(extractDir) {
+	if fileops.Exists(extractDir) {
 		t.Fatalf("extractDir = %q still exists after preparation", extractDir)
 	}
 }
@@ -699,7 +701,7 @@ func TestResolveMediaRejectsImageExtractionSourceOverlap(t *testing.T) {
 	if !strings.Contains(err.Error(), "image extraction dir overlaps source path") {
 		t.Fatalf("error = %q, want extraction overlap error", err)
 	}
-	if !Exists(image) {
+	if !fileops.Exists(image) {
 		t.Fatal("source image was removed")
 	}
 }

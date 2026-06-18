@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/fusionn-muse/internal/config"
-	"github.com/fusionn-muse/internal/fileops"
+	"github.com/fusionn-muse/internal/mediaintake"
 	"github.com/fusionn-muse/internal/queue"
 	"github.com/fusionn-muse/pkg/logger"
 )
@@ -21,6 +23,22 @@ import (
 type noopProcessor struct{}
 
 func (noopProcessor) Process(context.Context, *queue.Job) error {
+	return nil
+}
+
+type recordingProcessor struct {
+	called chan *queue.Job
+	once   sync.Once
+}
+
+func newRecordingProcessor() *recordingProcessor {
+	return &recordingProcessor{called: make(chan *queue.Job, 1)}
+}
+
+func (p *recordingProcessor) Process(_ context.Context, job *queue.Job) error {
+	p.once.Do(func() {
+		p.called <- job
+	})
 	return nil
 }
 
@@ -32,7 +50,7 @@ func init() {
 func TestTorrentCompleteReturnsAcceptedForNoValidMedia(t *testing.T) {
 	root := t.TempDir()
 	folder := filepath.Join(root, "download")
-	mustWriteSizedHandlerFile(t, filepath.Join(folder, "movie.mp4"), fileops.MinVideoSize+1)
+	mustWriteSizedHandlerFile(t, filepath.Join(folder, "movie.mp4"), mediaintake.MinVideoSize+1)
 	handler := newTestHandler(root)
 
 	response := postTorrentComplete(t, handler, `{"path":"`+folder+`","name":"no code here"}`)
@@ -59,31 +77,30 @@ func TestTorrentCompleteReturnsAcceptedForMediaPreparationFailure(t *testing.T) 
 	}
 }
 
-func TestProcessLightJobHardlinksPlainSourceToScraping(t *testing.T) {
+func TestLightTorrentUsesProcessorLifecycle(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "downloads", "SSNI-083-C.mp4")
-	content := []byte("video content")
-	if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
-		t.Fatalf("mkdir source dir: %v", err)
-	}
-	if err := os.WriteFile(source, content, 0644); err != nil {
-		t.Fatalf("write source: %v", err)
-	}
+	mustWriteSizedHandlerFile(t, source, mediaintake.MinVideoSize+1)
+
+	proc := newRecordingProcessor()
 	handler := newTestHandler(root)
-	job := queue.NewJob("job1", source, filepath.Base(source), "SSNI-083", "")
+	handler.queue = queue.New(proc, 1, 0)
 
-	handler.processLightJob(job)
+	handler.resolveAndDispatchTorrent(TorrentCompleteRequest{
+		Path: source,
+		Name: "SSNI-083",
+	}, "job1")
 
-	scrapingPath := filepath.Join(handler.folders.Scraping, fileops.CleanVideoFilename(filepath.Base(source)))
-	if !sameFile(t, source, scrapingPath) {
-		t.Fatal("scraping file is not hard-linked to source")
-	}
-	got, err := os.ReadFile(source)
-	if err != nil {
-		t.Fatalf("read source: %v", err)
-	}
-	if string(got) != string(content) {
-		t.Fatalf("source content = %q, want %q", got, content)
+	select {
+	case job := <-proc.called:
+		if !job.IsLight {
+			t.Fatal("job.IsLight = false, want true")
+		}
+		if job.ID != "job1" {
+			t.Fatalf("job.ID = %q, want job1", job.ID)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("light job did not use processor lifecycle")
 	}
 }
 
@@ -126,17 +143,4 @@ func mustWriteSizedHandlerFile(t *testing.T, path string, size int64) {
 	if err := f.Close(); err != nil {
 		t.Fatalf("close %s: %v", path, err)
 	}
-}
-
-func sameFile(t *testing.T, a, b string) bool {
-	t.Helper()
-	aInfo, err := os.Stat(a)
-	if err != nil {
-		t.Fatalf("stat %s: %v", a, err)
-	}
-	bInfo, err := os.Stat(b)
-	if err != nil {
-		t.Fatalf("stat %s: %v", b, err)
-	}
-	return os.SameFile(aInfo, bInfo)
 }

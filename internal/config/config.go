@@ -136,6 +136,7 @@ type ChangeCallback func(old, updated *Config)
 type Manager struct {
 	mu        sync.RWMutex
 	cfg       *Config
+	v         *viper.Viper
 	callbacks []ChangeCallback
 	stop      chan struct{}
 
@@ -145,19 +146,13 @@ type Manager struct {
 
 // NewManager creates a config manager with hot-reload support via polling.
 func NewManager(path string) (*Manager, error) {
-	viper.SetConfigFile(path)
-	viper.SetConfigType("yaml")
-
-	viper.SetEnvPrefix("FUSIONN_MUSE")
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	viper.AutomaticEnv()
-
-	if err := viper.ReadInConfig(); err != nil {
+	v := newParser(path)
+	if err := v.ReadInConfig(); err != nil {
 		return nil, err
 	}
 
 	var cfg Config
-	if err := viper.Unmarshal(&cfg); err != nil {
+	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, err
 	}
 
@@ -168,6 +163,7 @@ func NewManager(path string) (*Manager, error) {
 
 	m := &Manager{
 		cfg:         &cfg,
+		v:           v,
 		stop:        make(chan struct{}),
 		path:        path,
 		lastModTime: lastMod,
@@ -217,7 +213,7 @@ func (m *Manager) pollForChanges(interval time.Duration) {
 			if stat.ModTime().After(lastMod) {
 				logger.Infof("🔄 Config file changed, reloading...")
 
-				if err := viper.ReadInConfig(); err != nil {
+				if err := m.v.ReadInConfig(); err != nil {
 					logger.Errorf("❌ Failed to re-read config: %v", err)
 					continue
 				}
@@ -234,7 +230,7 @@ func (m *Manager) pollForChanges(interval time.Duration) {
 
 func (m *Manager) reload() {
 	var newCfg Config
-	if err := viper.Unmarshal(&newCfg); err != nil {
+	if err := m.v.Unmarshal(&newCfg); err != nil {
 		logger.Errorf("❌ Failed to reload config: %v", err)
 		return
 	}
@@ -297,21 +293,25 @@ func formatValue(v reflect.Value) string {
 
 // Load is a convenience function for one-time loading.
 func Load(path string) (*Config, error) {
-	viper.SetConfigFile(path)
-	viper.SetConfigType("yaml")
-
-	viper.SetEnvPrefix("FUSIONN_MUSE")
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	viper.AutomaticEnv()
-
-	if err := viper.ReadInConfig(); err != nil {
+	v := newParser(path)
+	if err := v.ReadInConfig(); err != nil {
 		return nil, err
 	}
 
 	var cfg Config
-	if err := viper.Unmarshal(&cfg); err != nil {
+	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, err
 	}
 
 	return &cfg, nil
+}
+
+func newParser(path string) *viper.Viper {
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetConfigType("yaml")
+	v.SetEnvPrefix("FUSIONN_MUSE")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+	return v
 }
