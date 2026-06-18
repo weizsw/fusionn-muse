@@ -15,13 +15,16 @@ import (
 
 // Config holds all configuration for the application.
 type Config struct {
-	Server     ServerConfig     `mapstructure:"server"`
-	Whisper    WhisperConfig    `mapstructure:"whisper"`
-	Translate  TranslateConfig  `mapstructure:"translate"`
-	Subtitle   SubtitleConfig   `mapstructure:"subtitle"`
-	HardSubOCR HardSubOCRConfig `mapstructure:"hard_sub_ocr"`
-	Apprise    AppriseConfig    `mapstructure:"apprise"`
-	Queue      QueueConfig      `mapstructure:"queue"`
+	Server      ServerConfig      `mapstructure:"server"`
+	Pipeline    PipelineConfig    `mapstructure:"pipeline"`
+	Whisper     WhisperConfig     `mapstructure:"whisper"`
+	Translate   TranslateConfig   `mapstructure:"translate"`
+	MLXQwen3ASR MLXQwen3ASRConfig `mapstructure:"mlx_qwen3_asr"`
+	LLMSubtrans LLMSubtransConfig `mapstructure:"llm_subtrans"`
+	Subtitle    SubtitleConfig    `mapstructure:"subtitle"`
+	HardSubOCR  HardSubOCRConfig  `mapstructure:"hard_sub_ocr"`
+	Apprise     AppriseConfig     `mapstructure:"apprise"`
+	Queue       QueueConfig       `mapstructure:"queue"`
 
 	// DryRun: skip transcription and translation (for testing file workflow)
 	DryRun bool `mapstructure:"dry_run"`
@@ -29,6 +32,24 @@ type Config struct {
 
 type ServerConfig struct {
 	Port int `mapstructure:"port"`
+}
+
+type PipelineConfig struct {
+	// Provider: "videocaptioner" (current Docker scripts) or "mlx_qwen3_asr" (host ASR + PySubtrans).
+	Provider string `mapstructure:"provider"`
+}
+
+type MLXQwen3ASRConfig struct {
+	ServerURL       string `mapstructure:"server_url"`
+	HostPrefix      string `mapstructure:"host_prefix"`
+	ContainerPrefix string `mapstructure:"container_prefix"`
+	Model           string `mapstructure:"model"`
+	Language        string `mapstructure:"language"`
+	TimeoutMinutes  int    `mapstructure:"timeout_minutes"`
+}
+
+type LLMSubtransConfig struct {
+	TimeoutMinutes int `mapstructure:"timeout_minutes"`
 }
 
 // Folders returns hardcoded folder paths (user mounts via Docker volumes).

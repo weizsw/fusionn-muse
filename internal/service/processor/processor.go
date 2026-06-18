@@ -76,8 +76,10 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 
 	// Get fresh config for this job (enables hot-reload)
 	cfg := s.cfgMgr.Get()
-	whisper := executor.NewWhisper(cfg.Whisper, cfg.Translate)
-	translator := executor.NewTranslator(cfg.Translate)
+	pipelineProvider := strings.ToLower(cfg.Pipeline.Provider)
+	if pipelineProvider == "" {
+		pipelineProvider = "videocaptioner"
+	}
 
 	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	logger.Infof("🎬 Starting job: %s", job.FileName)
@@ -159,23 +161,34 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (Chinese subtitle detected: %s)", job.SubtitleDetectionReason)
 		}
 	} else {
-		// Step 3: Transcribe with whisper
-		logger.Infof("🎤 Step 3: Transcribing with Whisper (%s)...", cfg.Whisper.Model)
+		// Step 3: Transcribe
+		logger.Infof("🎤 Step 3: Transcribing with %s...", pipelineProvider)
 		t = startStep("Transcription")
 
 		var err error
-		subtitlePath, err = whisper.Transcribe(ctx, processingPath)
+		switch pipelineProvider {
+		case "videocaptioner":
+			subtitlePath, err = executor.NewWhisper(cfg.Whisper, cfg.Translate).Transcribe(ctx, processingPath)
+		case "mlx_qwen3_asr":
+			subtitlePath, err = executor.NewHostASR(cfg.MLXQwen3ASR).Transcribe(ctx, processingPath)
+		default:
+			err = fmt.Errorf("unsupported pipeline provider: %s", cfg.Pipeline.Provider)
+		}
 		if err != nil {
 			s.moveToFailed(job, processingPath)
 			return s.handleError(job, "transcription", err)
 		}
 		durations["transcription"] = t.done()
 
-		// Step 4: Translate with llm-subtrans
+		// Step 4: Translate
 		logger.Infof("🌐 Step 4: Translating subtitle → %s...", cfg.Translate.TargetLang)
 		t = startStep("Translation")
 
-		translatedPath, err = translator.Translate(ctx, subtitlePath)
+		if pipelineProvider == "mlx_qwen3_asr" {
+			translatedPath, err = executor.NewLLMSubtrans(cfg.LLMSubtrans, cfg.Translate).Translate(ctx, subtitlePath)
+		} else {
+			translatedPath, err = executor.NewTranslator(cfg.Translate).Translate(ctx, subtitlePath)
+		}
 		if err != nil {
 			s.moveToFailed(job, processingPath)
 			return s.handleError(job, "translation", err)

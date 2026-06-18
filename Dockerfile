@@ -54,7 +54,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
         pydub \
         GPUtil \
         Pillow \
-        fonttools && \
+        fonttools \
+        "pysubtrans[openai]" && \
     apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 # Add VideoCaptioner to Python path
@@ -64,6 +65,7 @@ ENV PYTHONPATH="/app/videocaptioner"
 COPY scripts/transcribe.py /app/scripts/transcribe.py
 COPY scripts/subtitle_processor.py /app/scripts/subtitle_processor.py
 COPY scripts/translate.py /app/scripts/translate.py
+COPY scripts/llm_subtrans_translate.py /app/scripts/llm_subtrans_translate.py
 
 # Copy Go binary
 COPY --from=go-builder /app/fusionn-muse .

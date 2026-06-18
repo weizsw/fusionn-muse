@@ -64,6 +64,33 @@ translate:
   target_lang: "Simplified Chinese"
 ```
 
+### MLX Qwen3 ASR Pipeline
+
+To run ASR on an Apple Silicon host and translate in the container:
+
+```yaml
+pipeline:
+  provider: "mlx_qwen3_asr"
+
+mlx_qwen3_asr:
+  server_url: "http://host.docker.internal:8766"
+  host_prefix: "/path/on/mac/that/maps-to-data"
+  container_prefix: "/data"
+  model: "Qwen/Qwen3-ASR-1.7B"
+  language: ""
+  timeout_minutes: 180
+
+translate:
+  provider: "custom"
+  custom_server: "http://192.168.50.135:8317/v1"
+  model: "gpt-5.4-mini"
+  api_key: "sk-..."
+  target_lang: "Simplified Chinese"
+  instruction: "Optional PySubtrans --instruction text"
+```
+
+Run `host_asr_server.py` on macOS with `mlx-qwen3-asr` installed. The container calls its `/transcribe` endpoint; the host process maps `/data/...` to `host_prefix` and runs the MLX CLI locally.
+
 See [config.example.yaml](config/config.example.yaml) for full documentation.
 
 ## qBittorrent Setup
