@@ -61,7 +61,7 @@ func main() {
 	}
 
 	// Initialize processor service
-	proc := processor.New(cfgMgr, appriseClient)
+	proc := processor.New(cfgMgr, appriseClient, folders)
 
 	// Initialize job queue
 	jobQueue := queue.New(proc, cfg.Queue.MaxRetries, cfg.Queue.RetryDelayMs)
@@ -78,7 +78,7 @@ func main() {
 	router.Use(requestLogger())
 
 	// Register routes
-	h := handler.New(jobQueue, proc)
+	h := handler.New(jobQueue, proc, folders)
 	h.RegisterRoutes(router)
 
 	srv := &http.Server{

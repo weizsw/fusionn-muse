@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,7 +14,9 @@ import (
 	"github.com/fusionn-muse/internal/config"
 	"github.com/fusionn-muse/internal/executor"
 	"github.com/fusionn-muse/internal/fileops"
+	"github.com/fusionn-muse/internal/mediaintake"
 	"github.com/fusionn-muse/internal/queue"
+	"github.com/fusionn-muse/internal/toolrun"
 	"github.com/fusionn-muse/pkg/logger"
 )
 
@@ -27,10 +28,10 @@ type Service struct {
 }
 
 // New creates a new processor service.
-func New(cfgMgr *config.Manager, appriseClient *apprise.Client) *Service {
+func New(cfgMgr *config.Manager, appriseClient *apprise.Client, folders config.FoldersConfig) *Service {
 	return &Service{
 		cfgMgr:  cfgMgr,
-		folders: config.Folders(),
+		folders: folders,
 		apprise: appriseClient,
 	}
 }
@@ -104,12 +105,12 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	// Check if filename has Chinese subtitle indicators (skip transcription/translation)
 	originalName := job.FileName
 	hasChineseSub := job.IsLight
-	if !hasChineseSub && fileops.HasChineseSubtitle(originalName) {
+	if !hasChineseSub && mediaintake.HasChineseSubtitle(originalName) {
 		hasChineseSub = true
-		job.SubtitleDetectionReason = fileops.SubtitleDetectionFilename
+		job.SubtitleDetectionReason = mediaintake.SubtitleDetectionFilename
 	}
 
-	cleanedName := fileops.CleanVideoFilename(job.FileName)
+	cleanedName := mediaintake.CleanVideoFilename(job.FileName)
 	if cleanedName != job.FileName {
 		logger.Infof("📝 Cleaned filename: %s → %s", job.FileName, cleanedName)
 		job.FileName = cleanedName
@@ -136,7 +137,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		} else if detected {
 			hasChineseSub = true
 			job.IsLight = true
-			job.SubtitleDetectionReason = fileops.SubtitleDetectionHardSubOCR
+			job.SubtitleDetectionReason = mediaintake.SubtitleDetectionHardSubOCR
 		}
 	}
 
@@ -149,7 +150,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (dry run)")
 			baseName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName))
 			subtitlePath = filepath.Join(filepath.Dir(processingPath), baseName+".srt")
-			if err := fileops.WriteDummySubtitle(subtitlePath); err != nil {
+			if err := mediaintake.WriteDummySubtitle(subtitlePath); err != nil {
 				s.moveToFailed(job, processingPath)
 				return s.handleError(job, "create dummy subtitle", err)
 			}
@@ -190,7 +191,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 			logger.Infof("⏭️  Step 5: Skipping subtitle move")
 			// Clean up dummy subtitle
 			_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
-		} else if job.SubtitleDetectionReason == fileops.SubtitleDetectionSidecar && job.SidecarSubtitlePath != "" {
+		} else if job.SubtitleDetectionReason == mediaintake.SubtitleDetectionSidecar && job.SidecarSubtitlePath != "" {
 			finalSubPath := filepath.Join(s.folders.Subtitles, subtitleOutputName(job.FileName, filepath.Ext(job.SidecarSubtitlePath), cfg.Subtitle.LanguageSuffix))
 			logger.Infof("📦 Step 5: Copying sidecar subtitle to subtitles folder...")
 			t = startStep("Copy sidecar subtitle")
@@ -296,7 +297,7 @@ func detectHardSubOCR(parent context.Context, videoPath string) (bool, error) {
 		if err := extractSubtitleBand(ctx, videoPath, duration*pct, frame); err != nil {
 			return false, err
 		}
-		text, err := exec.CommandContext(ctx, "tesseract", frame, "stdout").Output()
+		text, err := toolrun.ExecRunner{}.Output(ctx, "tesseract", frame, "stdout")
 		if err != nil {
 			return false, err
 		}
@@ -311,7 +312,7 @@ func detectHardSubOCR(parent context.Context, videoPath string) (bool, error) {
 }
 
 func probeDuration(ctx context.Context, videoPath string) (float64, error) {
-	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", videoPath).Output()
+	out, err := toolrun.ExecRunner{}.Output(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", videoPath)
 	if err != nil {
 		return 0, fmt.Errorf("ffprobe duration: %w", err)
 	}
@@ -323,7 +324,7 @@ func probeDuration(ctx context.Context, videoPath string) (float64, error) {
 }
 
 func extractSubtitleBand(ctx context.Context, videoPath string, seconds float64, outPath string) error {
-	cmd := exec.CommandContext(
+	out, err := toolrun.ExecRunner{}.CombinedOutput(
 		ctx,
 		"ffmpeg",
 		"-y",
@@ -333,7 +334,7 @@ func extractSubtitleBand(ctx context.Context, videoPath string, seconds float64,
 		"-vf", "crop=iw:ih*0.4:0:ih*0.6",
 		outPath,
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if err != nil {
 		return fmt.Errorf("ffmpeg frame extract: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -389,12 +390,12 @@ func (s *Service) MoveToStagingForRetry(fileName string) error {
 
 // GetStagingFiles returns all video files in staging folder.
 func (s *Service) GetStagingFiles() ([]string, error) {
-	return fileops.FindVideoFiles(s.folders.Staging)
+	return mediaintake.FindVideoFiles(s.folders.Staging)
 }
 
 // GetFailedFiles returns all video files in failed folder.
 func (s *Service) GetFailedFiles() ([]string, error) {
-	return fileops.FindVideoFiles(s.folders.Failed)
+	return mediaintake.FindVideoFiles(s.folders.Failed)
 }
 
 func (s *Service) handleError(job *queue.Job, step string, err error) error {

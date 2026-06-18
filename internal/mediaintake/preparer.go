@@ -1,29 +1,18 @@
-package fileops
+package mediaintake
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/fusionn-muse/internal/toolrun"
 )
 
-type CommandRunner interface {
-	Run(ctx context.Context, name string, args ...string) error
-}
-
-type ExecCommandRunner struct{}
-
-func (ExecCommandRunner) Run(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
+type CommandRunner = toolrun.Runner
+type ExecCommandRunner = toolrun.ExecRunner
 
 func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error) {
 	code, ok := mediaCodeFor(parts[0], req.Path, req.TorrentName)

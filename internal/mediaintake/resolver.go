@@ -1,4 +1,4 @@
-package fileops
+package mediaintake
 
 import (
 	"context"
@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/fusionn-muse/internal/toolrun"
 	"github.com/fusionn-muse/pkg/logger"
 )
 
@@ -274,7 +274,7 @@ type ffprobeOutput struct {
 }
 
 func hasEmbeddedChineseSubtitle(ctx context.Context, path string) bool {
-	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-of", "json", "-show_streams", "-select_streams", "s", path).Output()
+	out, err := toolrun.ExecRunner{}.Output(ctx, "ffprobe", "-v", "error", "-of", "json", "-show_streams", "-select_streams", "s", path)
 	if err != nil {
 		logger.Debugf("ffprobe subtitle detection failed for %s: %v", path, err)
 		return false

@@ -68,10 +68,7 @@ func (q *Queue) Stop() {
 
 // Enqueue adds a new job to the queue.
 func (q *Queue) Enqueue(job *Job) {
-	q.mu.Lock()
-	q.jobs = append(q.jobs, job)
-	q.jobMap[job.ID] = job
-	q.mu.Unlock()
+	q.registerJob(job)
 
 	logger.Infof("📥 Job queued: %s (%s)", job.ID, job.FileName)
 
@@ -81,6 +78,13 @@ func (q *Queue) Enqueue(job *Job) {
 	default:
 		logger.Warnf("⚠️ Job channel full, job %s will be processed later", job.ID)
 	}
+}
+
+func (q *Queue) registerJob(job *Job) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.jobs = append(q.jobs, job)
+	q.jobMap[job.ID] = job
 }
 
 // GetJob returns a job by ID.
@@ -154,27 +158,10 @@ func (q *Queue) GetQueueStats() map[string]int {
 	}
 }
 
-// RegisterLightJob registers a light job that bypassed the queue.
-// This allows tracking light jobs in stats without adding them to the queue.
-func (q *Queue) RegisterLightJob(job *Job) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.jobs = append(q.jobs, job)
-	q.jobMap[job.ID] = job
-}
-
-// MarkLightJobCompleted increments the light job completed counter.
-func (q *Queue) MarkLightJobCompleted() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.lightCompleted++
-}
-
-// MarkLightJobFailed increments the light job failed counter.
-func (q *Queue) MarkLightJobFailed() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.lightFailed++
+// RunImmediate processes a light job now while still tracking it in queue stats.
+func (q *Queue) RunImmediate(job *Job) {
+	q.registerJob(job)
+	go q.processImmediateJob(job)
 }
 
 // worker processes jobs sequentially.
@@ -231,4 +218,33 @@ func (q *Queue) processJob(job *Job) {
 		job.CompletedAt = time.Now()
 		job.Error = ""
 	}
+}
+
+func (q *Queue) processImmediateJob(job *Job) {
+	q.mu.Lock()
+	job.Status = StatusProcessing
+	job.StartedAt = time.Now()
+	q.mu.Unlock()
+
+	logger.Infof("⚡ Processing immediate job: %s (%s)", job.ID, job.FileName)
+
+	err := q.processor.Process(q.ctx, job)
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if err != nil {
+		logger.Errorf("❌ Immediate job %s failed: %v", job.ID, err)
+		job.Status = StatusFailed
+		job.Error = err.Error()
+		job.CompletedAt = time.Now()
+		q.lightFailed++
+		return
+	}
+
+	logger.Infof("✅ Immediate job completed: %s", job.ID)
+	job.Status = StatusCompleted
+	job.CompletedAt = time.Now()
+	job.Error = ""
+	q.lightCompleted++
 }
