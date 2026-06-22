@@ -72,7 +72,7 @@ func (ExecRunner) Stream(ctx context.Context, name string, args ...string) (stri
 	return stdoutBuf.String(), stderrBuf.String(), nil
 }
 
-// StreamDimmed reads from r, writes to buf, and prints dimmed to stdout.
+// StreamDimmed reads from r, writes to buf, and prints dimmed to stderr.
 func StreamDimmed(wg *sync.WaitGroup, r io.Reader, buf *bytes.Buffer) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(r)
@@ -82,7 +82,7 @@ func StreamDimmed(wg *sync.WaitGroup, r io.Reader, buf *bytes.Buffer) {
 		line := scanner.Text()
 		buf.WriteString(line)
 		buf.WriteByte('\n')
-		fmt.Fprintf(os.Stdout, "%s  │ %s%s\n", dimStart, line, dimEnd)
+		fmt.Fprintf(os.Stderr, "%s  │ %s%s\n", dimStart, line, dimEnd)
 	}
 
 	if err := scanner.Err(); err != nil {
