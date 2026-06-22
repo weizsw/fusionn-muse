@@ -2,6 +2,7 @@
 """Translate one subtitle file with PySubtrans."""
 
 import argparse
+import logging
 import sys
 
 
@@ -22,6 +23,8 @@ def main() -> int:
 
     from PySubtrans import init_options, init_subtitles, init_translator
 
+    logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
+
     instruction_args = [args.instruction] if args.instruction else None
     options = init_options(
         provider="OpenAI",
@@ -34,7 +37,11 @@ def main() -> int:
 
     subtitles = init_subtitles(args.input, options=options)
     translator = init_translator(options)
-    translator.TranslateSubtitles(subtitles)
+    translator.events.connect_default_loggers()
+    try:
+        translator.TranslateSubtitles(subtitles)
+    finally:
+        translator.events.disconnect_default_loggers()
     subtitles.SaveTranslation(args.output)
     return 0
 
