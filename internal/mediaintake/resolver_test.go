@@ -1164,6 +1164,31 @@ func TestResolveMediaPrefersFilenameCodedNormalVideoOverFallbackMultipart(t *tes
 	}
 }
 
+func TestResolveMediaUsesSingleTrailingLetterCodeAsNormalVideo(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "OLM-332E")
+	video := filepath.Join(folder, "hhd800.com@OLM-332E.mp4")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "OLM-332E",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if got.SourcePath != video {
+		t.Fatalf("SourcePath = %q, want normal video %q", got.SourcePath, video)
+	}
+	if got.Code != "OLM-332" {
+		t.Fatalf("Code = %q, want OLM-332", got.Code)
+	}
+	if got.StagingPath != "" {
+		t.Fatalf("StagingPath = %q, want empty for normal video", got.StagingPath)
+	}
+}
+
 func TestFindMultipartSetLetterOrder(t *testing.T) {
 	root := t.TempDir()
 	files := []string{"pppd176A.FHD.wmv", "pppd176B.FHD.wmv", "pppd176C.FHD.wmv"}

@@ -50,8 +50,8 @@ type mediaCandidate struct {
 }
 
 type partCandidate struct {
-	path  string
-	order int
+	path string
+	info partInfo
 }
 
 type multipartGroupKey struct {
@@ -64,6 +64,12 @@ type multipartGroupKey struct {
 type codeMatch struct {
 	code string
 	rank int
+}
+
+type partInfo struct {
+	order          int
+	base           string
+	trailingLetter bool
 }
 
 // ErrNoValidMedia marks expected no-op resolution failures.
@@ -147,7 +153,8 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 		return nil, err
 	}
 
-	if best := bestFilenameCodedVideoCandidate(videos); best != nil {
+	multipartPartPaths := validMultipartPartPaths(videos, req.Path, req.TorrentName)
+	if best := bestFilenameCodedVideoCandidate(videos, multipartPartPaths); best != nil {
 		return resolveSelectedVideo(req.Context, best.Path, best.Code, req.Path), nil
 	}
 
@@ -156,7 +163,7 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 		return prepareMultipart(req, parts)
 	}
 
-	if best := bestVideoCandidate(videos, req.Path, req.TorrentName); best != nil {
+	if best := bestVideoCandidate(videos, req.Path, req.TorrentName, multipartPartPaths); best != nil {
 		return resolveSelectedVideo(req.Context, best.Path, best.Code, req.Path), nil
 	}
 	if hasIncompleteMultipartSet(videos, req.Path, req.TorrentName) {
@@ -352,13 +359,13 @@ func findMediaCandidates(ctx context.Context, dir string) ([]mediaCandidate, []m
 	return videos, images, err
 }
 
-func bestFilenameCodedVideoCandidate(videos []mediaCandidate) *mediaCandidate {
+func bestFilenameCodedVideoCandidate(videos []mediaCandidate, multipartPartPaths map[string]bool) *mediaCandidate {
 	var coded []mediaCandidate
 	for _, video := range videos {
 		if video.Code == "" {
 			continue
 		}
-		if _, _, ok := detectPartInfo(video.Name); ok {
+		if isMultipartOnlyCandidate(video, multipartPartPaths) {
 			continue
 		}
 		coded = append(coded, video)
@@ -371,7 +378,7 @@ func bestFilenameCodedVideoCandidate(videos []mediaCandidate) *mediaCandidate {
 	return &coded[0]
 }
 
-func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *mediaCandidate {
+func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string, multipartPartPaths map[string]bool) *mediaCandidate {
 	if len(videos) == 0 {
 		return nil
 	}
@@ -379,7 +386,7 @@ func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *me
 	var coded []mediaCandidate
 	bestRank := 0
 	for _, video := range videos {
-		if _, _, ok := detectPartInfo(video.Name); ok {
+		if isMultipartOnlyCandidate(video, multipartPartPaths) {
 			continue
 		}
 		if match, ok := mediaCodeMatchFor(video.Path, folder, torrentName); ok {
@@ -399,6 +406,14 @@ func bestVideoCandidate(videos []mediaCandidate, folder, torrentName string) *me
 		return &coded[0]
 	}
 	return nil
+}
+
+func isMultipartOnlyCandidate(video mediaCandidate, multipartPartPaths map[string]bool) bool {
+	info, ok := detectPartInfo(video.Name)
+	if !ok {
+		return false
+	}
+	return !info.trailingLetter || multipartPartPaths[video.Path]
 }
 
 func bestImageCandidate(images []mediaCandidate, folder, torrentName string) *mediaCandidate {
@@ -460,7 +475,7 @@ func findMultipartSet(videos []mediaCandidate, folder, torrentName string) []str
 		if !validPartOrders(parts) {
 			continue
 		}
-		sort.Slice(parts, func(i, j int) bool { return parts[i].order < parts[j].order })
+		sort.Slice(parts, func(i, j int) bool { return parts[i].info.order < parts[j].info.order })
 		result := make([]string, 0, len(parts))
 		for _, part := range parts {
 			result = append(result, part.path)
@@ -473,11 +488,27 @@ func findMultipartSet(videos []mediaCandidate, folder, torrentName string) []str
 
 func hasIncompleteMultipartSet(videos []mediaCandidate, folder, torrentName string) bool {
 	for _, parts := range multipartGroups(videos, folder, torrentName) {
+		if len(parts) == 1 && parts[0].info.trailingLetter {
+			continue
+		}
 		if len(parts) > 0 && !validPartOrders(parts) {
 			return true
 		}
 	}
 	return false
+}
+
+func validMultipartPartPaths(videos []mediaCandidate, folder, torrentName string) map[string]bool {
+	paths := make(map[string]bool)
+	for _, parts := range multipartGroups(videos, folder, torrentName) {
+		if len(parts) < 2 || !validPartOrders(parts) {
+			continue
+		}
+		for _, part := range parts {
+			paths[part.path] = true
+		}
+	}
+	return paths
 }
 
 func multipartGroups(videos []mediaCandidate, folder, torrentName string) map[multipartGroupKey][]partCandidate {
@@ -487,12 +518,12 @@ func multipartGroups(videos []mediaCandidate, folder, torrentName string) map[mu
 		if !ok {
 			continue
 		}
-		order, partBase, ok := detectPartInfo(video.Name)
+		info, ok := detectPartInfo(video.Name)
 		if !ok {
 			continue
 		}
-		key := multipartGroupKey{codeRank: match.rank, code: match.code, extFamily: videoExtensionFamily(video.Path), partBase: partBase}
-		groups[key] = append(groups[key], partCandidate{path: video.Path, order: order})
+		key := multipartGroupKey{codeRank: match.rank, code: match.code, extFamily: videoExtensionFamily(video.Path), partBase: info.base}
+		groups[key] = append(groups[key], partCandidate{path: video.Path, info: info})
 	}
 
 	return groups
@@ -539,29 +570,33 @@ func candidateCodeFolders(path, requestPath string) []string {
 	return dirs
 }
 
-func detectPartInfo(name string) (int, string, bool) {
+func detectPartInfo(name string) (partInfo, bool) {
 	base := strings.TrimSuffix(name, filepath.Ext(name))
 	if match := partWordPattern.FindStringSubmatchIndex(base); match != nil {
 		n, err := strconv.Atoi(base[match[4]:match[5]])
 		if err != nil {
-			return 0, "", false
+			return partInfo{}, false
 		}
-		return n, normalizePartBase(base[:match[0]] + base[match[1]:]), true
+		return partInfo{order: n, base: normalizePartBase(base[:match[0]] + base[match[1]:])}, true
 	}
 	if match := trailingNumberPart.FindStringSubmatchIndex(base); match != nil {
 		n, err := strconv.Atoi(base[match[4]:match[5]])
 		if err != nil {
-			return 0, "", false
+			return partInfo{}, false
 		}
-		return n, normalizePartBase(base[:match[4]] + base[match[5]:]), true
+		return partInfo{order: n, base: normalizePartBase(base[:match[4]] + base[match[5]:])}, true
 	}
 	if match := trailingLetterPart.FindStringSubmatchIndex(base); match != nil {
 		letter := strings.ToUpper(base[match[4]:match[5]])
 		if len(letter) == 1 && letter[0] >= 'A' && letter[0] <= 'Z' {
-			return int(letter[0]-'A') + 1, normalizePartBase(base[:match[4]] + base[match[5]:]), true
+			return partInfo{
+				order:          int(letter[0]-'A') + 1,
+				base:           normalizePartBase(base[:match[4]] + base[match[5]:]),
+				trailingLetter: true,
+			}, true
 		}
 	}
-	return 0, "", false
+	return partInfo{}, false
 }
 
 func normalizePartBase(base string) string {
@@ -576,12 +611,12 @@ func validPartOrders(parts []partCandidate) bool {
 	seen := make(map[int]bool, len(parts))
 	maxOrder := 0
 	for _, part := range parts {
-		if seen[part.order] {
+		if seen[part.info.order] {
 			return false
 		}
-		seen[part.order] = true
-		if part.order > maxOrder {
-			maxOrder = part.order
+		seen[part.info.order] = true
+		if part.info.order > maxOrder {
+			maxOrder = part.info.order
 		}
 	}
 	if maxOrder != len(parts) {
@@ -616,7 +651,7 @@ func selectExtractedMedia(ctx context.Context, dir string) ([]string, error) {
 	if hasIncompleteMultipartSet(videos, dir, "") {
 		return nil, noValidMediaf("incomplete multipart video set in extracted image")
 	}
-	if best := bestVideoCandidate(videos, dir, ""); best != nil {
+	if best := bestVideoCandidate(videos, dir, "", validMultipartPartPaths(videos, dir, "")); best != nil {
 		return []string{best.Path}, nil
 	}
 
