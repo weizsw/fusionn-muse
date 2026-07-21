@@ -38,17 +38,18 @@ func New(cfgMgr *config.Manager, appriseClient *apprise.Client, folders config.F
 
 // stepTimer tracks timing for a processing step.
 type stepTimer struct {
+	ctx   context.Context
 	name  string
 	start time.Time
 }
 
-func startStep(name string) *stepTimer {
-	return &stepTimer{name: name, start: time.Now()}
+func startStep(ctx context.Context, name string) *stepTimer {
+	return &stepTimer{ctx: ctx, name: name, start: time.Now()}
 }
 
 func (s *stepTimer) done() time.Duration {
 	elapsed := time.Since(s.start)
-	logger.Infof("   ⏱️  %s: %v", s.name, formatDuration(elapsed))
+	logger.FromContext(s.ctx).Infof("   ⏱️  %s: %v", s.name, formatDuration(elapsed))
 	return elapsed
 }
 
@@ -73,6 +74,7 @@ func formatDuration(d time.Duration) string {
 // Process implements queue.Processor interface.
 func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	totalStart := time.Now()
+	log := logger.FromContext(ctx)
 
 	// Get fresh config for this job (enables hot-reload)
 	cfg := s.cfgMgr.Get()
@@ -81,26 +83,26 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		pipelineProvider = "videocaptioner"
 	}
 
-	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	logger.Infof("🎬 Starting job: %s", job.FileName)
-	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Infof("🎬 Starting job: %s", job.FileName)
+	log.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	var durations = make(map[string]time.Duration)
 
 	// Step 1: Hardlink/copy to staging (if not already there)
 	stagingPath := filepath.Join(s.folders.Staging, job.FileName)
 	if job.StagingPath == "" {
-		logger.Infof("📥 Step 1: Staging file...")
-		t := startStep("Staging")
+		log.Infof("📥 Step 1: Staging file...")
+		t := startStep(ctx, "Staging")
 
-		if err := fileops.HardlinkOrCopy(job.SourcePath, stagingPath); err != nil {
-			return s.handleError(job, "staging", err)
+		if err := fileops.HardlinkOrCopy(ctx, job.SourcePath, stagingPath); err != nil {
+			return s.handleError(ctx, job, "staging", err)
 		}
 		job.StagingPath = stagingPath
 		durations["staging"] = t.done()
 	} else {
 		stagingPath = job.StagingPath
-		logger.Infof("📥 Step 1: Using existing staging file (skipped)")
+		log.Infof("📥 Step 1: Using existing staging file (skipped)")
 	}
 
 	// Step 2: Clean filename and move to processing
@@ -114,17 +116,17 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 
 	cleanedName := mediaintake.CleanVideoFilename(job.FileName)
 	if cleanedName != job.FileName {
-		logger.Infof("📝 Cleaned filename: %s → %s", job.FileName, cleanedName)
+		log.Infof("📝 Cleaned filename: %s → %s", job.FileName, cleanedName)
 		job.FileName = cleanedName
 	}
 
 	processingPath := filepath.Join(s.folders.Process, job.FileName)
-	logger.Infof("📦 Step 2: Moving to processing...")
-	t := startStep("Move to processing")
+	log.Infof("📦 Step 2: Moving to processing...")
+	t := startStep(ctx, "Move to processing")
 
-	preserveStaging, err := moveToProcessing(job, stagingPath, processingPath)
+	preserveStaging, err := moveToProcessing(ctx, job, stagingPath, processingPath)
 	if err != nil {
-		return s.handleError(job, "move to processing", err)
+		return s.handleError(ctx, job, "move to processing", err)
 	}
 	job.ProcessingPath = processingPath
 	if !preserveStaging {
@@ -135,7 +137,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	if !cfg.DryRun && !hasChineseSub && hardSubOCREnabled(cfg) {
 		detected, err := detectHardSubOCR(ctx, processingPath)
 		if err != nil {
-			logger.Warnf("⚠️ Hard-sub OCR detection failed for %s: %v", job.FileName, err)
+			log.Warnf("⚠️ Hard-sub OCR detection failed for %s: %v", job.FileName, err)
 		} else if detected {
 			hasChineseSub = true
 			job.IsLight = true
@@ -149,21 +151,21 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	if skipSubtitle {
 		// Skip transcription and translation
 		if cfg.DryRun {
-			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (dry run)")
+			log.Infof("⏭️  Step 3-4: Skipping transcription & translation (dry run)")
 			baseName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName))
 			subtitlePath = filepath.Join(filepath.Dir(processingPath), baseName+".srt")
 			if err := mediaintake.WriteDummySubtitle(subtitlePath); err != nil {
-				s.moveToFailed(job, processingPath)
-				return s.handleError(job, "create dummy subtitle", err)
+				s.moveToFailed(ctx, job, processingPath)
+				return s.handleError(ctx, job, "create dummy subtitle", err)
 			}
 			translatedPath = subtitlePath
 		} else {
-			logger.Infof("⏭️  Step 3-4: Skipping transcription & translation (Chinese subtitle detected: %s)", job.SubtitleDetectionReason)
+			log.Infof("⏭️  Step 3-4: Skipping transcription & translation (Chinese subtitle detected: %s)", job.SubtitleDetectionReason)
 		}
 	} else {
 		// Step 3: Transcribe
-		logger.Infof("🎤 Step 3: Transcribing with %s...", pipelineProvider)
-		t = startStep("Transcription")
+		log.Infof("🎤 Step 3: Transcribing with %s...", pipelineProvider)
+		t = startStep(ctx, "Transcription")
 
 		var err error
 		switch pipelineProvider {
@@ -175,14 +177,14 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 			err = fmt.Errorf("unsupported pipeline provider: %s", cfg.Pipeline.Provider)
 		}
 		if err != nil {
-			s.moveToFailed(job, processingPath)
-			return s.handleError(job, "transcription", err)
+			s.moveToFailed(ctx, job, processingPath)
+			return s.handleError(ctx, job, "transcription", err)
 		}
 		durations["transcription"] = t.done()
 
 		// Step 4: Translate
-		logger.Infof("🌐 Step 4: Translating subtitle → %s...", cfg.Translate.TargetLang)
-		t = startStep("Translation")
+		log.Infof("🌐 Step 4: Translating subtitle → %s...", cfg.Translate.TargetLang)
+		t = startStep(ctx, "Translation")
 
 		if pipelineProvider == "mlx_qwen3_asr" {
 			translatedPath, err = executor.NewLLMSubtrans(cfg.LLMSubtrans, cfg.Translate).Translate(ctx, subtitlePath)
@@ -190,8 +192,8 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 			translatedPath, err = executor.NewTranslator(cfg.Translate).Translate(ctx, subtitlePath)
 		}
 		if err != nil {
-			s.moveToFailed(job, processingPath)
-			return s.handleError(job, "translation", err)
+			s.moveToFailed(ctx, job, processingPath)
+			return s.handleError(ctx, job, "translation", err)
 		}
 		durations["translation"] = t.done()
 	}
@@ -201,28 +203,28 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	// Step 5: Move translated subtitle to subtitles folder (skip if no real subtitle)
 	if skipSubtitle {
 		if cfg.DryRun {
-			logger.Infof("⏭️  Step 5: Skipping subtitle move")
+			log.Infof("⏭️  Step 5: Skipping subtitle move")
 			// Clean up dummy subtitle
 			_ = fileops.Remove(subtitlePath) //nolint:errcheck // Best-effort cleanup
 		} else if job.SubtitleDetectionReason == mediaintake.SubtitleDetectionSidecar && job.SidecarSubtitlePath != "" {
 			finalSubPath := filepath.Join(s.folders.Subtitles, subtitleOutputName(job.FileName, filepath.Ext(job.SidecarSubtitlePath), cfg.Subtitle.LanguageSuffix))
-			logger.Infof("📦 Step 5: Copying sidecar subtitle to subtitles folder...")
-			t = startStep("Copy sidecar subtitle")
-			if err := fileops.Copy(job.SidecarSubtitlePath, finalSubPath); err != nil {
-				return s.handleError(job, "copy sidecar subtitle", err)
+			log.Infof("📦 Step 5: Copying sidecar subtitle to subtitles folder...")
+			t = startStep(ctx, "Copy sidecar subtitle")
+			if err := fileops.Copy(ctx, job.SidecarSubtitlePath, finalSubPath); err != nil {
+				return s.handleError(ctx, job, "copy sidecar subtitle", err)
 			}
 			durations["copy_sidecar_subtitle"] = t.done()
 		} else {
-			logger.Infof("⏭️  Step 5: Skipping subtitle move")
+			log.Infof("⏭️  Step 5: Skipping subtitle move")
 		}
 	} else {
 		// Use cleaned video name as subtitle name with optional language suffix
 		finalSubPath := filepath.Join(s.folders.Subtitles, subtitleOutputName(job.FileName, ".srt", cfg.Subtitle.LanguageSuffix))
-		logger.Infof("📦 Step 5: Moving translated subtitle to subtitles folder...")
-		t = startStep("Move subtitle")
+		log.Infof("📦 Step 5: Moving translated subtitle to subtitles folder...")
+		t = startStep(ctx, "Move subtitle")
 
-		if err := fileops.Move(translatedPath, finalSubPath); err != nil {
-			return s.handleError(job, "move subtitle", err)
+		if err := fileops.Move(ctx, translatedPath, finalSubPath); err != nil {
+			return s.handleError(ctx, job, "move subtitle", err)
 		}
 		durations["move_subtitle"] = t.done()
 
@@ -234,48 +236,48 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 
 	// Step 6: Move video to scraping folder (another program handles from here)
 	scrapingPath := filepath.Join(s.folders.Scraping, job.FileName)
-	logger.Infof("📦 Step 6: Moving video to scraping...")
-	t = startStep("Move to scraping")
+	log.Infof("📦 Step 6: Moving video to scraping...")
+	t = startStep(ctx, "Move to scraping")
 
-	if err := fileops.Move(processingPath, scrapingPath); err != nil {
-		return s.handleError(job, "move video to scraping", err)
+	if err := fileops.Move(ctx, processingPath, scrapingPath); err != nil {
+		return s.handleError(ctx, job, "move video to scraping", err)
 	}
 	if preserveStaging {
 		if err := fileops.Remove(stagingPath); err != nil {
-			logger.Warnf("⚠️ Failed to remove preserved staging file: %v", err)
+			log.Warnf("⚠️ Failed to remove preserved staging file: %v", err)
 		}
 		job.StagingPath = ""
 	}
 	durations["move_to_scraping"] = t.done()
 
 	// Step 7: Send success notification
-	logger.Infof("🔔 Step 7: Sending notification...")
-	t = startStep("Notification")
-	s.notifySuccess(job, durations)
+	log.Infof("🔔 Step 7: Sending notification...")
+	t = startStep(ctx, "Notification")
+	s.notifySuccess(ctx, job, durations)
 	durations["notification"] = t.done()
 
 	// Total time
 	totalDuration := time.Since(totalStart)
 
-	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	logger.Infof("✅ Job completed: %s", job.FileName)
-	logger.Infof("⏱️  Total time: %s", formatDuration(totalDuration))
+	log.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Infof("✅ Job completed: %s", job.FileName)
+	log.Infof("⏱️  Total time: %s", formatDuration(totalDuration))
 	if !skipSubtitle {
-		logger.Infof("   Transcription: %s | Translation: %s",
+		log.Infof("   Transcription: %s | Translation: %s",
 			formatDuration(durations["transcription"]),
 			formatDuration(durations["translation"]))
 	}
-	logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	return nil
 }
 
-func moveToProcessing(job *queue.Job, stagingPath, processingPath string) (bool, error) {
+func moveToProcessing(ctx context.Context, job *queue.Job, stagingPath, processingPath string) (bool, error) {
 	preserveStaging := samePath(job.SourcePath, stagingPath) && samePath(job.StagingPath, stagingPath)
 	if preserveStaging {
-		return true, fileops.HardlinkOrCopy(stagingPath, processingPath)
+		return true, fileops.HardlinkOrCopy(ctx, stagingPath, processingPath)
 	}
-	return false, fileops.Move(stagingPath, processingPath)
+	return false, fileops.Move(ctx, stagingPath, processingPath)
 }
 
 func subtitleOutputName(videoName, subtitleExt, languageSuffix string) string {
@@ -376,16 +378,17 @@ func samePath(a, b string) bool {
 }
 
 // moveToFailed moves the file to failed folder for manual inspection.
-func (s *Service) moveToFailed(job *queue.Job, currentPath string) {
+func (s *Service) moveToFailed(ctx context.Context, job *queue.Job, currentPath string) {
 	if currentPath == "" || !fileops.Exists(currentPath) {
 		return
 	}
 
+	log := logger.FromContext(ctx)
 	failedPath := filepath.Join(s.folders.Failed, job.FileName)
-	if err := fileops.Move(currentPath, failedPath); err != nil {
-		logger.Warnf("⚠️ Failed to move to failed folder: %v", err)
+	if err := fileops.Move(ctx, currentPath, failedPath); err != nil {
+		log.Warnf("⚠️ Failed to move to failed folder: %v", err)
 	} else {
-		logger.Infof("📁 Moved to failed folder: %s", failedPath)
+		log.Infof("📁 Moved to failed folder: %s", failedPath)
 	}
 }
 
@@ -398,7 +401,7 @@ func (s *Service) MoveToStagingForRetry(fileName string) error {
 		return fmt.Errorf("file not found in failed folder: %s", fileName)
 	}
 
-	return fileops.Move(failedPath, stagingPath)
+	return fileops.Move(context.Background(), failedPath, stagingPath)
 }
 
 // GetStagingFiles returns all video files in staging folder.
@@ -411,39 +414,40 @@ func (s *Service) GetFailedFiles() ([]string, error) {
 	return mediaintake.FindVideoFiles(s.folders.Failed)
 }
 
-func (s *Service) handleError(job *queue.Job, step string, err error) error {
+func (s *Service) handleError(ctx context.Context, job *queue.Job, step string, err error) error {
 	fullErr := fmt.Errorf("%s failed: %w", step, err)
-	logger.Errorf("❌ %v", fullErr)
-	s.notifyError(job, step, err)
+	logger.FromContext(ctx).Errorf("❌ %v", fullErr)
+	s.notifyError(ctx, job, step, err)
 	return fullErr
 }
 
-func (s *Service) notifySuccess(job *queue.Job, durations map[string]time.Duration) {
+func (s *Service) notifySuccess(ctx context.Context, job *queue.Job, durations map[string]time.Duration) {
 	if s.apprise == nil {
 		return
 	}
 
 	title := "🎬 Subtitle Ready"
-	body := fmt.Sprintf("**%s**\n\nTranscription: %s\nTranslation: %s",
+	body := fmt.Sprintf("**%s**\n\nJob ID: %s\nTranscription: %s\nTranslation: %s",
 		job.FileName,
+		job.ID,
 		formatDuration(durations["transcription"]),
 		formatDuration(durations["translation"]),
 	)
 
-	if err := s.apprise.NotifySuccess(title, body); err != nil {
-		logger.Warnf("⚠️ Failed to send notification: %v", err)
+	if err := s.apprise.NotifySuccess(ctx, title, body); err != nil {
+		logger.FromContext(ctx).Warnf("⚠️ Failed to send notification: %v", err)
 	}
 }
 
-func (s *Service) notifyError(job *queue.Job, step string, err error) {
+func (s *Service) notifyError(ctx context.Context, job *queue.Job, step string, err error) {
 	if s.apprise == nil {
 		return
 	}
 
 	title := "❌ Subtitle Processing Failed"
-	body := fmt.Sprintf("**%s**\nFailed at: %s\nError: %v", job.FileName, step, err)
+	body := fmt.Sprintf("**%s**\nJob ID: %s\nFailed at: %s\nError: %v", job.FileName, job.ID, step, err)
 
-	if notifyErr := s.apprise.NotifyError(title, body); notifyErr != nil {
-		logger.Warnf("⚠️ Failed to send error notification: %v", notifyErr)
+	if notifyErr := s.apprise.NotifyError(ctx, title, body); notifyErr != nil {
+		logger.FromContext(ctx).Warnf("⚠️ Failed to send error notification: %v", notifyErr)
 	}
 }

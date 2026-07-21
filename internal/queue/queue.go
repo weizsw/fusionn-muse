@@ -70,13 +70,14 @@ func (q *Queue) Stop() {
 func (q *Queue) Enqueue(job *Job) {
 	q.registerJob(job)
 
-	logger.Infof("📥 Job queued: %s (%s)", job.ID, job.FileName)
+	log := logger.FromContext(logger.WithJob(context.Background(), job.ID))
+	log.Infof("📥 Job queued: %s", job.FileName)
 
 	// Non-blocking send to channel
 	select {
 	case q.jobsChan <- job:
 	default:
-		logger.Warnf("⚠️ Job channel full, job %s will be processed later", job.ID)
+		log.Warn("⚠️ Job channel full; processing deferred")
 	}
 }
 
@@ -182,11 +183,14 @@ func (q *Queue) processJob(job *Job) {
 	q.mu.Lock()
 	job.Status = StatusProcessing
 	job.StartedAt = time.Now()
+	attempt := job.Retries + 1
 	q.mu.Unlock()
 
-	logger.Infof("🔄 Processing job: %s (%s)", job.ID, job.FileName)
+	ctx := logger.WithAttempt(logger.WithJob(q.ctx, job.ID), attempt)
+	log := logger.FromContext(ctx)
+	log.Infof("🔄 Processing job: %s", job.FileName)
 
-	err := q.processor.Process(q.ctx, job)
+	err := q.processor.Process(ctx, job)
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -196,7 +200,7 @@ func (q *Queue) processJob(job *Job) {
 		job.Error = err.Error()
 
 		if job.Retries < q.maxRetries {
-			logger.Warnf("⚠️ Job %s failed (attempt %d/%d): %v", job.ID, job.Retries, q.maxRetries, err)
+			log.Warnf("⚠️ Job failed (attempt %d/%d): %v", job.Retries, q.maxRetries, err)
 			job.Status = StatusPending
 
 			// Re-queue with delay
@@ -208,12 +212,12 @@ func (q *Queue) processJob(job *Job) {
 				}
 			}()
 		} else {
-			logger.Errorf("❌ Job %s failed after %d attempts: %v", job.ID, q.maxRetries, err)
+			log.Errorf("❌ Job failed after %d attempts: %v", q.maxRetries, err)
 			job.Status = StatusFailed
 			job.CompletedAt = time.Now()
 		}
 	} else {
-		logger.Infof("✅ Job completed: %s", job.ID)
+		log.Info("✅ Job completed")
 		job.Status = StatusCompleted
 		job.CompletedAt = time.Now()
 		job.Error = ""
@@ -226,15 +230,17 @@ func (q *Queue) processImmediateJob(job *Job) {
 	job.StartedAt = time.Now()
 	q.mu.Unlock()
 
-	logger.Infof("⚡ Processing immediate job: %s (%s)", job.ID, job.FileName)
+	ctx := logger.WithAttempt(logger.WithJob(q.ctx, job.ID), 1)
+	log := logger.FromContext(ctx)
+	log.Infof("⚡ Processing immediate job: %s", job.FileName)
 
-	err := q.processor.Process(q.ctx, job)
+	err := q.processor.Process(ctx, job)
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	if err != nil {
-		logger.Errorf("❌ Immediate job %s failed: %v", job.ID, err)
+		log.Errorf("❌ Immediate job failed: %v", err)
 		job.Status = StatusFailed
 		job.Error = err.Error()
 		job.CompletedAt = time.Now()
@@ -242,7 +248,7 @@ func (q *Queue) processImmediateJob(job *Job) {
 		return
 	}
 
-	logger.Infof("✅ Immediate job completed: %s", job.ID)
+	log.Info("✅ Immediate job completed")
 	job.Status = StatusCompleted
 	job.CompletedAt = time.Now()
 	job.Error = ""

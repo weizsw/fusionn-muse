@@ -24,6 +24,7 @@ func NewTranslator(cfg config.TranslateConfig) *Translator {
 
 // Translate translates a subtitle file and returns the path to the translated subtitle.
 func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string, error) {
+	log := logger.FromContext(ctx)
 	dir := filepath.Dir(subtitlePath)
 	base := filepath.Base(subtitlePath)
 	ext := filepath.Ext(base)
@@ -36,14 +37,14 @@ func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string
 	// Build command args
 	args := t.buildArgs(subtitlePath, translatedPath)
 
-	logger.Infof("🌐 Translating: %s → %s", filepath.Base(subtitlePath), t.cfg.TargetLang)
-	logger.Debugf("  Command: python3 %s", strings.Join(args, " "))
+	log.Infof("🌐 Translating: %s → %s", filepath.Base(subtitlePath), t.cfg.TargetLang)
+	log.Debugf("  Command: python3 %s", strings.Join(args, " "))
 
 	_, stderrStr, err := toolrun.ExecRunner{}.Stream(ctx, "python3", args...)
 	if err != nil {
 		stderrStr := strings.TrimSpace(stderrStr)
 		if stderrStr != "" {
-			logger.Errorf("Script stderr: %s", stderrStr)
+			log.Errorf("Script stderr: %s", stderrStr)
 		}
 		return "", fmt.Errorf("translator failed: %w", err)
 	}
@@ -62,7 +63,7 @@ func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string
 		return "", fmt.Errorf("translated file is empty (translation failed)\nStderr: %s", stderrStr)
 	}
 
-	logger.Infof("✅ Translation complete: %s", filepath.Base(translatedPath))
+	log.Infof("✅ Translation complete: %s", filepath.Base(translatedPath))
 	return translatedPath, nil
 }
 

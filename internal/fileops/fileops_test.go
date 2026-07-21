@@ -1,6 +1,7 @@
 package fileops
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,7 +28,7 @@ func TestHardlinkOrCopyDoesNotTruncateSourceWhenDestinationIsStaleHardlink(t *te
 		t.Fatalf("create stale staging hardlink: %v", err)
 	}
 
-	if err := HardlinkOrCopy(source, staging); err != nil {
+	if err := HardlinkOrCopy(context.Background(), source, staging); err != nil {
 		t.Fatalf("HardlinkOrCopy returned error: %v", err)
 	}
 
@@ -60,7 +61,7 @@ func TestMoveRemovesSourceWhenDestinationIsSameInode(t *testing.T) {
 		t.Fatalf("create stale failed hardlink: %v", err)
 	}
 
-	if err := Move(source, failed); err != nil {
+	if err := Move(context.Background(), source, failed); err != nil {
 		t.Fatalf("Move returned error: %v", err)
 	}
 

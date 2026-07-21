@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -35,7 +36,12 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) error {
 }
 
 func (ExecRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	output, err := exec.CommandContext(ctx, name, args...).Output()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+	}
+	return output, err
 }
 
 func (ExecRunner) CombinedOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -57,8 +63,8 @@ func (ExecRunner) Stream(ctx context.Context, name string, args ...string) (stri
 	var stdoutBuf, stderrBuf bytes.Buffer
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go StreamDimmed(&wg, stdoutPipe, &stdoutBuf)
-	go StreamDimmed(&wg, stderrPipe, &stderrBuf)
+	go StreamDimmed(ctx, &wg, stdoutPipe, &stdoutBuf)
+	go StreamDimmed(ctx, &wg, stderrPipe, &stderrBuf)
 
 	if err := cmd.Start(); err != nil {
 		return "", "", fmt.Errorf("start %s: %w", name, err)
@@ -73,7 +79,7 @@ func (ExecRunner) Stream(ctx context.Context, name string, args ...string) (stri
 }
 
 // StreamDimmed reads from r, writes to buf, and prints dimmed to stderr.
-func StreamDimmed(wg *sync.WaitGroup, r io.Reader, buf *bytes.Buffer) {
+func StreamDimmed(ctx context.Context, wg *sync.WaitGroup, r io.Reader, buf *bytes.Buffer) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -82,10 +88,10 @@ func StreamDimmed(wg *sync.WaitGroup, r io.Reader, buf *bytes.Buffer) {
 		line := scanner.Text()
 		buf.WriteString(line)
 		buf.WriteByte('\n')
-		fmt.Fprintf(os.Stderr, "%s  │ %s%s\n", dimStart, line, dimEnd)
+		fmt.Fprintf(os.Stderr, "%s%s  │ %s%s\n", logger.Prefix(ctx), dimStart, line, dimEnd)
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.Debugf("Scanner error (may be normal): %v", err)
+		logger.FromContext(ctx).Debugf("Scanner error (may be normal): %v", err)
 	}
 }

@@ -283,13 +283,13 @@ type ffprobeOutput struct {
 func hasEmbeddedChineseSubtitle(ctx context.Context, path string) bool {
 	out, err := toolrun.ExecRunner{}.Output(ctx, "ffprobe", "-v", "error", "-of", "json", "-show_streams", "-select_streams", "s", path)
 	if err != nil {
-		logger.Debugf("ffprobe subtitle detection failed for %s: %v", path, err)
+		logger.FromContext(ctx).Debugf("ffprobe subtitle detection failed for %s: %v", path, err)
 		return false
 	}
 
 	var probed ffprobeOutput
 	if err := json.Unmarshal(out, &probed); err != nil {
-		logger.Debugf("ffprobe subtitle detection returned invalid JSON for %s: %v", path, err)
+		logger.FromContext(ctx).Debugf("ffprobe subtitle detection returned invalid JSON for %s: %v", path, err)
 		return false
 	}
 	for _, stream := range probed.Streams {

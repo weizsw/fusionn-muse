@@ -27,6 +27,7 @@ const transcribeScript = "/app/scripts/transcribe.py"
 
 // Transcribe transcribes a video file and returns the path to the generated subtitle.
 func (w *Whisper) Transcribe(ctx context.Context, videoPath string) (string, error) {
+	log := logger.FromContext(ctx)
 	outputDir := filepath.Dir(videoPath)
 	baseName := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))
 	srtPath := filepath.Join(outputDir, baseName+".srt")
@@ -75,8 +76,8 @@ func (w *Whisper) Transcribe(ctx context.Context, videoPath string) (string, err
 		args = append(args, "--word-timestamps")
 	}
 
-	logger.Infof("🎤 Transcribing: %s", filepath.Base(videoPath))
-	logger.Debugf("  Command: python3 %s", strings.Join(args, " "))
+	log.Infof("🎤 Transcribing: %s", filepath.Base(videoPath))
+	log.Debugf("  Command: python3 %s", strings.Join(args, " "))
 
 	stdoutStr, stderrStr, err := toolrun.ExecRunner{}.Stream(ctx, "python3", args...)
 	if err != nil {
@@ -97,13 +98,13 @@ func (w *Whisper) Transcribe(ctx context.Context, videoPath string) (string, err
 		return "", fmt.Errorf("SRT file is empty (transcription failed)\nOutput: %s", stdoutStr)
 	}
 
-	logger.Infof("✅ Transcription complete: %s", filepath.Base(srtPath))
+	log.Infof("✅ Transcription complete: %s", filepath.Base(srtPath))
 
 	// Post-process with LLM if enabled
 	if w.cfg.OptimizeSubtitles || w.cfg.SplitSentences || w.cfg.RemovePunctuation {
 		processedPath, err := w.postProcessSubtitles(ctx, srtPath)
 		if err != nil {
-			logger.Warnf("⚠️ Post-processing failed (using original): %v", err)
+			log.Warnf("⚠️ Post-processing failed (using original): %v", err)
 			return srtPath, nil
 		}
 		return processedPath, nil
@@ -116,6 +117,7 @@ const subtitleProcessorScript = "/app/scripts/subtitle_processor.py"
 
 // postProcessSubtitles uses LLM to optimize and split subtitles.
 func (w *Whisper) postProcessSubtitles(ctx context.Context, srtPath string) (string, error) {
+	log := logger.FromContext(ctx)
 	// Output to same path (overwrite)
 	outputPath := srtPath
 
@@ -182,15 +184,15 @@ func (w *Whisper) postProcessSubtitles(ctx context.Context, srtPath string) (str
 		args = append(args, "--remove-punctuation")
 	}
 
-	logger.Infof("📝 Post-processing subtitles...")
-	logger.Debugf("  Command: python3 %s", strings.Join(args, " "))
+	log.Infof("📝 Post-processing subtitles...")
+	log.Debugf("  Command: python3 %s", strings.Join(args, " "))
 
 	_, stderrStr, err := toolrun.ExecRunner{}.Stream(ctx, "python3", args...)
 	if err != nil {
 		return "", fmt.Errorf("post-processing failed: %w\nStderr: %s", err, stderrStr)
 	}
 
-	logger.Infof("✅ Post-processing complete")
+	log.Infof("✅ Post-processing complete")
 	return outputPath, nil
 }
 

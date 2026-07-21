@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fusionn-muse/internal/config"
+	"github.com/fusionn-muse/pkg/logger"
 )
 
 type HostASR struct {
@@ -36,6 +37,8 @@ type hostASRRequest struct {
 	HostPrefix      string `json:"host_prefix"`
 	Model           string `json:"model,omitempty"`
 	Language        string `json:"language,omitempty"`
+	JobID           string `json:"job_id,omitempty"`
+	Attempt         int    `json:"attempt,omitempty"`
 }
 
 type hostASRResponse struct {
@@ -60,6 +63,8 @@ func (h *HostASR) Transcribe(ctx context.Context, videoPath string) (string, err
 		HostPrefix:      h.cfg.HostPrefix,
 		Model:           h.cfg.Model,
 		Language:        h.cfg.Language,
+		JobID:           logger.JobID(ctx),
+		Attempt:         logger.Attempt(ctx),
 	})
 	if err != nil {
 		return "", err

@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,10 +14,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/fusionn-muse/internal/config"
 	"github.com/fusionn-muse/internal/mediaintake"
 	"github.com/fusionn-muse/internal/queue"
+	"github.com/fusionn-muse/internal/service/processor"
 	"github.com/fusionn-muse/pkg/logger"
 )
 
@@ -45,6 +48,58 @@ func (p *recordingProcessor) Process(_ context.Context, job *queue.Job) error {
 func init() {
 	logger.Init(true)
 	gin.SetMode(gin.TestMode)
+}
+
+func TestTorrentCompleteReturnsFullJobID(t *testing.T) {
+	handler := newTestHandler(t.TempDir())
+	response := postTorrentComplete(t, handler, `{"path":"/missing/movie.mp4"}`)
+
+	var body struct {
+		Job string `json:"job"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, err := uuid.Parse(body.Job); err != nil {
+		t.Fatalf("job ID = %q, want full UUID: %v", body.Job, err)
+	}
+}
+
+func TestManualRequeuesCreateNewFullJobIDs(t *testing.T) {
+	root := t.TempDir()
+	folders := config.FoldersConfig{
+		Staging: filepath.Join(root, "staging"),
+		Failed:  filepath.Join(root, "failed"),
+	}
+	h := &Handler{
+		queue:     queue.New(noopProcessor{}, 1, 0),
+		processor: processor.New(nil, nil, folders),
+		folders:   folders,
+	}
+
+	ids := make(map[string]bool)
+	for _, fileName := range []string{"movie-a.mp4", "movie-b.mp4"} {
+		mustWriteSizedHandlerFile(t, filepath.Join(folders.Failed, fileName), 1)
+		response := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(response)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/retry/failed/"+fileName, nil)
+		c.Params = gin.Params{{Key: "name", Value: fileName}}
+		h.RetryOneFailed(c)
+
+		var body struct {
+			Job string `json:"job"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if _, err := uuid.Parse(body.Job); err != nil {
+			t.Fatalf("job ID = %q, want full UUID: %v", body.Job, err)
+		}
+		if ids[body.Job] {
+			t.Fatalf("duplicate manual requeue Job ID %q", body.Job)
+		}
+		ids[body.Job] = true
+	}
 }
 
 func TestTorrentCompleteReturnsAcceptedForNoValidMedia(t *testing.T) {
@@ -86,7 +141,8 @@ func TestLightTorrentUsesProcessorLifecycle(t *testing.T) {
 	handler := newTestHandler(root)
 	handler.queue = queue.New(proc, 1, 0)
 
-	handler.resolveAndDispatchTorrent(TorrentCompleteRequest{
+	ctx := logger.WithJob(context.Background(), "job1")
+	handler.resolveAndDispatchTorrent(ctx, TorrentCompleteRequest{
 		Path: source,
 		Name: "SSNI-083",
 	}, "job1")

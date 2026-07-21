@@ -1,7 +1,10 @@
 package logger
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -9,6 +12,86 @@ import (
 )
 
 var Log *zap.SugaredLogger
+
+type correlation struct {
+	jobID   string
+	attempt int
+}
+
+type correlationKey struct{}
+
+// WithJob adds a Job ID to ctx for correlated logging.
+func WithJob(ctx context.Context, jobID string) context.Context {
+	return context.WithValue(ctx, correlationKey{}, correlation{jobID: jobID})
+}
+
+// WithAttempt adds an Attempt number while preserving the Job ID in ctx.
+func WithAttempt(ctx context.Context, attempt int) context.Context {
+	value, _ := ctx.Value(correlationKey{}).(correlation)
+	value.attempt = attempt
+	return context.WithValue(ctx, correlationKey{}, value)
+}
+
+func JobID(ctx context.Context) string {
+	value, _ := ctx.Value(correlationKey{}).(correlation)
+	return value.jobID
+}
+
+func Attempt(ctx context.Context) int {
+	value, _ := ctx.Value(correlationKey{}).(correlation)
+	return value.attempt
+}
+
+// Prefix returns the stable text prefix used to grep one Job's logs.
+func Prefix(ctx context.Context) string {
+	jobID := JobID(ctx)
+	if jobID == "" {
+		return ""
+	}
+	if attempt := Attempt(ctx); attempt > 0 {
+		return fmt.Sprintf("[job_id=%s attempt=%d] ", jobID, attempt)
+	}
+	return fmt.Sprintf("[job_id=%s] ", jobID)
+}
+
+// ContextLogger prefixes each physical line with correlation data from ctx.
+type ContextLogger struct {
+	prefix string
+}
+
+func FromContext(ctx context.Context) ContextLogger {
+	return ContextLogger{prefix: Prefix(ctx)}
+}
+
+func (l ContextLogger) write(write func(...interface{}), message string) {
+	if l.prefix == "" {
+		write(message)
+		return
+	}
+	message = strings.TrimRight(message, "\n")
+	for _, line := range strings.Split(message, "\n") {
+		write(l.prefix + line)
+	}
+}
+
+func (l ContextLogger) Info(args ...interface{}) {
+	l.write(Log.Info, fmt.Sprint(args...))
+}
+func (l ContextLogger) Infof(template string, args ...interface{}) {
+	l.write(Log.Info, fmt.Sprintf(template, args...))
+}
+func (l ContextLogger) Errorf(template string, args ...interface{}) {
+	l.write(Log.Error, fmt.Sprintf(template, args...))
+}
+func (l ContextLogger) Debugf(template string, args ...interface{}) {
+	l.write(Log.Debug, fmt.Sprintf(template, args...))
+}
+func (l ContextLogger) Warn(args ...interface{}) {
+	l.write(Log.Warn, fmt.Sprint(args...))
+}
+func (l ContextLogger) Warnf(template string, args ...interface{}) {
+	l.write(Log.Warn, fmt.Sprintf(template, args...))
+}
 
 func Init(isDev bool) {
 	var encoder zapcore.Encoder
