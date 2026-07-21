@@ -46,10 +46,6 @@ func (ExecRunner) Output(ctx context.Context, name string, args ...string) ([]by
 	return output, err
 }
 
-func (ExecRunner) CombinedOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
-}
-
 func (ExecRunner) Stream(ctx context.Context, name string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 

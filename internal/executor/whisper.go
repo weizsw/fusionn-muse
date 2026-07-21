@@ -16,11 +16,12 @@ import (
 type Whisper struct {
 	cfg          config.WhisperConfig
 	translateCfg config.TranslateConfig // For LLM post-processing
+	runner       toolrun.Runner
 }
 
 // NewWhisper creates a new Whisper executor.
-func NewWhisper(cfg config.WhisperConfig, translateCfg config.TranslateConfig) *Whisper {
-	return &Whisper{cfg: cfg, translateCfg: translateCfg}
+func NewWhisper(cfg config.WhisperConfig, translateCfg config.TranslateConfig, runner toolrun.Runner) *Whisper {
+	return &Whisper{cfg: cfg, translateCfg: translateCfg, runner: runner}
 }
 
 const transcribeScript = "/app/scripts/transcribe.py"
@@ -79,7 +80,7 @@ func (w *Whisper) Transcribe(ctx context.Context, videoPath string) (string, err
 	log.Infof("🎤 Transcribing: %s", filepath.Base(videoPath))
 	log.Debugf("  Command: python3 %s", strings.Join(args, " "))
 
-	stdoutStr, stderrStr, err := toolrun.ExecRunner{}.Stream(ctx, "python3", args...)
+	stdoutStr, stderrStr, err := w.runner.Stream(ctx, "python3", args...)
 	if err != nil {
 		return "", fmt.Errorf("transcription failed: %w\nStderr: %s", err, stderrStr)
 	}
@@ -187,7 +188,7 @@ func (w *Whisper) postProcessSubtitles(ctx context.Context, srtPath string) (str
 	log.Infof("📝 Post-processing subtitles...")
 	log.Debugf("  Command: python3 %s", strings.Join(args, " "))
 
-	_, stderrStr, err := toolrun.ExecRunner{}.Stream(ctx, "python3", args...)
+	_, stderrStr, err := w.runner.Stream(ctx, "python3", args...)
 	if err != nil {
 		return "", fmt.Errorf("post-processing failed: %w\nStderr: %s", err, stderrStr)
 	}

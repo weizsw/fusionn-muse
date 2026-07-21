@@ -17,6 +17,7 @@ import (
 	"github.com/fusionn-muse/internal/handler"
 	"github.com/fusionn-muse/internal/queue"
 	"github.com/fusionn-muse/internal/service/processor"
+	"github.com/fusionn-muse/internal/toolrun"
 	"github.com/fusionn-muse/internal/version"
 	"github.com/fusionn-muse/pkg/logger"
 )
@@ -61,7 +62,7 @@ func main() {
 	}
 
 	// Initialize processor service
-	proc := processor.New(cfgMgr, appriseClient, folders)
+	proc := processor.New(cfgMgr, appriseClient, folders, toolrun.ExecRunner{})
 
 	// Initialize job queue
 	jobQueue := queue.New(proc, cfg.Queue.MaxRetries, cfg.Queue.RetryDelayMs)

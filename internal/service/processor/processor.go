@@ -25,14 +25,16 @@ type Service struct {
 	cfgMgr  *config.Manager
 	folders config.FoldersConfig
 	apprise *apprise.Client
+	runner  toolrun.Runner
 }
 
 // New creates a new processor service.
-func New(cfgMgr *config.Manager, appriseClient *apprise.Client, folders config.FoldersConfig) *Service {
+func New(cfgMgr *config.Manager, appriseClient *apprise.Client, folders config.FoldersConfig, runner toolrun.Runner) *Service {
 	return &Service{
 		cfgMgr:  cfgMgr,
 		folders: folders,
 		apprise: appriseClient,
+		runner:  runner,
 	}
 }
 
@@ -135,7 +137,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	durations["move_to_processing"] = t.done()
 
 	if !cfg.DryRun && !hasChineseSub && hardSubOCREnabled(cfg) {
-		detected, err := detectHardSubOCR(ctx, processingPath)
+		detected, err := detectHardSubOCR(ctx, s.runner, processingPath)
 		if err != nil {
 			log.Warnf("⚠️ Hard-sub OCR detection failed for %s: %v", job.FileName, err)
 		} else if detected {
@@ -170,7 +172,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		var err error
 		switch pipelineProvider {
 		case "videocaptioner":
-			subtitlePath, err = executor.NewWhisper(cfg.Whisper, cfg.Translate).Transcribe(ctx, processingPath)
+			subtitlePath, err = executor.NewWhisper(cfg.Whisper, cfg.Translate, s.runner).Transcribe(ctx, processingPath)
 		case "mlx_qwen3_asr":
 			subtitlePath, err = executor.NewHostASR(cfg.MLXQwen3ASR).Transcribe(ctx, processingPath)
 		default:
@@ -187,9 +189,9 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		t = startStep(ctx, "Translation")
 
 		if pipelineProvider == "mlx_qwen3_asr" {
-			translatedPath, err = executor.NewLLMSubtrans(cfg.LLMSubtrans, cfg.Translate).Translate(ctx, subtitlePath)
+			translatedPath, err = executor.NewLLMSubtrans(cfg.LLMSubtrans, cfg.Translate, s.runner).Translate(ctx, subtitlePath)
 		} else {
-			translatedPath, err = executor.NewTranslator(cfg.Translate).Translate(ctx, subtitlePath)
+			translatedPath, err = executor.NewTranslator(cfg.Translate, s.runner).Translate(ctx, subtitlePath)
 		}
 		if err != nil {
 			s.moveToFailed(ctx, job, processingPath)
@@ -292,11 +294,11 @@ func hardSubOCREnabled(cfg *config.Config) bool {
 	return cfg.HardSubOCR.Enabled == nil || *cfg.HardSubOCR.Enabled
 }
 
-func detectHardSubOCR(parent context.Context, videoPath string) (bool, error) {
+func detectHardSubOCR(parent context.Context, runner toolrun.Runner, videoPath string) (bool, error) {
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 
-	duration, err := probeDuration(ctx, videoPath)
+	duration, err := probeDuration(ctx, runner, videoPath)
 	if err != nil {
 		return false, err
 	}
@@ -309,10 +311,10 @@ func detectHardSubOCR(parent context.Context, videoPath string) (bool, error) {
 	hits := 0
 	for i, pct := range []float64{0.15, 0.30, 0.45, 0.60, 0.75} {
 		frame := filepath.Join(tmpDir, fmt.Sprintf("frame-%d.png", i))
-		if err := extractSubtitleBand(ctx, videoPath, duration*pct, frame); err != nil {
+		if err := extractSubtitleBand(ctx, runner, videoPath, duration*pct, frame); err != nil {
 			return false, err
 		}
-		text, err := toolrun.ExecRunner{}.Output(ctx, "tesseract", frame, "stdout")
+		text, err := runner.Output(ctx, "tesseract", frame, "stdout")
 		if err != nil {
 			return false, err
 		}
@@ -326,8 +328,8 @@ func detectHardSubOCR(parent context.Context, videoPath string) (bool, error) {
 	return false, nil
 }
 
-func probeDuration(ctx context.Context, videoPath string) (float64, error) {
-	out, err := toolrun.ExecRunner{}.Output(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", videoPath)
+func probeDuration(ctx context.Context, runner toolrun.Runner, videoPath string) (float64, error) {
+	out, err := runner.Output(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", videoPath)
 	if err != nil {
 		return 0, fmt.Errorf("ffprobe duration: %w", err)
 	}
@@ -338,8 +340,8 @@ func probeDuration(ctx context.Context, videoPath string) (float64, error) {
 	return duration, nil
 }
 
-func extractSubtitleBand(ctx context.Context, videoPath string, seconds float64, outPath string) error {
-	out, err := toolrun.ExecRunner{}.CombinedOutput(
+func extractSubtitleBand(ctx context.Context, runner toolrun.Runner, videoPath string, seconds float64, outPath string) error {
+	if err := runner.Run(
 		ctx,
 		"ffmpeg",
 		"-y",
@@ -348,9 +350,8 @@ func extractSubtitleBand(ctx context.Context, videoPath string, seconds float64,
 		"-frames:v", "1",
 		"-vf", "crop=iw:ih*0.4:0:ih*0.6",
 		outPath,
-	)
-	if err != nil {
-		return fmt.Errorf("ffmpeg frame extract: %w: %s", err, strings.TrimSpace(string(out)))
+	); err != nil {
+		return fmt.Errorf("ffmpeg frame extract: %w", err)
 	}
 	return nil
 }
