@@ -165,6 +165,55 @@ func TestAcceptAndReadsUseJobSnapshots(t *testing.T) {
 	}
 }
 
+type lifecycleMutatingProcessor struct {
+	mutated chan struct{}
+	release chan struct{}
+}
+
+func (p *lifecycleMutatingProcessor) Process(_ context.Context, job *Job) error {
+	job.StagingPath = "/tmp/staged.mp4"
+	job.Status = StatusFailed
+	job.Error = "processor-owned error"
+	job.Retries = 99
+	job.StartedAt = time.Unix(1, 0)
+	job.CompletedAt = time.Unix(2, 0)
+	close(p.mutated)
+	<-p.release
+	return nil
+}
+
+func TestAttemptOwnsLifecycleWhilePublishingProcessorArtifacts(t *testing.T) {
+	proc := &lifecycleMutatingProcessor{mutated: make(chan struct{}), release: make(chan struct{})}
+	q := New(proc, 1, 0)
+	q.Start()
+	defer q.Stop()
+
+	job := NewJob("job-a", "/tmp/source.mp4", "source.mp4", "", "")
+	createdAt := job.CreatedAt
+	if err := q.Accept(job); err != nil {
+		t.Fatalf("accept job: %v", err)
+	}
+	<-proc.mutated
+
+	processing := q.GetJob(job.ID)
+	if processing.Status != StatusProcessing || processing.StagingPath != "" || processing.StartedAt.IsZero() {
+		t.Fatalf("processing snapshot = %+v", processing)
+	}
+	close(proc.release)
+	waitForStatus(t, q, job.ID, StatusCompleted)
+
+	completed := q.GetJob(job.ID)
+	if completed.Error != "" || completed.Retries != 0 || completed.CompletedAt.IsZero() {
+		t.Fatalf("completed lifecycle = %+v", completed)
+	}
+	if completed.CreatedAt != createdAt || completed.StartedAt.Equal(time.Unix(1, 0)) {
+		t.Fatalf("processor overwrote queue timestamps: %+v", completed)
+	}
+	if completed.StagingPath != "/tmp/staged.mp4" {
+		t.Fatalf("StagingPath = %q, want processor artifact", completed.StagingPath)
+	}
+}
+
 type blockingProcessor struct {
 	started chan struct{}
 	release chan struct{}
