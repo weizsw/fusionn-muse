@@ -289,7 +289,7 @@ func (q *Queue) processHeavyJob(job *Job) {
 
 func (q *Queue) processLightJob(job *Job) {
 	defer q.wg.Done()
-	q.runAttempt(job, 1, true)
+	_ = q.runAttempt(job, 1, true)
 }
 
 func (q *Queue) runAttempt(job *Job, attempt int, isFinalAttempt bool) error {
