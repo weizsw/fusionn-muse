@@ -295,11 +295,15 @@ func (q *Queue) processLightJob(job *Job) {
 func (q *Queue) runAttempt(job *Job, attempt int, isFinalAttempt bool) error {
 	q.mu.Lock()
 	job.Status = StatusProcessing
+	job.Error = ""
+	job.Retries = attempt - 1
+	job.CompletedAt = time.Time{}
 	if job.StartedAt.IsZero() {
 		job.StartedAt = time.Now()
 	}
 	jobID := job.ID
 	createdAt := job.CreatedAt
+	startedAt := job.StartedAt
 	attemptJob := *job
 	q.mu.Unlock()
 
@@ -312,10 +316,13 @@ func (q *Queue) runAttempt(job *Job, attempt int, isFinalAttempt bool) error {
 	*job = attemptJob
 	job.ID = jobID
 	job.CreatedAt = createdAt
+	job.StartedAt = startedAt
+	job.Retries = attempt - 1
+	job.Error = ""
+	job.CompletedAt = time.Time{}
 	if err == nil {
 		job.Status = StatusCompleted
 		job.CompletedAt = time.Now()
-		job.Error = ""
 	} else {
 		job.Retries = attempt
 		job.Error = err.Error()
