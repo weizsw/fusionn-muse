@@ -61,6 +61,18 @@ func (r *processorCommandRunner) Stream(_ context.Context, name string, args ...
 	return "", "", nil
 }
 
+type transcriberFunc func(context.Context, string) (string, error)
+
+func (f transcriberFunc) Transcribe(ctx context.Context, path string) (string, error) {
+	return f(ctx, path)
+}
+
+type subtitleTranslatorFunc func(context.Context, string) (string, error)
+
+func (f subtitleTranslatorFunc) Translate(ctx context.Context, path string) (string, error) {
+	return f(ctx, path)
+}
+
 func TestMoveToProcessingPreservesPreparedStagingSource(t *testing.T) {
 	root := t.TempDir()
 	stagingPath := filepath.Join(root, "staging", "SSNI-083.mkv")
@@ -254,6 +266,197 @@ func TestProcessContinuesHeavyProcessingWhenHardSubProbeFails(t *testing.T) {
 	}
 }
 
+func TestProcessHeavyUsesExecutorPairInOrder(t *testing.T) {
+	svc, _, folders, job := newProcessFixture(t, "movie.mp4")
+	var calls []string
+	svc.resolveExecutors = func(config.Config) (transcriber, subtitleTranslator, error) {
+		calls = append(calls, "resolve")
+		return transcriberFunc(func(_ context.Context, videoPath string) (string, error) {
+				calls = append(calls, "transcribe")
+				path := strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".srt"
+				return path, os.WriteFile(path, []byte("source subtitle"), 0644)
+			}), subtitleTranslatorFunc(func(_ context.Context, subtitlePath string) (string, error) {
+				calls = append(calls, "translate")
+				path := strings.TrimSuffix(subtitlePath, filepath.Ext(subtitlePath)) + ".zh.srt"
+				return path, os.WriteFile(path, []byte("translated subtitle"), 0644)
+			}), nil
+	}
+
+	if err := svc.Process(context.Background(), job); err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	if got := strings.Join(calls, ","); got != "resolve,transcribe,translate" {
+		t.Fatalf("calls = %q, want resolve,transcribe,translate", got)
+	}
+	if !fileExists(filepath.Join(folders.Subtitles, "movie.srt")) {
+		t.Fatal("translated subtitle was not delivered")
+	}
+	if !fileExists(filepath.Join(folders.Scraping, "movie.mp4")) {
+		t.Fatal("video was not delivered")
+	}
+}
+
+func TestProcessSkipsExecutorResolutionForLightAndDryRunJobs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		light  bool
+		dryRun bool
+	}{
+		{name: "light", light: true},
+		{name: "dry run", dryRun: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, cfgMgr, _, job := newProcessFixture(t, "movie.mp4")
+			job.IsLight = tc.light
+			cfgMgr.Get().DryRun = tc.dryRun
+			svc.resolveExecutors = func(config.Config) (transcriber, subtitleTranslator, error) {
+				t.Fatal("executor pair resolved for skipped heavy work")
+				return nil, nil, errors.New("unexpected executor resolution")
+			}
+
+			if err := svc.Process(context.Background(), job); err != nil {
+				t.Fatalf("Process returned error: %v", err)
+			}
+		})
+	}
+}
+
+func TestProcessUnsupportedProviderFailsOnlyForHeavyWork(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		light  bool
+		dryRun bool
+		wantOK bool
+	}{
+		{name: "light", light: true, wantOK: true},
+		{name: "dry run", dryRun: true, wantOK: true},
+		{name: "heavy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, cfgMgr, _, job := newProcessFixture(t, "movie.mp4")
+			cfgMgr.Get().Pipeline.Provider = "unsupported"
+			cfgMgr.Get().DryRun = tc.dryRun
+			job.IsLight = tc.light
+
+			err := svc.Process(context.Background(), job)
+			if tc.wantOK && err != nil {
+				t.Fatalf("Process returned error: %v", err)
+			}
+			if !tc.wantOK && (err == nil || !strings.Contains(err.Error(), "unsupported pipeline provider")) {
+				t.Fatalf("Process error = %v, want unsupported provider error", err)
+			}
+		})
+	}
+}
+
+func TestProcessExecutorFailuresShortCircuitAndMoveVideoToFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		transcribeErr error
+		translateErr  error
+		wantCalls     string
+		wantStep      string
+	}{
+		{name: "transcription", transcribeErr: errors.New("transcribe boom"), wantCalls: "transcribe", wantStep: "transcription failed"},
+		{name: "translation", translateErr: errors.New("translate boom"), wantCalls: "transcribe,translate", wantStep: "translation failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, folders, job := newProcessFixture(t, "movie.mp4")
+			var notification apprise.NotifyRequest
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&notification); err != nil {
+					t.Errorf("decode notification: %v", err)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			svc.apprise = apprise.NewClient(config.AppriseConfig{Enabled: true, BaseURL: server.URL, Key: "test"})
+			var calls []string
+			svc.resolveExecutors = func(config.Config) (transcriber, subtitleTranslator, error) {
+				return transcriberFunc(func(_ context.Context, videoPath string) (string, error) {
+						calls = append(calls, "transcribe")
+						if tc.transcribeErr != nil {
+							return "", tc.transcribeErr
+						}
+						path := strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".srt"
+						return path, os.WriteFile(path, []byte("subtitle"), 0644)
+					}), subtitleTranslatorFunc(func(_ context.Context, subtitlePath string) (string, error) {
+						calls = append(calls, "translate")
+						if tc.translateErr != nil {
+							return "", tc.translateErr
+						}
+						return subtitlePath, nil
+					}), nil
+			}
+
+			err := svc.Process(context.Background(), job)
+			if err == nil || !strings.Contains(err.Error(), tc.wantStep) {
+				t.Fatalf("Process error = %v, want %q", err, tc.wantStep)
+			}
+			if got := strings.Join(calls, ","); got != tc.wantCalls {
+				t.Fatalf("calls = %q, want %q", got, tc.wantCalls)
+			}
+			if !fileExists(filepath.Join(folders.Failed, "movie.mp4")) {
+				t.Fatal("video was not moved to failed")
+			}
+			if !strings.Contains(notification.Body, "Failed at: "+tc.name) {
+				t.Fatalf("notification body = %q, want failure step", notification.Body)
+			}
+		})
+	}
+}
+
+func TestProcessHardSubtitleSeamPromotesJobWithoutExecutors(t *testing.T) {
+	svc, _, folders, job := newProcessFixture(t, "movie.mp4")
+	svc.detectHardSubtitle = func(context.Context, string) (bool, error) { return true, nil }
+	svc.resolveExecutors = func(config.Config) (transcriber, subtitleTranslator, error) {
+		t.Fatal("executor pair resolved after hard-subtitle detection")
+		return nil, nil, errors.New("unexpected executor resolution")
+	}
+
+	if err := svc.Process(context.Background(), job); err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	if !job.IsLight || job.SubtitleDetectionReason != mediaintake.SubtitleDetectionHardSubOCR {
+		t.Fatalf("job light/reason = %v/%q", job.IsLight, job.SubtitleDetectionReason)
+	}
+	if !fileExists(filepath.Join(folders.Scraping, "movie.mp4")) {
+		t.Fatal("video was not delivered")
+	}
+}
+
+func TestProcessReadsFreshConfigForEachAttempt(t *testing.T) {
+	svc, cfgMgr, folders, firstJob := newProcessFixture(t, "first.mp4")
+	var providers []string
+	svc.resolveExecutors = func(cfg config.Config) (transcriber, subtitleTranslator, error) {
+		providers = append(providers, cfg.Pipeline.Provider)
+		return transcriberFunc(func(_ context.Context, videoPath string) (string, error) {
+				path := strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".srt"
+				return path, os.WriteFile(path, []byte("subtitle"), 0644)
+			}), subtitleTranslatorFunc(func(_ context.Context, subtitlePath string) (string, error) {
+				return subtitlePath, nil
+			}), nil
+	}
+
+	cfgMgr.Get().Pipeline.Provider = "first-provider"
+	if err := svc.Process(context.Background(), firstJob); err != nil {
+		t.Fatalf("first Process returned error: %v", err)
+	}
+
+	root := filepath.Dir(folders.Staging)
+	secondSource := filepath.Join(root, "input", "second.mp4")
+	mustWriteTestFile(t, secondSource, "video")
+	cfgMgr.Get().Pipeline.Provider = "second-provider"
+	secondJob := queue.NewJob("job2", secondSource, "second.mp4", "second", "")
+	if err := svc.Process(context.Background(), secondJob); err != nil {
+		t.Fatalf("second Process returned error: %v", err)
+	}
+
+	if got := strings.Join(providers, ","); got != "first-provider,second-provider" {
+		t.Fatalf("providers = %q, want fresh provider for each Attempt", got)
+	}
+}
+
 func TestProcessDoesNotCreateDummySubtitleForProductionLightJob(t *testing.T) {
 	root := t.TempDir()
 	cfgMgr := newTestConfigManager(t, root, "")
@@ -333,6 +536,25 @@ func TestNewUsesProvidedFolders(t *testing.T) {
 	if svc.folders.Staging != folders.Staging {
 		t.Fatalf("Staging folder = %q, want %q", svc.folders.Staging, folders.Staging)
 	}
+}
+
+func newProcessFixture(t *testing.T, fileName string) (*Service, *config.Manager, config.FoldersConfig, *queue.Job) {
+	t.Helper()
+	root := t.TempDir()
+	cfgMgr := newTestConfigManager(t, root, "")
+	t.Cleanup(cfgMgr.Stop)
+	folders := config.FoldersConfig{
+		Staging:   filepath.Join(root, "staging"),
+		Process:   filepath.Join(root, "processing"),
+		Scraping:  filepath.Join(root, "scraping"),
+		Subtitles: filepath.Join(root, "subtitles"),
+		Failed:    filepath.Join(root, "failed"),
+	}
+	source := filepath.Join(root, "input", fileName)
+	mustWriteTestFile(t, source, "video")
+	svc := New(cfgMgr, nil, folders, nil)
+	svc.detectHardSubtitle = func(context.Context, string) (bool, error) { return false, nil }
+	return svc, cfgMgr, folders, queue.NewJob("job1", source, fileName, strings.TrimSuffix(fileName, filepath.Ext(fileName)), "")
 }
 
 func fileExists(path string) bool {

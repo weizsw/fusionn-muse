@@ -20,12 +20,21 @@ import (
 	"github.com/fusionn-muse/pkg/logger"
 )
 
+type transcriber interface {
+	Transcribe(context.Context, string) (string, error)
+}
+
+type subtitleTranslator interface {
+	Translate(context.Context, string) (string, error)
+}
+
 // Service handles the subtitle processing pipeline.
 type Service struct {
-	cfgMgr  *config.Manager
-	folders config.FoldersConfig
-	apprise *apprise.Client
-	runner  toolrun.Runner
+	cfgMgr             *config.Manager
+	folders            config.FoldersConfig
+	apprise            *apprise.Client
+	resolveExecutors   func(config.Config) (transcriber, subtitleTranslator, error)
+	detectHardSubtitle func(context.Context, string) (bool, error)
 }
 
 // New creates a new processor service.
@@ -34,8 +43,32 @@ func New(cfgMgr *config.Manager, appriseClient *apprise.Client, folders config.F
 		cfgMgr:  cfgMgr,
 		folders: folders,
 		apprise: appriseClient,
-		runner:  runner,
+		resolveExecutors: func(cfg config.Config) (transcriber, subtitleTranslator, error) {
+			return resolveExecutorPair(cfg, runner)
+		},
+		detectHardSubtitle: func(ctx context.Context, videoPath string) (bool, error) {
+			return detectHardSubOCR(ctx, runner, videoPath)
+		},
 	}
+}
+
+func resolveExecutorPair(cfg config.Config, runner toolrun.Runner) (transcriber, subtitleTranslator, error) {
+	switch pipelineProvider(cfg) {
+	case "videocaptioner":
+		return executor.NewWhisper(cfg.Whisper, cfg.Translate, runner), executor.NewTranslator(cfg.Translate, runner), nil
+	case "mlx_qwen3_asr":
+		return executor.NewHostASR(cfg.MLXQwen3ASR), executor.NewLLMSubtrans(cfg.LLMSubtrans, cfg.Translate, runner), nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported pipeline provider: %s", cfg.Pipeline.Provider)
+	}
+}
+
+func pipelineProvider(cfg config.Config) string {
+	provider := strings.ToLower(cfg.Pipeline.Provider)
+	if provider == "" {
+		return "videocaptioner"
+	}
+	return provider
 }
 
 // stepTimer tracks timing for a processing step.
@@ -78,12 +111,9 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	totalStart := time.Now()
 	log := logger.FromContext(ctx)
 
-	// Get fresh config for this job (enables hot-reload)
-	cfg := s.cfgMgr.Get()
-	pipelineProvider := strings.ToLower(cfg.Pipeline.Provider)
-	if pipelineProvider == "" {
-		pipelineProvider = "videocaptioner"
-	}
+	// Take one fresh snapshot for this Attempt (enables hot-reload between Attempts).
+	cfg := *s.cfgMgr.Get()
+	provider := pipelineProvider(cfg)
 
 	log.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Infof("🎬 Starting job: %s", job.FileName)
@@ -136,8 +166,8 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	}
 	durations["move_to_processing"] = t.done()
 
-	if !cfg.DryRun && !hasChineseSub && hardSubOCREnabled(cfg) {
-		detected, err := detectHardSubOCR(ctx, s.runner, processingPath)
+	if !cfg.DryRun && !hasChineseSub && hardSubOCREnabled(&cfg) {
+		detected, err := s.detectHardSubtitle(ctx, processingPath)
 		if err != nil {
 			log.Warnf("⚠️ Hard-sub OCR detection failed for %s: %v", job.FileName, err)
 		} else if detected {
@@ -165,19 +195,17 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 			log.Infof("⏭️  Step 3-4: Skipping transcription & translation (Chinese subtitle detected: %s)", job.SubtitleDetectionReason)
 		}
 	} else {
+		transcriber, translator, err := s.resolveExecutors(cfg)
+		if err != nil {
+			s.moveToFailed(ctx, job, processingPath)
+			return s.handleError(ctx, job, "transcription", err)
+		}
+
 		// Step 3: Transcribe
-		log.Infof("🎤 Step 3: Transcribing with %s...", pipelineProvider)
+		log.Infof("🎤 Step 3: Transcribing with %s...", provider)
 		t = startStep(ctx, "Transcription")
 
-		var err error
-		switch pipelineProvider {
-		case "videocaptioner":
-			subtitlePath, err = executor.NewWhisper(cfg.Whisper, cfg.Translate, s.runner).Transcribe(ctx, processingPath)
-		case "mlx_qwen3_asr":
-			subtitlePath, err = executor.NewHostASR(cfg.MLXQwen3ASR).Transcribe(ctx, processingPath)
-		default:
-			err = fmt.Errorf("unsupported pipeline provider: %s", cfg.Pipeline.Provider)
-		}
+		subtitlePath, err = transcriber.Transcribe(ctx, processingPath)
 		if err != nil {
 			s.moveToFailed(ctx, job, processingPath)
 			return s.handleError(ctx, job, "transcription", err)
@@ -188,11 +216,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		log.Infof("🌐 Step 4: Translating subtitle → %s...", cfg.Translate.TargetLang)
 		t = startStep(ctx, "Translation")
 
-		if pipelineProvider == "mlx_qwen3_asr" {
-			translatedPath, err = executor.NewLLMSubtrans(cfg.LLMSubtrans, cfg.Translate, s.runner).Translate(ctx, subtitlePath)
-		} else {
-			translatedPath, err = executor.NewTranslator(cfg.Translate, s.runner).Translate(ctx, subtitlePath)
-		}
+		translatedPath, err = translator.Translate(ctx, subtitlePath)
 		if err != nil {
 			s.moveToFailed(ctx, job, processingPath)
 			return s.handleError(ctx, job, "translation", err)
