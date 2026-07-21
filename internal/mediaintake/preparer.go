@@ -35,8 +35,8 @@ func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error
 	if anyChineseSubtitle(parts) {
 		resolved.HasChineseSubtitle = true
 		resolved.SubtitleDetectionReason = SubtitleDetectionFilename
-	} else {
-		detectExistingSubtitle(req.Context, resolved, prepared, req.Path)
+	} else if err := detectExistingSubtitle(req.Context, req.Runner, resolved, prepared, req.Path); err != nil {
+		return nil, err
 	}
 	return resolved, nil
 }
@@ -86,8 +86,8 @@ func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) 
 	if HasChineseSubtitle(filepath.Base(imagePath)) || anyChineseSubtitle(parts) {
 		resolved.HasChineseSubtitle = true
 		resolved.SubtitleDetectionReason = SubtitleDetectionFilename
-	} else {
-		detectExistingSubtitle(req.Context, resolved, prepared, imageFallbackFolder(req.Path))
+	} else if err := detectExistingSubtitle(req.Context, req.Runner, resolved, prepared, imageFallbackFolder(req.Path)); err != nil {
+		return nil, err
 	}
 	return resolved, nil
 }

@@ -23,6 +23,8 @@ const (
 // Runner executes external tools.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) error
+	Output(ctx context.Context, name string, args ...string) ([]byte, error)
+	Stream(ctx context.Context, name string, args ...string) (string, string, error)
 }
 
 type ExecRunner struct{}
