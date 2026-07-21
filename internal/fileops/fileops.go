@@ -1,6 +1,7 @@
 package fileops
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -10,7 +11,8 @@ import (
 )
 
 // HardlinkOrCopy tries to hardlink src to dst, falls back to copy if hardlink fails.
-func HardlinkOrCopy(src, dst string) error {
+func HardlinkOrCopy(ctx context.Context, src, dst string) error {
+	log := logger.FromContext(ctx)
 	// Ensure destination directory exists
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("create dir: %w", err)
@@ -28,23 +30,24 @@ func HardlinkOrCopy(src, dst string) error {
 	// Try hardlink first
 	err := os.Link(src, dst)
 	if err == nil {
-		logger.Debugf("🔗 Hard-linked: %s → %s", src, dst)
+		log.Debugf("🔗 Hard-linked: %s → %s", src, dst)
 		return nil
 	}
 
-	logger.Debugf("⚠️ Hardlink failed (%v), falling back to copy", err)
+	log.Debugf("⚠️ Hardlink failed (%v), falling back to copy", err)
 
 	// Fallback to copy
 	if err := copyFile(src, dst); err != nil {
 		return fmt.Errorf("copy: %w", err)
 	}
 
-	logger.Debugf("📋 Copied: %s → %s", src, dst)
+	log.Debugf("📋 Copied: %s → %s", src, dst)
 	return nil
 }
 
 // Move moves a file from src to dst.
-func Move(src, dst string) error {
+func Move(ctx context.Context, src, dst string) error {
+	log := logger.FromContext(ctx)
 	// Ensure destination directory exists
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("create dir: %w", err)
@@ -58,14 +61,14 @@ func Move(src, dst string) error {
 		if err := os.Remove(src); err != nil {
 			return fmt.Errorf("remove source after same-inode move: %w", err)
 		}
-		logger.Debugf("📦 Moved: %s → %s", src, dst)
+		log.Debugf("📦 Moved: %s → %s", src, dst)
 		return nil
 	}
 
 	// Try rename first (works if same filesystem)
 	err := os.Rename(src, dst)
 	if err == nil {
-		logger.Debugf("📦 Moved: %s → %s", src, dst)
+		log.Debugf("📦 Moved: %s → %s", src, dst)
 		return nil
 	}
 
@@ -75,15 +78,15 @@ func Move(src, dst string) error {
 	}
 
 	if err := os.Remove(src); err != nil {
-		logger.Warnf("⚠️ Failed to remove source after copy: %v", err)
+		log.Warnf("⚠️ Failed to remove source after copy: %v", err)
 	}
 
-	logger.Debugf("📦 Moved (copy+delete): %s → %s", src, dst)
+	log.Debugf("📦 Moved (copy+delete): %s → %s", src, dst)
 	return nil
 }
 
 // Copy copies src to dst, replacing dst if it exists.
-func Copy(src, dst string) error {
+func Copy(ctx context.Context, src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("create dir: %w", err)
 	}
@@ -96,7 +99,7 @@ func Copy(src, dst string) error {
 	if err := copyFile(src, dst); err != nil {
 		return fmt.Errorf("copy: %w", err)
 	}
-	logger.Debugf("📋 Copied: %s → %s", src, dst)
+	logger.FromContext(ctx).Debugf("📋 Copied: %s → %s", src, dst)
 	return nil
 }
 

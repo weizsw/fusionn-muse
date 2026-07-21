@@ -1,6 +1,7 @@
 package apprise
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -38,7 +39,7 @@ type NotifyRequest struct {
 }
 
 // Notify sends a notification via Apprise.
-func (c *Client) Notify(title, body, notifyType string) error {
+func (c *Client) Notify(ctx context.Context, title, body, notifyType string) error {
 	if !c.cfg.Enabled {
 		return nil
 	}
@@ -70,21 +71,21 @@ func (c *Client) Notify(title, body, notifyType string) error {
 		return fmt.Errorf("apprise error: %s", resp.String())
 	}
 
-	logger.Debugf("🔔 Notification sent: %s", title)
+	logger.FromContext(ctx).Debugf("🔔 Notification sent: %s", title)
 	return nil
 }
 
 // NotifySuccess sends a success notification.
-func (c *Client) NotifySuccess(title, body string) error {
-	return c.Notify(title, body, "success")
+func (c *Client) NotifySuccess(ctx context.Context, title, body string) error {
+	return c.Notify(ctx, title, body, "success")
 }
 
 // NotifyError sends an error notification.
-func (c *Client) NotifyError(title, body string) error {
-	return c.Notify(title, body, "failure")
+func (c *Client) NotifyError(ctx context.Context, title, body string) error {
+	return c.Notify(ctx, title, body, "failure")
 }
 
 // NotifyInfo sends an info notification.
-func (c *Client) NotifyInfo(title, body string) error {
-	return c.Notify(title, body, "info")
+func (c *Client) NotifyInfo(ctx context.Context, title, body string) error {
+	return c.Notify(ctx, title, body, "info")
 }

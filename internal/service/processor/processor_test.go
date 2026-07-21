@@ -2,10 +2,17 @@ package processor
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/fusionn-muse/internal/client/apprise"
 	"github.com/fusionn-muse/internal/config"
 	"github.com/fusionn-muse/internal/mediaintake"
 	"github.com/fusionn-muse/internal/queue"
@@ -29,7 +36,7 @@ func TestMoveToProcessingPreservesPreparedStagingSource(t *testing.T) {
 	job := queue.NewJob("job1", stagingPath, "SSNI-083.mkv", "SSNI-083", "")
 	job.StagingPath = stagingPath
 
-	preserved, err := moveToProcessing(job, stagingPath, processingPath)
+	preserved, err := moveToProcessing(context.Background(), job, stagingPath, processingPath)
 	if err != nil {
 		t.Fatalf("moveToProcessing returned error: %v", err)
 	}
@@ -58,7 +65,7 @@ func TestMoveToProcessingMovesNormalStagingFile(t *testing.T) {
 	job := queue.NewJob("job1", sourcePath, "SSNI-083.mp4", "SSNI-083", "")
 	job.StagingPath = stagingPath
 
-	preserved, err := moveToProcessing(job, stagingPath, processingPath)
+	preserved, err := moveToProcessing(context.Background(), job, stagingPath, processingPath)
 	if err != nil {
 		t.Fatalf("moveToProcessing returned error: %v", err)
 	}
@@ -184,6 +191,39 @@ func TestProcessDoesNotCreateDummySubtitleForProductionLightJob(t *testing.T) {
 	}
 	if fileExists(filepath.Join(folders.Subtitles, "SSNI-083.srt")) {
 		t.Fatal("dummy subtitle exists in subtitles folder")
+	}
+}
+
+func TestNotificationsIncludeJobID(t *testing.T) {
+	bodies := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request apprise.NotifyRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode notification: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		bodies <- request.Body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := apprise.NewClient(config.AppriseConfig{Enabled: true, BaseURL: server.URL, Key: "test"})
+	svc := Service{apprise: client}
+	job := queue.NewJob("d4e79fec-d17d-48bd-82e0-c064c6bc80e1", "/tmp/movie.mp4", "movie.mp4", "", "")
+	ctx := logger.WithAttempt(logger.WithJob(context.Background(), job.ID), 1)
+
+	svc.notifySuccess(ctx, job, map[string]time.Duration{})
+	svc.notifyError(ctx, job, "transcription", errors.New("boom"))
+
+	for range 2 {
+		body := <-bodies
+		if !strings.Contains(body, "Job ID: "+job.ID) {
+			t.Fatalf("notification body = %q, want Job ID", body)
+		}
+		if strings.Contains(body, "Attempt") {
+			t.Fatalf("notification body = %q, want no Attempt", body)
+		}
 	}
 }
 

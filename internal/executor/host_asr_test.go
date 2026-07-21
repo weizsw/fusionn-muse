@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/fusionn-muse/internal/config"
+	"github.com/fusionn-muse/pkg/logger"
 )
 
 func TestHostASRTranscribesByContainerPath(t *testing.T) {
@@ -19,24 +20,38 @@ func TestHostASRTranscribesByContainerPath(t *testing.T) {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
 
-		var req map[string]string
+		var req struct {
+			VideoPath       string `json:"video_path"`
+			ContainerPrefix string `json:"container_prefix"`
+			HostPrefix      string `json:"host_prefix"`
+			Model           string `json:"model"`
+			Language        string `json:"language"`
+			JobID           string `json:"job_id"`
+			Attempt         int    `json:"attempt"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if req["video_path"] != "/data/automation/processing/movie.mp4" {
-			t.Fatalf("video_path = %q", req["video_path"])
+		if req.VideoPath != "/data/automation/processing/movie.mp4" {
+			t.Fatalf("video_path = %q", req.VideoPath)
 		}
-		if req["container_prefix"] != "/data" {
-			t.Fatalf("container_prefix = %q", req["container_prefix"])
+		if req.ContainerPrefix != "/data" {
+			t.Fatalf("container_prefix = %q", req.ContainerPrefix)
 		}
-		if req["host_prefix"] != "/Volumes/media/data" {
-			t.Fatalf("host_prefix = %q", req["host_prefix"])
+		if req.HostPrefix != "/Volumes/media/data" {
+			t.Fatalf("host_prefix = %q", req.HostPrefix)
 		}
-		if req["model"] != "Qwen/Qwen3-ASR-1.7B" {
-			t.Fatalf("model = %q", req["model"])
+		if req.Model != "Qwen/Qwen3-ASR-1.7B" {
+			t.Fatalf("model = %q", req.Model)
 		}
-		if req["language"] != "ja" {
-			t.Fatalf("language = %q", req["language"])
+		if req.Language != "ja" {
+			t.Fatalf("language = %q", req.Language)
+		}
+		if req.JobID != "job-a" {
+			t.Fatalf("job_id = %q", req.JobID)
+		}
+		if req.Attempt != 2 {
+			t.Fatalf("attempt = %d", req.Attempt)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -53,7 +68,8 @@ func TestHostASRTranscribesByContainerPath(t *testing.T) {
 		TimeoutMinutes:  1,
 	})
 
-	out, err := asr.Transcribe(context.Background(), "/data/automation/processing/movie.mp4")
+	ctx := logger.WithAttempt(logger.WithJob(context.Background(), "job-a"), 2)
+	out, err := asr.Transcribe(ctx, "/data/automation/processing/movie.mp4")
 	if err != nil {
 		t.Fatalf("Transcribe: %v", err)
 	}

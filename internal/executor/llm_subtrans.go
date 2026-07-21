@@ -31,6 +31,7 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 		defer cancel()
 	}
 
+	log := logger.FromContext(ctx)
 	dir := filepath.Dir(subtitlePath)
 	ext := filepath.Ext(subtitlePath)
 	nameWithoutExt := strings.TrimSuffix(filepath.Base(subtitlePath), ext)
@@ -58,8 +59,8 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 		args = append(args, "--instruction", t.translateCfg.Instruction)
 	}
 
-	logger.Infof("🌐 Translating with PySubtrans: %s → %s", filepath.Base(subtitlePath), t.translateCfg.TargetLang)
-	logger.Debugf("  Command: python3 %s --input %s --output %s --target %s --base-url %s --model %s",
+	log.Infof("🌐 Translating with PySubtrans: %s → %s", filepath.Base(subtitlePath), t.translateCfg.TargetLang)
+	log.Debugf("  Command: python3 %s --input %s --output %s --target %s --base-url %s --model %s",
 		llmSubtransScript, subtitlePath, translatedPath, t.translateCfg.TargetLang, baseURL, model)
 
 	_, stderrStr, err := toolrun.ExecRunner{}.Stream(ctx, "python3", args...)
@@ -78,7 +79,7 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 		return "", fmt.Errorf("translated file is empty\nStderr: %s", stderrStr)
 	}
 
-	logger.Infof("✅ PySubtrans translation complete: %s", filepath.Base(translatedPath))
+	log.Infof("✅ PySubtrans translation complete: %s", filepath.Base(translatedPath))
 	return translatedPath, nil
 }
 

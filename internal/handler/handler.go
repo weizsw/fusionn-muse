@@ -86,10 +86,10 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 		return
 	}
 
-	logger.Infof("📥 Webhook received: %s", req.Path)
-
-	jobID := uuid.New().String()[:8]
-	go h.resolveAndDispatchTorrent(req, jobID)
+	jobID := uuid.NewString()
+	ctx := logger.WithJob(context.Background(), jobID)
+	logger.FromContext(ctx).Infof("📥 Webhook received: %s", req.Path)
+	go h.resolveAndDispatchTorrent(ctx, req, jobID)
 
 	c.JSON(http.StatusAccepted, gin.H{
 		"message": "webhook accepted",
@@ -97,23 +97,24 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 	})
 }
 
-func (h *Handler) resolveAndDispatchTorrent(req TorrentCompleteRequest, jobID string) {
+func (h *Handler) resolveAndDispatchTorrent(ctx context.Context, req TorrentCompleteRequest, jobID string) {
+	log := logger.FromContext(ctx)
 	resolved, err := mediaintake.ResolveMedia(mediaintake.ResolveRequest{
-		Context:     context.Background(),
+		Context:     ctx,
 		Path:        req.Path,
 		TorrentName: req.Name,
 		StagingDir:  h.folders.Staging,
 	})
 	if err != nil {
 		if errors.Is(err, mediaintake.ErrNoValidMedia) {
-			logger.Warnf("⚠️ %v in: %s", err, req.Path)
+			log.Warnf("⚠️ %v in: %s", err, req.Path)
 			return
 		}
 		if errors.Is(err, os.ErrNotExist) {
-			logger.Warnf("⚠️ Path does not exist for webhook: %s: %v", req.Path, err)
+			log.Warnf("⚠️ Path does not exist for webhook: %s: %v", req.Path, err)
 			return
 		}
-		logger.Errorf("❌ Failed to resolve media for webhook path %s: %v", req.Path, err)
+		log.Errorf("❌ Failed to resolve media for webhook path %s: %v", req.Path, err)
 		return
 	}
 
@@ -128,12 +129,12 @@ func (h *Handler) resolveAndDispatchTorrent(req TorrentCompleteRequest, jobID st
 
 	if isLight {
 		// Light job: process immediately in background (no queue wait)
-		logger.Infof("⚡ Light job detected (Chinese subtitle): %s (job: %s)", fileName, jobID)
+		log.Infof("⚡ Light job detected (Chinese subtitle): %s", fileName)
 		h.queue.RunImmediate(job)
 	} else {
 		// Heavy job: queue for sequential processing (transcribe + translate)
 		h.queue.Enqueue(job)
-		logger.Infof("📥 Heavy job queued: %s (job: %s)", fileName, jobID)
+		log.Infof("📥 Heavy job queued: %s", fileName)
 	}
 }
 
@@ -180,7 +181,7 @@ func (h *Handler) RetryStaging(c *gin.Context) {
 
 	jobIDs := make([]string, 0, len(files))
 	for _, filePath := range files {
-		jobID := uuid.New().String()[:8]
+		jobID := uuid.NewString()
 		fileName := filepath.Base(filePath)
 
 		// For staging files, source path is the staging path itself
@@ -189,7 +190,7 @@ func (h *Handler) RetryStaging(c *gin.Context) {
 		h.queue.Enqueue(job)
 		jobIDs = append(jobIDs, jobID)
 
-		logger.Infof("📥 Re-queued from staging: %s (job: %s)", fileName, jobID)
+		logger.FromContext(logger.WithJob(c.Request.Context(), jobID)).Infof("📥 Re-queued from staging: %s", fileName)
 	}
 
 	c.JSON(http.StatusAccepted, gin.H{
@@ -228,14 +229,14 @@ func (h *Handler) RetryFailed(c *gin.Context) {
 		}
 
 		// Queue the job
-		jobID := uuid.New().String()[:8]
+		jobID := uuid.NewString()
 		stagingPath := filepath.Join(h.folders.Staging, fileName)
 		job := queue.NewJob(jobID, stagingPath, fileName, "", "")
 		job.StagingPath = stagingPath
 		h.queue.Enqueue(job)
 		jobIDs = append(jobIDs, jobID)
 
-		logger.Infof("📥 Re-queued from failed: %s (job: %s)", fileName, jobID)
+		logger.FromContext(logger.WithJob(c.Request.Context(), jobID)).Infof("📥 Re-queued from failed: %s", fileName)
 	}
 
 	response := gin.H{
@@ -266,13 +267,13 @@ func (h *Handler) RetryOneFailed(c *gin.Context) {
 	}
 
 	// Queue the job
-	jobID := uuid.New().String()[:8]
+	jobID := uuid.NewString()
 	stagingPath := filepath.Join(h.folders.Staging, fileName)
 	job := queue.NewJob(jobID, stagingPath, fileName, "", "")
 	job.StagingPath = stagingPath
 	h.queue.Enqueue(job)
 
-	logger.Infof("📥 Re-queued from failed: %s (job: %s)", fileName, jobID)
+	logger.FromContext(logger.WithJob(c.Request.Context(), jobID)).Infof("📥 Re-queued from failed: %s", fileName)
 
 	c.JSON(http.StatusAccepted, gin.H{
 		"message": "file re-queued",

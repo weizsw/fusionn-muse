@@ -23,6 +23,8 @@ class TranscribeRequest(BaseModel):
     host_prefix: str
     model: Optional[str] = None
     language: Optional[str] = None
+    job_id: Optional[str] = None
+    attempt: Optional[int] = None
 
 
 class TranscribeResponse(BaseModel):
@@ -46,6 +48,20 @@ def to_container_path(host_path: Path, host_prefix: str, container_prefix: str) 
     return host_str
 
 
+def log(request: TranscribeRequest, message: str) -> None:
+    prefix = ""
+    if request.job_id:
+        attempt = f" attempt={request.attempt}" if request.attempt else ""
+        prefix = f"[job_id={request.job_id}{attempt}] "
+    for line in message.rstrip("\n").split("\n"):
+        print(f"{prefix}{line}", flush=True)
+
+
+def log_job_error(request: TranscribeRequest, message: str) -> None:
+    if request.job_id:
+        log(request, message)
+
+
 @app.get("/health")
 async def health():
     return {"status": "healthy", "service": "mlx-qwen3-asr"}
@@ -55,6 +71,7 @@ async def health():
 async def transcribe_video(request: TranscribeRequest, response: Response):
     if not _asr_lock.acquire(blocking=False):
         response.status_code = 409
+        log_job_error(request, "ASR busy")
         return TranscribeResponse(success=False, error="ASR busy")
 
     host_prefix = os.getenv("HOST_MEDIA_PATH", request.host_prefix)
@@ -65,9 +82,9 @@ async def transcribe_video(request: TranscribeRequest, response: Response):
     try:
         if not video_host.exists():
             response.status_code = 404
-            return TranscribeResponse(
-                success=False, error=f"Video not found: {video_host}"
-            )
+            error = f"Video not found: {video_host}"
+            log_job_error(request, error)
+            return TranscribeResponse(success=False, error=error)
 
         output_dir = video_host.parent
         started_at = time.time()
@@ -85,17 +102,16 @@ async def transcribe_video(request: TranscribeRequest, response: Response):
         if request.language:
             cmd.extend(["--language", request.language])
 
-        print(f"Transcribing: {' '.join(cmd)}", flush=True)
+        log(request, f"Transcribing: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             response.status_code = 500
-            return TranscribeResponse(
-                success=False,
-                error=(
-                    f"mlx-qwen3-asr failed ({result.returncode}): "
-                    f"{result.stderr.strip() or result.stdout.strip()}"
-                ),
+            output = "\n".join(
+                part for part in (result.stderr.strip(), result.stdout.strip()) if part
             )
+            error = f"mlx-qwen3-asr failed ({result.returncode}): {output}"
+            log_job_error(request, error)
+            return TranscribeResponse(success=False, error=error)
 
         candidates = [
             path
@@ -105,20 +121,22 @@ async def transcribe_video(request: TranscribeRequest, response: Response):
         ]
         if not candidates:
             response.status_code = 500
-            return TranscribeResponse(
-                success=False, error=f"mlx-qwen3-asr did not create SRT in {output_dir}"
-            )
+            error = f"mlx-qwen3-asr did not create SRT in {output_dir}"
+            log_job_error(request, error)
+            return TranscribeResponse(success=False, error=error)
 
         output_host = max(candidates, key=lambda path: path.stat().st_mtime)
         output_container = to_container_path(
             output_host, host_prefix, request.container_prefix
         )
-        print(f"Transcription completed: {output_host}", flush=True)
+        log(request, f"Transcription completed: {output_host}")
         return TranscribeResponse(success=True, output_path=output_container)
 
     except Exception as e:
         response.status_code = 500
-        return TranscribeResponse(success=False, error=f"Transcription failed: {e}")
+        error = f"Transcription failed: {e}"
+        log_job_error(request, error)
+        return TranscribeResponse(success=False, error=error)
 
     finally:
         _asr_lock.release()
