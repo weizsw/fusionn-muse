@@ -392,28 +392,6 @@ func (s *Service) moveToFailed(ctx context.Context, job *queue.Job, currentPath 
 	}
 }
 
-// MoveToStagingForRetry moves a failed file back to staging for manual retry.
-func (s *Service) MoveToStagingForRetry(fileName string) error {
-	failedPath := filepath.Join(s.folders.Failed, fileName)
-	stagingPath := filepath.Join(s.folders.Staging, fileName)
-
-	if !fileops.Exists(failedPath) {
-		return fmt.Errorf("file not found in failed folder: %s", fileName)
-	}
-
-	return fileops.Move(context.Background(), failedPath, stagingPath)
-}
-
-// GetStagingFiles returns all video files in staging folder.
-func (s *Service) GetStagingFiles() ([]string, error) {
-	return mediaintake.FindVideoFiles(s.folders.Staging)
-}
-
-// GetFailedFiles returns all video files in failed folder.
-func (s *Service) GetFailedFiles() ([]string, error) {
-	return mediaintake.FindVideoFiles(s.folders.Failed)
-}
-
 func (s *Service) handleError(ctx context.Context, job *queue.Job, step string, err error) error {
 	fullErr := fmt.Errorf("%s failed: %w", step, err)
 	logger.FromContext(ctx).Errorf("❌ %v", fullErr)
