@@ -23,6 +23,44 @@ func init() {
 	logger.Init(true)
 }
 
+type processorCommandCall struct {
+	name string
+	args []string
+}
+
+type processorCommandRunner struct {
+	runCalls    []processorCommandCall
+	outputCalls []processorCommandCall
+	streamCalls []processorCommandCall
+	onRun       func(name string, args ...string) error
+	onOutput    func(name string, args ...string) ([]byte, error)
+	onStream    func(name string, args ...string) (string, string, error)
+}
+
+func (r *processorCommandRunner) Run(_ context.Context, name string, args ...string) error {
+	r.runCalls = append(r.runCalls, processorCommandCall{name: name, args: append([]string(nil), args...)})
+	if r.onRun != nil {
+		return r.onRun(name, args...)
+	}
+	return nil
+}
+
+func (r *processorCommandRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
+	r.outputCalls = append(r.outputCalls, processorCommandCall{name: name, args: append([]string(nil), args...)})
+	if r.onOutput != nil {
+		return r.onOutput(name, args...)
+	}
+	return nil, nil
+}
+
+func (r *processorCommandRunner) Stream(_ context.Context, name string, args ...string) (string, string, error) {
+	r.streamCalls = append(r.streamCalls, processorCommandCall{name: name, args: append([]string(nil), args...)})
+	if r.onStream != nil {
+		return r.onStream(name, args...)
+	}
+	return "", "", nil
+}
+
 func TestMoveToProcessingPreservesPreparedStagingSource(t *testing.T) {
 	root := t.TempDir()
 	stagingPath := filepath.Join(root, "staging", "SSNI-083.mkv")
@@ -98,7 +136,7 @@ func TestProcessCopiesSidecarSubtitleForLightJob(t *testing.T) {
 	mustWriteTestFile(t, source, "video")
 	mustWriteTestFile(t, sidecar, sidecarContent)
 
-	svc := New(cfgMgr, nil, folders)
+	svc := New(cfgMgr, nil, folders, nil)
 	job := queue.NewJob("job1", source, "SSNI-083.mp4", "SSNI-083", "")
 	job.IsLight = true
 	job.SubtitleDetectionReason = mediaintake.SubtitleDetectionSidecar
@@ -123,12 +161,16 @@ func TestProcessCopiesSidecarSubtitleForLightJob(t *testing.T) {
 
 func TestProcessUsesOCRToSkipHardSubbedVideo(t *testing.T) {
 	root := t.TempDir()
-	bin := filepath.Join(root, "bin")
-	mustMkdir(t, bin)
-	mustWriteExecutable(t, filepath.Join(bin, "ffprobe"), "#!/bin/sh\nprintf '100\\n'\n")
-	mustWriteExecutable(t, filepath.Join(bin, "ffmpeg"), "#!/bin/sh\nfor last do :; done\ntouch \"$last\"\n")
-	mustWriteExecutable(t, filepath.Join(bin, "tesseract"), "#!/bin/sh\nprintf 'visible subtitle text\\n'\n")
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	runner := &processorCommandRunner{onOutput: func(name string, _ ...string) ([]byte, error) {
+		switch name {
+		case "ffprobe":
+			return []byte("100\n"), nil
+		case "tesseract":
+			return []byte("visible subtitle text\n"), nil
+		default:
+			return nil, errors.New("unexpected command: " + name)
+		}
+	}}
 
 	cfgMgr := newTestConfigManager(t, root, "")
 	defer cfgMgr.Stop()
@@ -142,7 +184,7 @@ func TestProcessUsesOCRToSkipHardSubbedVideo(t *testing.T) {
 	source := filepath.Join(root, "input", "SSNI-083.mp4")
 	mustWriteTestFile(t, source, "video")
 
-	svc := New(cfgMgr, nil, folders)
+	svc := New(cfgMgr, nil, folders, runner)
 	job := queue.NewJob("job1", source, "SSNI-083.mp4", "SSNI-083", "")
 
 	if err := svc.Process(context.Background(), job); err != nil {
@@ -156,6 +198,59 @@ func TestProcessUsesOCRToSkipHardSubbedVideo(t *testing.T) {
 	}
 	if fileExists(filepath.Join(folders.Subtitles, "SSNI-083.srt")) {
 		t.Fatal("dummy subtitle was copied to subtitles folder")
+	}
+	if len(runner.runCalls) != 2 || runner.runCalls[0].name != "ffmpeg" || runner.runCalls[1].name != "ffmpeg" {
+		t.Fatalf("run calls = %#v, want two ffmpeg frame extractions", runner.runCalls)
+	}
+	if len(runner.outputCalls) != 3 || runner.outputCalls[0].name != "ffprobe" || runner.outputCalls[1].name != "tesseract" || runner.outputCalls[2].name != "tesseract" {
+		t.Fatalf("output calls = %#v, want ffprobe then two tesseract calls", runner.outputCalls)
+	}
+}
+
+func TestProcessContinuesHeavyProcessingWhenHardSubProbeFails(t *testing.T) {
+	root := t.TempDir()
+	runner := &processorCommandRunner{
+		onOutput: func(name string, _ ...string) ([]byte, error) {
+			if name != "ffprobe" {
+				t.Fatalf("unexpected output command: %s", name)
+			}
+			return nil, errors.New("probe failed")
+		},
+		onStream: func(name string, args ...string) (string, string, error) {
+			if name != "python3" || len(args) < 3 {
+				t.Fatalf("unexpected stream command: %s %#v", name, args)
+			}
+			if err := os.WriteFile(args[2], []byte("subtitle\n"), 0644); err != nil {
+				t.Fatalf("write command output: %v", err)
+			}
+			return "", "", nil
+		},
+	}
+	cfgMgr := newTestConfigManager(t, root, "")
+	defer cfgMgr.Stop()
+	folders := config.FoldersConfig{
+		Staging:   filepath.Join(root, "staging"),
+		Process:   filepath.Join(root, "processing"),
+		Scraping:  filepath.Join(root, "scraping"),
+		Subtitles: filepath.Join(root, "subtitles"),
+		Failed:    filepath.Join(root, "failed"),
+	}
+	source := filepath.Join(root, "input", "SSNI-083.mp4")
+	mustWriteTestFile(t, source, "video")
+
+	svc := New(cfgMgr, nil, folders, runner)
+	job := queue.NewJob("job1", source, "SSNI-083.mp4", "SSNI-083", "")
+	if err := svc.Process(context.Background(), job); err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	if len(runner.streamCalls) != 2 {
+		t.Fatalf("stream calls = %#v, want transcription and translation", runner.streamCalls)
+	}
+	if !fileExists(filepath.Join(folders.Subtitles, "SSNI-083.srt")) {
+		t.Fatal("translated subtitle was not delivered")
+	}
+	if !fileExists(filepath.Join(folders.Scraping, "SSNI-083.mp4")) {
+		t.Fatal("video was not moved to scraping")
 	}
 }
 
@@ -173,7 +268,7 @@ func TestProcessDoesNotCreateDummySubtitleForProductionLightJob(t *testing.T) {
 	source := filepath.Join(root, "input", "SSNI-083-C.mp4")
 	mustWriteTestFile(t, source, "video")
 
-	svc := New(cfgMgr, nil, folders)
+	svc := New(cfgMgr, nil, folders, nil)
 	job := queue.NewJob("job1", source, "SSNI-083-C.mp4", "SSNI-083", "")
 
 	if err := svc.Process(context.Background(), job); err != nil {
@@ -233,7 +328,7 @@ func TestNewUsesProvidedFolders(t *testing.T) {
 	defer cfgMgr.Stop()
 	folders := config.FoldersConfig{Staging: filepath.Join(root, "custom-staging")}
 
-	svc := New(cfgMgr, nil, folders)
+	svc := New(cfgMgr, nil, folders, nil)
 
 	if svc.folders.Staging != folders.Staging {
 		t.Fatalf("Staging folder = %q, want %q", svc.folders.Staging, folders.Staging)
@@ -276,20 +371,5 @@ func mustWriteTestFile(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
-	}
-}
-
-func mustMkdir(t *testing.T, path string) {
-	t.Helper()
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Fatalf("mkdir %s: %v", path, err)
-	}
-}
-
-func mustWriteExecutable(t *testing.T, path, content string) {
-	t.Helper()
-	mustWriteTestFile(t, path, content)
-	if err := os.Chmod(path, 0755); err != nil {
-		t.Fatalf("chmod %s: %v", path, err)
 	}
 }

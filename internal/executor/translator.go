@@ -14,12 +14,13 @@ import (
 
 // Translator handles subtitle translation via VideoCaptioner's LLM translator.
 type Translator struct {
-	cfg config.TranslateConfig
+	cfg    config.TranslateConfig
+	runner toolrun.Runner
 }
 
 // NewTranslator creates a new Translator executor.
-func NewTranslator(cfg config.TranslateConfig) *Translator {
-	return &Translator{cfg: cfg}
+func NewTranslator(cfg config.TranslateConfig, runner toolrun.Runner) *Translator {
+	return &Translator{cfg: cfg, runner: runner}
 }
 
 // Translate translates a subtitle file and returns the path to the translated subtitle.
@@ -40,7 +41,7 @@ func (t *Translator) Translate(ctx context.Context, subtitlePath string) (string
 	log.Infof("🌐 Translating: %s → %s", filepath.Base(subtitlePath), t.cfg.TargetLang)
 	log.Debugf("  Command: python3 %s", strings.Join(args, " "))
 
-	_, stderrStr, err := toolrun.ExecRunner{}.Stream(ctx, "python3", args...)
+	_, stderrStr, err := t.runner.Stream(ctx, "python3", args...)
 	if err != nil {
 		stderrStr := strings.TrimSpace(stderrStr)
 		if stderrStr != "" {

@@ -18,10 +18,11 @@ const llmSubtransScript = "/app/scripts/llm_subtrans_translate.py"
 type LLMSubtrans struct {
 	cfg          config.LLMSubtransConfig
 	translateCfg config.TranslateConfig
+	runner       toolrun.Runner
 }
 
-func NewLLMSubtrans(cfg config.LLMSubtransConfig, translateCfg config.TranslateConfig) *LLMSubtrans {
-	return &LLMSubtrans{cfg: cfg, translateCfg: translateCfg}
+func NewLLMSubtrans(cfg config.LLMSubtransConfig, translateCfg config.TranslateConfig, runner toolrun.Runner) *LLMSubtrans {
+	return &LLMSubtrans{cfg: cfg, translateCfg: translateCfg, runner: runner}
 }
 
 func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (string, error) {
@@ -63,7 +64,7 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 	log.Debugf("  Command: python3 %s --input %s --output %s --target %s --base-url %s --model %s",
 		llmSubtransScript, subtitlePath, translatedPath, t.translateCfg.TargetLang, baseURL, model)
 
-	_, stderrStr, err := toolrun.ExecRunner{}.Stream(ctx, "python3", args...)
+	_, stderrStr, err := t.runner.Stream(ctx, "python3", args...)
 	if err != nil {
 		return "", fmt.Errorf("llm-subtrans failed: %w\nStderr: %s", err, stderrStr)
 	}
