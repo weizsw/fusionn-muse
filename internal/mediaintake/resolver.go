@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/fusionn-muse/internal/toolrun"
 	"github.com/fusionn-muse/pkg/logger"
 )
 
@@ -112,7 +111,7 @@ func ResolveMedia(req ResolveRequest) (*ResolvedMedia, error) {
 
 	if !info.IsDir() {
 		if IsVideoFile(req.Path) {
-			return resolveSingleVideo(req.Context, req.Path, req.TorrentName, filepath.Dir(req.Path), false)
+			return resolveSingleVideo(req.Context, req.Runner, req.Path, req.TorrentName, filepath.Dir(req.Path), false)
 		}
 		if IsImageFile(req.Path) {
 			return prepareImage(req, req.Path)
@@ -123,16 +122,16 @@ func ResolveMedia(req ResolveRequest) (*ResolvedMedia, error) {
 	return resolveFolder(req)
 }
 
-func resolveSingleVideo(ctx context.Context, path, torrentName, searchRoot string, requireCode bool) (*ResolvedMedia, error) {
+func resolveSingleVideo(ctx context.Context, runner CommandRunner, path, torrentName, searchRoot string, requireCode bool) (*ResolvedMedia, error) {
 	code, ok := bestCodeFor(path, torrentName)
 	if requireCode && !ok {
 		return nil, noValidMediaf("no code found in filename, folder, or torrent name")
 	}
 
-	return resolveSelectedVideo(ctx, path, code, searchRoot), nil
+	return resolveSelectedVideo(ctx, runner, path, code, searchRoot)
 }
 
-func resolveSelectedVideo(ctx context.Context, path, code, searchRoot string) *ResolvedMedia {
+func resolveSelectedVideo(ctx context.Context, runner CommandRunner, path, code, searchRoot string) (*ResolvedMedia, error) {
 	fileName := filepath.Base(path)
 	if code != "" {
 		fileName = code + strings.ToLower(filepath.Ext(path))
@@ -143,8 +142,10 @@ func resolveSelectedVideo(ctx context.Context, path, code, searchRoot string) *R
 		FileName:   fileName,
 		Code:       code,
 	}
-	detectExistingSubtitle(ctx, resolved, path, searchRoot)
-	return resolved
+	if err := detectExistingSubtitle(ctx, runner, resolved, path, searchRoot); err != nil {
+		return nil, err
+	}
+	return resolved, nil
 }
 
 func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
@@ -155,7 +156,7 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 
 	multipartPartPaths := validMultipartPartPaths(videos, req.Path, req.TorrentName)
 	if best := bestFilenameCodedVideoCandidate(videos, multipartPartPaths); best != nil {
-		return resolveSelectedVideo(req.Context, best.Path, best.Code, req.Path), nil
+		return resolveSelectedVideo(req.Context, req.Runner, best.Path, best.Code, req.Path)
 	}
 
 	parts := findMultipartSet(videos, req.Path, req.TorrentName)
@@ -164,7 +165,7 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 	}
 
 	if best := bestVideoCandidate(videos, req.Path, req.TorrentName, multipartPartPaths); best != nil {
-		return resolveSelectedVideo(req.Context, best.Path, best.Code, req.Path), nil
+		return resolveSelectedVideo(req.Context, req.Runner, best.Path, best.Code, req.Path)
 	}
 	if hasIncompleteMultipartSet(videos, req.Path, req.TorrentName) {
 		return nil, noValidMediaf("incomplete multipart video set")
@@ -181,11 +182,11 @@ func noValidMediaf(format string, args ...interface{}) error {
 	return fmt.Errorf("%w: %s", ErrNoValidMedia, fmt.Sprintf(format, args...))
 }
 
-func detectExistingSubtitle(ctx context.Context, resolved *ResolvedMedia, mediaPath, searchRoot string) {
+func detectExistingSubtitle(ctx context.Context, runner CommandRunner, resolved *ResolvedMedia, mediaPath, searchRoot string) error {
 	if HasChineseSubtitle(filepath.Base(mediaPath)) {
 		resolved.HasChineseSubtitle = true
 		resolved.SubtitleDetectionReason = SubtitleDetectionFilename
-		return
+		return nil
 	}
 
 	if sidecar := findChineseSidecar(searchRoot, mediaPath, resolved.Code); sidecar != "" {
@@ -194,13 +195,18 @@ func detectExistingSubtitle(ctx context.Context, resolved *ResolvedMedia, mediaP
 		resolved.SidecarSubtitlePath = sidecar
 	}
 	if resolved.HasChineseSubtitle {
-		return
+		return nil
 	}
 
-	if hasEmbeddedChineseSubtitle(ctx, mediaPath) {
+	embedded, err := hasEmbeddedChineseSubtitle(ctx, runner, mediaPath)
+	if err != nil {
+		return err
+	}
+	if embedded {
 		resolved.HasChineseSubtitle = true
 		resolved.SubtitleDetectionReason = SubtitleDetectionEmbedded
 	}
+	return nil
 }
 
 func findChineseSidecar(root, mediaPath, code string) string {
@@ -280,27 +286,33 @@ type ffprobeOutput struct {
 	} `json:"streams"`
 }
 
-func hasEmbeddedChineseSubtitle(ctx context.Context, path string) bool {
-	out, err := toolrun.ExecRunner{}.Output(ctx, "ffprobe", "-v", "error", "-of", "json", "-show_streams", "-select_streams", "s", path)
+func hasEmbeddedChineseSubtitle(ctx context.Context, runner CommandRunner, path string) (bool, error) {
+	out, err := runner.Output(ctx, "ffprobe", "-v", "error", "-of", "json", "-show_streams", "-select_streams", "s", path)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
 		logger.FromContext(ctx).Debugf("ffprobe subtitle detection failed for %s: %v", path, err)
-		return false
+		return false, nil
 	}
 
 	var probed ffprobeOutput
 	if err := json.Unmarshal(out, &probed); err != nil {
 		logger.FromContext(ctx).Debugf("ffprobe subtitle detection returned invalid JSON for %s: %v", path, err)
-		return false
+		return false, nil
 	}
 	for _, stream := range probed.Streams {
 		if stream.CodecType != "" && stream.CodecType != "subtitle" {
 			continue
 		}
 		if subtitleTagsLookChinese(stream.Tags) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func subtitleTagsLookChinese(tags map[string]string) bool {

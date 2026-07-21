@@ -11,9 +11,12 @@ import (
 )
 
 type fakeRunner struct {
-	calls  []commandCall
-	errors []error
-	onRun  func(name string, args ...string) error
+	calls       []commandCall
+	errors      []error
+	onRun       func(name string, args ...string) error
+	output      []byte
+	outputErr   error
+	outputCalls []commandCall
 }
 
 type commandCall struct {
@@ -34,6 +37,15 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) error {
 		return r.onRun(name, args...)
 	}
 	return nil
+}
+
+func (r *fakeRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
+	r.outputCalls = append(r.outputCalls, commandCall{name: name, args: args})
+	return r.output, r.outputErr
+}
+
+func (r *fakeRunner) Stream(_ context.Context, _ string, _ ...string) (string, string, error) {
+	return "", "", nil
 }
 
 func TestConcatVideosUsesFFmpegCopyFirst(t *testing.T) {

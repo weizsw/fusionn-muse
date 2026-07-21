@@ -90,11 +90,13 @@ func TestResolveMediaDetectsChineseSidecarSubtitle(t *testing.T) {
 	sidecar := filepath.Join(folder, "SSNI-083.srt")
 	mustWriteSizedFile(t, video, MinVideoSize+1)
 	mustWriteTextFile(t, sidecar, "1\n00:00:00,000 --> 00:00:01,000\n中文字幕\n")
+	runner := &fakeRunner{}
 
 	got, err := ResolveMedia(ResolveRequest{
 		Path:        folder,
 		TorrentName: "fallback-name",
 		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      runner,
 	})
 	if err != nil {
 		t.Fatalf("ResolveMedia returned error: %v", err)
@@ -107,6 +109,9 @@ func TestResolveMediaDetectsChineseSidecarSubtitle(t *testing.T) {
 	}
 	if got.SidecarSubtitlePath != sidecar {
 		t.Fatalf("SidecarSubtitlePath = %q, want %q", got.SidecarSubtitlePath, sidecar)
+	}
+	if len(runner.outputCalls) != 0 {
+		t.Fatalf("output calls = %d, want sidecar detection before probing", len(runner.outputCalls))
 	}
 }
 
@@ -138,11 +143,13 @@ func TestResolveMediaStopsAtFilenameSubtitleDetection(t *testing.T) {
 	sidecar := filepath.Join(folder, "SSNI-083-C.srt")
 	mustWriteSizedFile(t, video, MinVideoSize+1)
 	mustWriteTextFile(t, sidecar, "中文字幕\n")
+	runner := &fakeRunner{}
 
 	got, err := ResolveMedia(ResolveRequest{
 		Path:        folder,
 		TorrentName: "fallback-name",
 		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      runner,
 	})
 	if err != nil {
 		t.Fatalf("ResolveMedia returned error: %v", err)
@@ -153,26 +160,22 @@ func TestResolveMediaStopsAtFilenameSubtitleDetection(t *testing.T) {
 	if got.SidecarSubtitlePath != "" {
 		t.Fatalf("SidecarSubtitlePath = %q, want empty for filename detection", got.SidecarSubtitlePath)
 	}
+	if len(runner.outputCalls) != 0 {
+		t.Fatalf("output calls = %d, want filename detection before probing", len(runner.outputCalls))
+	}
 }
 
 func TestResolveMediaDetectsEmbeddedChineseSubtitle(t *testing.T) {
 	root := t.TempDir()
-	bin := filepath.Join(root, "bin")
-	mustMkdir(t, bin)
-	ffprobe := filepath.Join(bin, "ffprobe")
-	mustWriteTextFile(t, ffprobe, "#!/bin/sh\nprintf '%s\\n' '{\"streams\":[{\"codec_type\":\"subtitle\",\"tags\":{\"language\":\"zho\",\"title\":\"Chinese\"}}]}'\n")
-	if err := os.Chmod(ffprobe, 0755); err != nil {
-		t.Fatalf("chmod ffprobe: %v", err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	video := filepath.Join(root, "SSNI-083.mp4")
 	mustWriteSizedFile(t, video, MinVideoSize+1)
+	runner := &fakeRunner{output: []byte(`{"streams":[{"codec_type":"subtitle","tags":{"language":"zho","title":"Chinese"}}]}`)}
 
 	got, err := ResolveMedia(ResolveRequest{
 		Path:        video,
 		TorrentName: "fallback-name",
 		StagingDir:  filepath.Join(root, "staging"),
+		Runner:      runner,
 	})
 	if err != nil {
 		t.Fatalf("ResolveMedia returned error: %v", err)
@@ -183,28 +186,23 @@ func TestResolveMediaDetectsEmbeddedChineseSubtitle(t *testing.T) {
 	if got.SubtitleDetectionReason != SubtitleDetectionEmbedded {
 		t.Fatalf("SubtitleDetectionReason = %q, want %q", got.SubtitleDetectionReason, SubtitleDetectionEmbedded)
 	}
+	if len(runner.outputCalls) != 1 || runner.outputCalls[0].name != "ffprobe" {
+		t.Fatalf("output calls = %#v, want one ffprobe call", runner.outputCalls)
+	}
 }
 
 func TestResolveMediaDetectsEmbeddedChineseSubtitleInPreparedMultipart(t *testing.T) {
 	root := t.TempDir()
-	bin := filepath.Join(root, "bin")
-	mustMkdir(t, bin)
-	ffprobe := filepath.Join(bin, "ffprobe")
-	mustWriteTextFile(t, ffprobe, "#!/bin/sh\nprintf '%s\\n' '{\"streams\":[{\"codec_type\":\"subtitle\",\"tags\":{\"language\":\"zho\"}}]}'\n")
-	if err := os.Chmod(ffprobe, 0755); err != nil {
-		t.Fatalf("chmod ffprobe: %v", err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	folder := filepath.Join(root, "download")
 	mustWriteSizedFile(t, filepath.Join(folder, "SSNI-083-part1.mkv"), MinVideoSize+1)
 	mustWriteSizedFile(t, filepath.Join(folder, "SSNI-083-part2.mkv"), MinVideoSize+1)
+	runner := &fakeRunner{output: []byte(`{"streams":[{"codec_type":"subtitle","tags":{"language":"zho"}}]}`)}
 
 	got, err := ResolveMedia(ResolveRequest{
 		Path:        folder,
 		TorrentName: "fallback-name",
 		StagingDir:  filepath.Join(root, "staging"),
-		Runner:      &fakeRunner{},
+		Runner:      runner,
 	})
 	if err != nil {
 		t.Fatalf("ResolveMedia returned error: %v", err)
@@ -214,6 +212,56 @@ func TestResolveMediaDetectsEmbeddedChineseSubtitleInPreparedMultipart(t *testin
 	}
 	if got.SubtitleDetectionReason != SubtitleDetectionEmbedded {
 		t.Fatalf("SubtitleDetectionReason = %q, want %q", got.SubtitleDetectionReason, SubtitleDetectionEmbedded)
+	}
+	if len(runner.calls) != 1 || len(runner.outputCalls) != 1 {
+		t.Fatalf("run calls = %d, output calls = %d, want concat and probe on one runner", len(runner.calls), len(runner.outputCalls))
+	}
+}
+
+func TestResolveMediaProbeFailuresAreSoft(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output []byte
+		err    error
+	}{
+		{name: "command failure", err: errors.New("ffprobe failed")},
+		{name: "malformed output", output: []byte("not json")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			video := filepath.Join(root, "SSNI-083.mp4")
+			mustWriteSizedFile(t, video, MinVideoSize+1)
+
+			got, err := ResolveMedia(ResolveRequest{
+				Path:       video,
+				StagingDir: filepath.Join(root, "staging"),
+				Runner:     &fakeRunner{output: tc.output, outputErr: tc.err},
+			})
+			if err != nil {
+				t.Fatalf("ResolveMedia returned error: %v", err)
+			}
+			if got.HasChineseSubtitle {
+				t.Fatal("HasChineseSubtitle = true, want soft not detected outcome")
+			}
+		})
+	}
+}
+
+func TestResolveMediaReturnsProbeCancellation(t *testing.T) {
+	root := t.TempDir()
+	video := filepath.Join(root, "SSNI-083.mp4")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ResolveMedia(ResolveRequest{
+		Context:    ctx,
+		Path:       video,
+		StagingDir: filepath.Join(root, "staging"),
+		Runner:     &fakeRunner{},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 }
 
@@ -565,6 +613,9 @@ func TestResolveMediaUsesImageWhenFolderHasNoVideoCandidate(t *testing.T) {
 	}
 	if len(runner.calls) != 2 {
 		t.Fatalf("runner calls = %d, want extraction and remux", len(runner.calls))
+	}
+	if len(runner.outputCalls) != 1 || runner.outputCalls[0].name != "ffprobe" {
+		t.Fatalf("output calls = %#v, want image preparation probe on the same runner", runner.outputCalls)
 	}
 }
 
