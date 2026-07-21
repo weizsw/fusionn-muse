@@ -78,7 +78,7 @@ func main() {
 	router.Use(requestLogger())
 
 	// Register routes
-	h := handler.New(jobQueue, proc, folders)
+	h := handler.New(jobQueue, folders)
 	h.RegisterRoutes(router)
 
 	srv := &http.Server{
