@@ -86,18 +86,14 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 		return
 	}
 
-	jobID := uuid.NewString()
-	ctx := logger.WithJob(context.Background(), jobID)
+	ctx := context.Background()
 	logger.FromContext(ctx).Infof("📥 Webhook received: %s", req.Path)
-	go h.resolveAndDispatchTorrent(ctx, req, jobID)
+	go h.resolveAndDispatchTorrent(ctx, req)
 
-	c.JSON(http.StatusAccepted, gin.H{
-		"message": "webhook accepted",
-		"job":     jobID,
-	})
+	c.JSON(http.StatusAccepted, gin.H{"message": "webhook accepted"})
 }
 
-func (h *Handler) resolveAndDispatchTorrent(ctx context.Context, req TorrentCompleteRequest, jobID string) {
+func (h *Handler) resolveAndDispatchTorrent(ctx context.Context, req TorrentCompleteRequest) {
 	log := logger.FromContext(ctx)
 	resolved, err := mediaintake.ResolveMedia(mediaintake.ResolveRequest{
 		Context:     ctx,
@@ -118,6 +114,9 @@ func (h *Handler) resolveAndDispatchTorrent(ctx context.Context, req TorrentComp
 		return
 	}
 
+	jobID := uuid.NewString()
+	ctx = logger.WithJob(ctx, jobID)
+	log = logger.FromContext(ctx)
 	fileName := resolved.FileName
 	isLight := resolved.HasChineseSubtitle
 
@@ -127,14 +126,14 @@ func (h *Handler) resolveAndDispatchTorrent(ctx context.Context, req TorrentComp
 	job.SubtitleDetectionReason = resolved.SubtitleDetectionReason
 	job.SidecarSubtitlePath = resolved.SidecarSubtitlePath
 
+	if err := h.queue.Accept(job); err != nil {
+		log.Errorf("❌ Queue rejected job: %v", err)
+		return
+	}
 	if isLight {
-		// Light job: process immediately in background (no queue wait)
-		log.Infof("⚡ Light job detected (Chinese subtitle): %s", fileName)
-		h.queue.RunImmediate(job)
+		log.Infof("⚡ Light job accepted (Chinese subtitle): %s", fileName)
 	} else {
-		// Heavy job: queue for sequential processing (transcribe + translate)
-		h.queue.Enqueue(job)
-		log.Infof("📥 Heavy job queued: %s", fileName)
+		log.Infof("📥 Heavy job accepted: %s", fileName)
 	}
 }
 
@@ -180,6 +179,7 @@ func (h *Handler) RetryStaging(c *gin.Context) {
 	}
 
 	jobIDs := make([]string, 0, len(files))
+	failures := make([]string, 0, len(files))
 	for _, filePath := range files {
 		jobID := uuid.NewString()
 		fileName := filepath.Base(filePath)
@@ -187,17 +187,24 @@ func (h *Handler) RetryStaging(c *gin.Context) {
 		// For staging files, source path is the staging path itself
 		job := queue.NewJob(jobID, filePath, fileName, "", "")
 		job.StagingPath = filePath // Already in staging
-		h.queue.Enqueue(job)
+		if err := h.queue.Accept(job); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", fileName, err))
+			continue
+		}
 		jobIDs = append(jobIDs, jobID)
 
 		logger.FromContext(logger.WithJob(c.Request.Context(), jobID)).Infof("📥 Re-queued from staging: %s", fileName)
 	}
 
-	c.JSON(http.StatusAccepted, gin.H{
-		"message": "staging files re-queued",
+	response := gin.H{
+		"message": "staging requeue processed",
 		"jobs":    jobIDs,
 		"count":   len(jobIDs),
-	})
+	}
+	if len(failures) > 0 {
+		response["errors"] = failures
+	}
+	c.JSON(http.StatusAccepted, response)
 }
 
 // RetryFailed moves all failed files back to staging and queues them.
@@ -233,7 +240,10 @@ func (h *Handler) RetryFailed(c *gin.Context) {
 		stagingPath := filepath.Join(h.folders.Staging, fileName)
 		job := queue.NewJob(jobID, stagingPath, fileName, "", "")
 		job.StagingPath = stagingPath
-		h.queue.Enqueue(job)
+		if err := h.queue.Accept(job); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", fileName, err))
+			continue
+		}
 		jobIDs = append(jobIDs, jobID)
 
 		logger.FromContext(logger.WithJob(c.Request.Context(), jobID)).Infof("📥 Re-queued from failed: %s", fileName)
@@ -271,7 +281,10 @@ func (h *Handler) RetryOneFailed(c *gin.Context) {
 	stagingPath := filepath.Join(h.folders.Staging, fileName)
 	job := queue.NewJob(jobID, stagingPath, fileName, "", "")
 	job.StagingPath = stagingPath
-	h.queue.Enqueue(job)
+	if err := h.queue.Accept(job); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	}
 
 	logger.FromContext(logger.WithJob(c.Request.Context(), jobID)).Infof("📥 Re-queued from failed: %s", fileName)
 
