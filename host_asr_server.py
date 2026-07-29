@@ -49,10 +49,7 @@ def to_container_path(host_path: Path, host_prefix: str, container_prefix: str) 
 
 
 def log(request: TranscribeRequest, message: str) -> None:
-    prefix = ""
-    if request.job_id:
-        attempt = f" attempt={request.attempt}" if request.attempt else ""
-        prefix = f"[job_id={request.job_id}{attempt}] "
+    prefix = f"{request.job_id} " if request.job_id else ""
     for line in message.rstrip("\n").split("\n"):
         print(f"{prefix}{line}", flush=True)
 

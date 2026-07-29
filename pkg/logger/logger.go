@@ -48,10 +48,7 @@ func Prefix(ctx context.Context) string {
 	if jobID == "" {
 		return ""
 	}
-	if attempt := Attempt(ctx); attempt > 0 {
-		return fmt.Sprintf("[job_id=%s attempt=%d] ", jobID, attempt)
-	}
-	return fmt.Sprintf("[job_id=%s] ", jobID)
+	return jobID + " "
 }
 
 // ContextLogger prefixes each physical line with correlation data from ctx.

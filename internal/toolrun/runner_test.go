@@ -51,7 +51,7 @@ func TestExecRunnerStreamPrefixesEveryOutputLine(t *testing.T) {
 		t.Fatalf("output lines = %d, want 4; output = %q", len(lines), output)
 	}
 	for _, line := range lines {
-		if !strings.HasPrefix(line, "[job_id=job-a attempt=2] ") {
+		if !strings.HasPrefix(line, "job-a ") {
 			t.Fatalf("line lacks exact correlation prefix: %q", line)
 		}
 	}
