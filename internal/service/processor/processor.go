@@ -3,12 +3,9 @@ package processor
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/fusionn-muse/internal/client/apprise"
 	"github.com/fusionn-muse/internal/config"
@@ -322,77 +319,18 @@ func detectHardSubOCR(parent context.Context, runner toolrun.Runner, videoPath s
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 
-	duration, err := probeDuration(ctx, runner, videoPath)
+	out, err := runner.Output(ctx, "python3", "/app/scripts/detect_hard_sub.py", videoPath)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("hard-sub OCR: %w", err)
 	}
-	tmpDir, err := os.MkdirTemp("", "fusionn-muse-ocr-*")
-	if err != nil {
-		return false, err
+	switch result := strings.TrimSpace(string(out)); result {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid hard-sub OCR result: %q", result)
 	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	hits := 0
-	for i, pct := range []float64{0.15, 0.30, 0.45, 0.60, 0.75} {
-		frame := filepath.Join(tmpDir, fmt.Sprintf("frame-%d.png", i))
-		if err := extractSubtitleBand(ctx, runner, videoPath, duration*pct, frame); err != nil {
-			return false, err
-		}
-		text, err := runner.Output(ctx, "tesseract", frame, "stdout")
-		if err != nil {
-			return false, err
-		}
-		if ocrTextLooksReadable(string(text)) {
-			hits++
-			if hits >= 2 {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
-
-func probeDuration(ctx context.Context, runner toolrun.Runner, videoPath string) (float64, error) {
-	out, err := runner.Output(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", videoPath)
-	if err != nil {
-		return 0, fmt.Errorf("ffprobe duration: %w", err)
-	}
-	duration, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	if err != nil || duration <= 0 {
-		return 0, fmt.Errorf("invalid ffprobe duration: %q", strings.TrimSpace(string(out)))
-	}
-	return duration, nil
-}
-
-func extractSubtitleBand(ctx context.Context, runner toolrun.Runner, videoPath string, seconds float64, outPath string) error {
-	if err := runner.Run(
-		ctx,
-		"ffmpeg",
-		"-y",
-		"-ss", fmt.Sprintf("%.3f", seconds),
-		"-i", videoPath,
-		"-frames:v", "1",
-		"-vf", "crop=iw:ih*0.4:0:ih*0.6",
-		outPath,
-	); err != nil {
-		return fmt.Errorf("ffmpeg frame extract: %w", err)
-	}
-	return nil
-}
-
-func ocrTextLooksReadable(text string) bool {
-	nonSpace := 0
-	cjk := 0
-	for _, r := range text {
-		if unicode.IsSpace(r) {
-			continue
-		}
-		nonSpace++
-		if (r >= '\u3400' && r <= '\u9fff') || (r >= '\uf900' && r <= '\ufaff') {
-			cjk++
-		}
-	}
-	return cjk >= 4 || nonSpace >= 8
 }
 
 func samePath(a, b string) bool {

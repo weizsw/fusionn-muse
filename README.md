@@ -160,7 +160,7 @@ Files are skipped when Fusionn-Muse finds existing Chinese subtitles:
 - Filename indicators: `-C`, `_C`, `.C`, `zh`, `chs`, `cht`, `chi`, `cn`, `gb`, `big5`, `sc`, `tc`, `中文`, `简中`, `繁中`, `软中`, `硬中`, `字幕`, `内嵌`, `内封`, `中字`, `国语`, `双语`
 - Sidecar subtitles: `.srt`, `.ass`, `.ssa`, `.vtt` matched by same basename or video code, with Chinese filename/content hints
 - Embedded subtitle streams: `ffprobe` subtitle metadata with Chinese language/title hints
-- Hard subtitles: optional bottom-band OCR with Tesseract after the cheaper checks fail
+- Hard subtitles: optional bottom-band CJK detection with RapidOCR after the cheaper checks fail
 
 ## LLM Providers
 

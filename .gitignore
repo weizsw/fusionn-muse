@@ -45,3 +45,4 @@ dist/
 bin/
 .worktrees/
 .codegraph/
+.pi
