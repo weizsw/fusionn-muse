@@ -168,7 +168,7 @@ subtitle:
   language_suffix: ""
 
 # Detect burned-in subtitles after filename, sidecar, and embedded subtitle checks fail.
-# Uses ffmpeg frame sampling + default Tesseract OCR; failures fall back to normal transcription.
+# Uses sampled bottom-band frames + RapidOCR; failures fall back to normal transcription.
 hard_sub_ocr:
   enabled: true
 

@@ -173,15 +173,11 @@ func TestProcessCopiesSidecarSubtitleForLightJob(t *testing.T) {
 
 func TestProcessUsesOCRToSkipHardSubbedVideo(t *testing.T) {
 	root := t.TempDir()
-	runner := &processorCommandRunner{onOutput: func(name string, _ ...string) ([]byte, error) {
-		switch name {
-		case "ffprobe":
-			return []byte("100\n"), nil
-		case "tesseract":
-			return []byte("visible subtitle text\n"), nil
-		default:
-			return nil, errors.New("unexpected command: " + name)
+	runner := &processorCommandRunner{onOutput: func(name string, args ...string) ([]byte, error) {
+		if name != "python3" || len(args) != 2 || args[0] != "/app/scripts/detect_hard_sub.py" {
+			t.Fatalf("unexpected command: %s %#v", name, args)
 		}
+		return []byte("true\n"), nil
 	}}
 
 	cfgMgr := newTestConfigManager(t, root, "")
@@ -211,11 +207,8 @@ func TestProcessUsesOCRToSkipHardSubbedVideo(t *testing.T) {
 	if fileExists(filepath.Join(folders.Subtitles, "SSNI-083.srt")) {
 		t.Fatal("dummy subtitle was copied to subtitles folder")
 	}
-	if len(runner.runCalls) != 2 || runner.runCalls[0].name != "ffmpeg" || runner.runCalls[1].name != "ffmpeg" {
-		t.Fatalf("run calls = %#v, want two ffmpeg frame extractions", runner.runCalls)
-	}
-	if len(runner.outputCalls) != 3 || runner.outputCalls[0].name != "ffprobe" || runner.outputCalls[1].name != "tesseract" || runner.outputCalls[2].name != "tesseract" {
-		t.Fatalf("output calls = %#v, want ffprobe then two tesseract calls", runner.outputCalls)
+	if len(runner.outputCalls) != 1 || runner.outputCalls[0].name != "python3" {
+		t.Fatalf("output calls = %#v, want one Python OCR call", runner.outputCalls)
 	}
 }
 
@@ -223,7 +216,7 @@ func TestProcessContinuesHeavyProcessingWhenHardSubProbeFails(t *testing.T) {
 	root := t.TempDir()
 	runner := &processorCommandRunner{
 		onOutput: func(name string, _ ...string) ([]byte, error) {
-			if name != "ffprobe" {
+			if name != "python3" {
 				t.Fatalf("unexpected output command: %s", name)
 			}
 			return nil, errors.New("probe failed")
@@ -263,6 +256,17 @@ func TestProcessContinuesHeavyProcessingWhenHardSubProbeFails(t *testing.T) {
 	}
 	if !fileExists(filepath.Join(folders.Scraping, "SSNI-083.mp4")) {
 		t.Fatal("video was not moved to scraping")
+	}
+}
+
+func TestDetectHardSubOCRRejectsInvalidResult(t *testing.T) {
+	runner := &processorCommandRunner{onOutput: func(string, ...string) ([]byte, error) {
+		return []byte("unknown\n"), nil
+	}}
+
+	_, err := detectHardSubOCR(context.Background(), runner, "movie.mp4")
+	if err == nil || !strings.Contains(err.Error(), "invalid hard-sub OCR result") {
+		t.Fatalf("detectHardSubOCR error = %v, want invalid result", err)
 	}
 }
 

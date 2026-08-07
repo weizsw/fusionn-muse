@@ -33,7 +33,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libarchive-tools \
     7zip \
     nrg2iso \
-    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone VideoCaptioner and install Python dependencies
@@ -54,6 +53,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
         pydub \
         GPUtil \
         Pillow \
+        rapidocr \
+        onnxruntime \
         fonttools \
         "pysubtrans[openai]" && \
     apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
@@ -66,6 +67,7 @@ COPY scripts/transcribe.py /app/scripts/transcribe.py
 COPY scripts/subtitle_processor.py /app/scripts/subtitle_processor.py
 COPY scripts/translate.py /app/scripts/translate.py
 COPY scripts/llm_subtrans_translate.py /app/scripts/llm_subtrans_translate.py
+COPY scripts/detect_hard_sub.py /app/scripts/detect_hard_sub.py
 
 # Copy Go binary
 COPY --from=go-builder /app/fusionn-muse .
