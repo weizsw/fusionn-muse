@@ -19,3 +19,7 @@ _Avoid_: Retry as the name for the initial execution
 **Manual requeue**:
 A manually requested return of media to processing, creating a new Job with a new Job ID.
 _Avoid_: Attempt, manual retry
+
+**Sufficient Chinese subtitle coverage**:
+Existing Chinese subtitle-like text present in separated portions of a video's main content, enough to make transcription and translation unnecessary. Text confined to one portion does not qualify.
+_Avoid_: Chinese text detected
