@@ -6,7 +6,12 @@ from rapidocr import RapidOCR
 
 MIN_CJK = 2
 MIN_CONFIDENCE = 0.8
-REQUIRED_HITS = 2
+REQUIRED_REGIONS = 2
+REGION_COUNT = 3
+START_SECONDS = 30 * 60
+SAMPLE_COUNT = 30
+
+# ponytail: CJK is not language detection; add a calibrated classifier if persistent Japanese text causes false skips.
 
 
 def cjk_count(text):
@@ -21,15 +26,18 @@ def main():
         raise RuntimeError(f"cannot open video: {sys.argv[1]}")
 
     ocr = RapidOCR()
-    hits = 0
+    regions_with_hits = set()
     sampled = 0
+    if frame_count > START_SECONDS * fps:
+        start_frame = int(START_SECONDS * fps)
+    else:
+        start_frame = frame_count // 2
+    remaining_frames = frame_count - start_frame
     frame_indexes = [
-        int(second * fps)
-        for second in range(10, 301, 10)
-        if second * fps < frame_count
+        start_frame + int(remaining_frames * (index + 0.5) / SAMPLE_COUNT)
+        for index in range(SAMPLE_COUNT)
     ]
-    frame_indexes.extend(int(frame_count * percent) for percent in (0.25, 0.5, 0.75))
-    for frame_index in frame_indexes:
+    for sample_index, frame_index in enumerate(frame_indexes):
         video.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         ok, frame = video.read()
         if not ok:
@@ -40,14 +48,14 @@ def main():
             score >= MIN_CONFIDENCE and cjk_count(text) >= MIN_CJK
             for text, score in zip(result.txts or [], result.scores or [])
         ):
-            hits += 1
-            if hits >= REQUIRED_HITS:
+            regions_with_hits.add(sample_index * REGION_COUNT // SAMPLE_COUNT)
+            if len(regions_with_hits) >= REQUIRED_REGIONS:
                 break
 
     video.release()
     if sampled == 0:
         raise RuntimeError(f"cannot sample video: {sys.argv[1]}")
-    print(str(hits >= REQUIRED_HITS).lower())
+    print(str(len(regions_with_hits) >= REQUIRED_REGIONS).lower())
 
 
 if __name__ == "__main__":
