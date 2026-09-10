@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -21,25 +23,88 @@ type countingProcessor struct {
 	err      error
 	attempts []int
 	jobIDs   []string
+	failures int
 }
 
 func newCountingProcessor(err error) *countingProcessor {
 	return &countingProcessor{err: err}
 }
 
-func (p *countingProcessor) Process(ctx context.Context, _ *Job) error {
+func (p *countingProcessor) Process(ctx context.Context, job *Job) error {
 	p.mu.Lock()
 	p.calls++
 	p.attempts = append(p.attempts, logger.Attempt(ctx))
 	p.jobIDs = append(p.jobIDs, logger.JobID(ctx))
 	p.mu.Unlock()
+	if p.err != nil && !job.IsLight {
+		job.BeginStage(ctx, StageTranslating)
+	}
 	return p.err
+}
+
+func (p *countingProcessor) NotifyFailure(_ context.Context, _ *Job, _ Stage, _ error) {
+	p.mu.Lock()
+	p.failures++
+	p.mu.Unlock()
 }
 
 func (p *countingProcessor) callCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.calls
+}
+
+func (p *countingProcessor) failureCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.failures
+}
+
+func TestAcceptStagesBeforeWorkerCanClaim(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source.mp4")
+	staging := filepath.Join(root, "staging", "source.mp4")
+	if err := os.WriteFile(source, []byte("video"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	checked := make(chan error, 1)
+	q := New(processorFunc(func(_ context.Context, job *Job) error {
+		if job.StartStage != StageMoving || job.Checkpoint != StagePrepared {
+			checked <- fmt.Errorf("worker saw start=%q checkpoint=%q", job.StartStage, job.Checkpoint)
+			return nil
+		}
+		content, err := os.ReadFile(staging)
+		if err == nil && string(content) != "video" {
+			err = fmt.Errorf("staged content = %q", content)
+		}
+		checked <- err
+		return nil
+	}), 1, 0)
+	q.Start()
+	defer q.Stop()
+	job := NewJob("job", source, "source.mp4", "", "")
+	job.StagingPath = staging
+	if err := q.Accept(job); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-checked; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAcceptStagingFailureIsDurablyFailed(t *testing.T) {
+	q := New(newCountingProcessor(nil), 1, 0)
+	q.Start()
+	defer q.Stop()
+	job := NewJob("job", "/missing/source.mp4", "source.mp4", "", "")
+	job.StagingPath = filepath.Join(t.TempDir(), "staging", "source.mp4")
+	if err := q.Accept(job); err == nil {
+		t.Fatal("Accept error = nil, want staging failure")
+	}
+	got := q.GetJob(job.ID)
+	if got == nil || got.Status != StatusFailed || got.FailureStage != StagePreparing {
+		t.Fatalf("failed admission = %#v", got)
+	}
 }
 
 func TestAutomaticRetriesKeepJobIDAndIncrementAttempt(t *testing.T) {
@@ -55,6 +120,9 @@ func TestAutomaticRetriesKeepJobIDAndIncrementAttempt(t *testing.T) {
 	q.Stop()
 	if got := q.GetJob(job.ID).Status; got != StatusFailed {
 		t.Fatalf("job status = %q, want %q", got, StatusFailed)
+	}
+	if got := proc.failureCount(); got != 1 {
+		t.Fatalf("failure notifications = %d, want 1 after retries are exhausted", got)
 	}
 
 	proc.mu.Lock()
@@ -206,7 +274,7 @@ func TestAttemptOwnsLifecycleWhilePublishingProcessorArtifacts(t *testing.T) {
 	if completed.Error != "" || completed.Retries != 0 || completed.CompletedAt.IsZero() {
 		t.Fatalf("completed lifecycle = %+v", completed)
 	}
-	if completed.CreatedAt != createdAt || completed.StartedAt.Equal(time.Unix(1, 0)) {
+	if !completed.CreatedAt.Equal(createdAt) || completed.StartedAt.Equal(time.Unix(1, 0)) {
 		t.Fatalf("processor overwrote queue timestamps: %+v", completed)
 	}
 	if completed.StagingPath != "/tmp/staged.mp4" {
@@ -240,7 +308,7 @@ func TestAcceptedLightJobsRunConcurrently(t *testing.T) {
 	defer close(proc.release)
 
 	for i := 0; i < 2; i++ {
-		job := NewJob(fmt.Sprintf("light-%d", i), "/tmp/light.mp4", "light.mp4", "", "")
+		job := NewJob(fmt.Sprintf("light-%d", i), fmt.Sprintf("/tmp/light-%d.mp4", i), fmt.Sprintf("light-%d.mp4", i), "", "")
 		job.IsLight = true
 		if err := q.Accept(job); err != nil {
 			t.Fatalf("accept light job %d: %v", i, err)
@@ -265,7 +333,7 @@ func TestAcceptedHeavyJobsRunSequentially(t *testing.T) {
 	defer release()
 
 	for i := 0; i < 2; i++ {
-		job := NewJob(fmt.Sprintf("heavy-%d", i), "/tmp/heavy.mp4", "heavy.mp4", "", "")
+		job := NewJob(fmt.Sprintf("heavy-%d", i), fmt.Sprintf("/tmp/heavy-%d.mp4", i), fmt.Sprintf("heavy-%d.mp4", i), "", "")
 		if err := q.Accept(job); err != nil {
 			t.Fatalf("accept heavy job %d: %v", i, err)
 		}
@@ -286,19 +354,25 @@ func TestAcceptedHeavyJobsRunSequentially(t *testing.T) {
 }
 
 type stoppingProcessor struct {
-	canceled chan struct{}
-	release  chan struct{}
+	started   chan struct{}
+	canceled  chan struct{}
+	release   chan struct{}
+	returnErr error
 }
 
 func (p *stoppingProcessor) Process(ctx context.Context, _ *Job) error {
+	p.started <- struct{}{}
 	<-ctx.Done()
 	p.canceled <- struct{}{}
 	<-p.release
+	if p.returnErr != nil {
+		return p.returnErr
+	}
 	return ctx.Err()
 }
 
 func TestAcceptDistinguishesStoppingAndStoppedQueue(t *testing.T) {
-	proc := &stoppingProcessor{canceled: make(chan struct{}, 1), release: make(chan struct{})}
+	proc := &stoppingProcessor{started: make(chan struct{}, 1), canceled: make(chan struct{}, 1), release: make(chan struct{})}
 	q := New(proc, 1, 0)
 	q.Start()
 	job := NewJob("light", "/tmp/light.mp4", "light.mp4", "", "")
@@ -306,6 +380,7 @@ func TestAcceptDistinguishesStoppingAndStoppedQueue(t *testing.T) {
 	if err := q.Accept(job); err != nil {
 		t.Fatalf("accept light job: %v", err)
 	}
+	<-proc.started
 
 	stopped := make(chan struct{})
 	go func() {
@@ -329,7 +404,36 @@ func TestAcceptDistinguishesStoppingAndStoppedQueue(t *testing.T) {
 	}
 }
 
-func TestStopCancelsHeavyRetryDelayAndFinalizesJob(t *testing.T) {
+func TestStopClassifiesCleanupErrorAsInterrupted(t *testing.T) {
+	proc := &stoppingProcessor{
+		started: make(chan struct{}, 1), canceled: make(chan struct{}, 1), release: make(chan struct{}),
+		returnErr: errors.New("transaction has already been committed or rolled back"),
+	}
+	q := New(proc, 1, 0)
+	q.Start()
+	job := NewJob("job", "/tmp/source.mp4", "source.mp4", "", "")
+	job.IsLight = true
+	if err := q.Accept(job); err != nil {
+		t.Fatalf("accept job: %v", err)
+	}
+	<-proc.started
+
+	stopped := make(chan struct{})
+	go func() {
+		q.Stop()
+		close(stopped)
+	}()
+	<-proc.canceled
+	close(proc.release)
+	<-stopped
+
+	got := q.GetJobDetail(job.ID)
+	if got == nil || got.Status != StatusInterrupted || len(got.Attempts) != 1 || got.Attempts[0].Status != AttemptInterrupted {
+		t.Fatalf("shutdown result = %#v, want interrupted Job and Attempt", got)
+	}
+}
+
+func TestStopLeavesDelayedAutomaticRetryPending(t *testing.T) {
 	proc := newCountingProcessor(errors.New("boom"))
 	q := New(proc, 3, 60_000)
 	q.Start()
@@ -346,12 +450,28 @@ func TestStopCancelsHeavyRetryDelayAndFinalizesJob(t *testing.T) {
 		t.Fatalf("Stop took %v during retry delay", elapsed)
 	}
 	got := q.GetJob(job.ID)
-	if got.Status != StatusFailed || got.Error != context.Canceled.Error() {
-		t.Fatalf("stopped job = {status:%q error:%q}, want failed/context canceled", got.Status, got.Error)
+	if got.Status != StatusPending || got.Error != "" {
+		t.Fatalf("stopped job = {status:%q error:%q}, want pending retry", got.Status, got.Error)
+	}
+	detail := q.GetJobDetail(job.ID)
+	if detail == nil || len(detail.Attempts) != 2 || detail.Attempts[0].Status != AttemptFailed || detail.Attempts[1].Status != AttemptPending {
+		t.Fatalf("attempts after shutdown = %#v, want failed then pending", detail)
 	}
 }
 
-func TestAcceptRejectsFullHeavyQueueWithoutRegistration(t *testing.T) {
+func TestSaveCheckpointUpdatesMemoryOnlyAfterPersistence(t *testing.T) {
+	job := NewJob("job", "/tmp/source.mp4", "source.mp4", "", "")
+	job.Checkpoint = StageMoved
+	job.progress = func(context.Context, *Job, Stage, bool) error { return errors.New("db unavailable") }
+	if err := job.SaveCheckpoint(context.Background(), StageTranscribed); err == nil {
+		t.Fatal("SaveCheckpoint error = nil, want persistence error")
+	}
+	if job.Checkpoint != StageMoved {
+		t.Fatalf("checkpoint = %q, want %q", job.Checkpoint, StageMoved)
+	}
+}
+
+func TestAcceptDurablyQueuesBeyondWakeChannelCapacity(t *testing.T) {
 	proc := &blockingProcessor{started: make(chan struct{}, 1), release: make(chan struct{})}
 	q := New(proc, 1, 0)
 	q.Start()
@@ -365,22 +485,47 @@ func TestAcceptRejectsFullHeavyQueueWithoutRegistration(t *testing.T) {
 	}
 	<-proc.started
 
-	for i := 0; i < cap(q.jobsChan); i++ {
-		job := NewJob(fmt.Sprintf("queued-%d", i), "/tmp/queued.mp4", "queued.mp4", "", "")
+	queued := cap(q.jobsChan) + 1
+	for i := 0; i < queued; i++ {
+		job := NewJob(fmt.Sprintf("queued-%d", i), fmt.Sprintf("/tmp/queued-%d.mp4", i), fmt.Sprintf("queued-%d.mp4", i), "", "")
 		if err := q.Accept(job); err != nil {
 			t.Fatalf("accept queued job %d: %v", i, err)
 		}
+		if got := q.GetJob(job.ID); got == nil || got.Status != StatusPending {
+			t.Fatalf("queued job %d = %+v", i, got)
+		}
+	}
+	if got, want := q.GetQueueStats()["total"], queued+1; got != want {
+		t.Fatalf("total jobs = %d, want %d", got, want)
+	}
+}
+
+func TestListJobsPaginatesNewestFirst(t *testing.T) {
+	q := New(newCountingProcessor(nil), 1, 0)
+	for i, id := range []string{"job-1", "job-2", "job-3"} {
+		job := NewJob(id, "/tmp/"+id+".mp4", id+".mp4", "", "")
+		job.CreatedAt = time.Unix(0, int64(i+1))
+		if err := q.store.insertJob(job); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
 	}
 
-	rejected := NewJob("rejected", "/tmp/rejected.mp4", "rejected.mp4", "", "")
-	if err := q.Accept(rejected); !errors.Is(err, ErrQueueFull) {
-		t.Fatalf("full Accept error = %v, want %v", err, ErrQueueFull)
+	page, cursor, err := q.ListJobs("", 2)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := q.GetJob(rejected.ID); got != nil {
-		t.Fatalf("rejected job is visible: %+v", got)
+	if len(page) != 2 || page[0].ID != "job-3" || page[1].ID != "job-2" || cursor == "" {
+		t.Fatalf("first page = %#v, cursor = %q", page, cursor)
 	}
-	if got, want := q.GetQueueStats()["total"], cap(q.jobsChan)+1; got != want {
-		t.Fatalf("total jobs = %d, want %d", got, want)
+	page, next, err := q.ListJobs(cursor, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || page[0].ID != "job-1" || next != "" {
+		t.Fatalf("second page = %#v, cursor = %q", page, next)
+	}
+	if _, _, err := q.ListJobs("bad", 2); err == nil {
+		t.Fatal("expected invalid cursor error")
 	}
 }
 

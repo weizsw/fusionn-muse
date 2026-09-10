@@ -64,10 +64,13 @@ func main() {
 	// Initialize processor service
 	proc := processor.New(cfgMgr, appriseClient, folders, toolrun.ExecRunner{})
 
-	// Initialize job queue
-	jobQueue := queue.New(proc, cfg.Queue.MaxRetries, cfg.Queue.RetryDelayMs)
+	// Initialize durable job queue
+	jobQueue, err := queue.Open(cfg.Queue.DBPath, proc, cfg.Queue.MaxRetries, cfg.Queue.RetryDelayMs)
+	if err != nil {
+		logger.Fatalf("❌ Queue setup error: %v", err)
+	}
 	jobQueue.Start()
-	defer jobQueue.Stop()
+	defer func() { _ = jobQueue.Close() }()
 
 	// Initialize HTTP server
 	if !isDev {
@@ -79,7 +82,7 @@ func main() {
 	router.Use(requestLogger())
 
 	// Register routes
-	h := handler.New(jobQueue, folders)
+	h := handler.New(jobQueue, folders, cfgMgr.Reload)
 	h.RegisterRoutes(router)
 
 	srv := &http.Server{
@@ -140,6 +143,8 @@ func ensureDirectories(folders config.FoldersConfig) error {
 		folders.Process,
 		folders.Scraping,
 		folders.Subtitles,
+		folders.Transcriptions,
+		folders.Meta,
 		folders.Failed,
 	}
 

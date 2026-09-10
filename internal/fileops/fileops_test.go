@@ -73,6 +73,31 @@ func TestMoveRemovesSourceWhenDestinationIsSameInode(t *testing.T) {
 	}
 }
 
+func TestHardlinkOrCopyNoReplacePreservesDestination(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source.mp4")
+	destination := filepath.Join(root, "staging", "source.mp4")
+	if err := os.WriteFile(source, []byte("new"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("existing"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := HardlinkOrCopyNoReplace(context.Background(), source, destination); err == nil {
+		t.Fatal("HardlinkOrCopyNoReplace error = nil, want collision error")
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "existing" {
+		t.Fatalf("destination = %q, want existing content", got)
+	}
+}
+
 func sameInode(t *testing.T, a, b string) bool {
 	t.Helper()
 	aInfo, err := os.Stat(a)

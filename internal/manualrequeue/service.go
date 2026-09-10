@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,11 +39,13 @@ type Outcome struct {
 	FileName string
 	JobID    string
 	Staged   bool
+	Skipped  bool
 	Err      error
 }
 
 type Result struct {
 	Accepted []Outcome
+	Skipped  []Outcome
 	Failed   []Outcome
 	Err      error
 }
@@ -111,13 +112,17 @@ func (s *Service) List(location Location) ([]string, error) {
 func (s *Service) requeueFiles(ctx context.Context, location Location, files []string) Result {
 	result := Result{
 		Accepted: make([]Outcome, 0, len(files)),
+		Skipped:  make([]Outcome, 0),
 		Failed:   make([]Outcome, 0),
 	}
 	for _, fileName := range files {
 		outcome := s.requeueOne(ctx, location, fileName)
-		if outcome.Err != nil {
+		switch {
+		case outcome.Err != nil:
 			result.Failed = append(result.Failed, outcome)
-		} else {
+		case outcome.Skipped:
+			result.Skipped = append(result.Skipped, outcome)
+		default:
 			result.Accepted = append(result.Accepted, outcome)
 		}
 	}
@@ -129,16 +134,27 @@ func (s *Service) requeueOne(ctx context.Context, location Location, fileName st
 	if err != nil {
 		return Outcome{FileName: fileName, Err: err}
 	}
-
 	path := filepath.Join(dir, fileName)
-	staged := location == Staging
-	if location == Failed {
-		stagingPath := filepath.Join(s.folders.Staging, fileName)
-		if err := moveNoReplace(path, stagingPath); err != nil {
-			return Outcome{FileName: fileName, Err: err}
+	if !mediaintake.IsVideoFile(fileName) {
+		return Outcome{FileName: fileName, Staged: location == Staging, Err: fmt.Errorf("%w: %s", ErrInvalidMedia, fileName)}
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			err = fmt.Errorf("%w: %s", ErrNotFound, fileName)
 		}
-		path = stagingPath
-		staged = true
+		return Outcome{FileName: fileName, Staged: location == Staging, Err: err}
+	}
+
+	if location == Failed {
+		var jobID string
+		if finder, ok := s.queue.(interface {
+			FindJobByMedia(string, string) *queue.Job
+		}); ok {
+			if job := finder.FindJobByMedia(path, fileName); job != nil {
+				jobID = job.ID
+			}
+		}
+		return Outcome{FileName: fileName, JobID: jobID, Skipped: true}
 	}
 
 	resolved, err := mediaintake.ResolveMedia(mediaintake.ResolveRequest{
@@ -148,22 +164,25 @@ func (s *Service) requeueOne(ctx context.Context, location Location, fileName st
 		Runner:     s.runner,
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, os.ErrNotExist):
+		if errors.Is(err, os.ErrNotExist) {
 			err = fmt.Errorf("%w: %s", ErrNotFound, fileName)
-		case errors.Is(err, mediaintake.ErrNoValidMedia):
+		} else if errors.Is(err, mediaintake.ErrNoValidMedia) {
 			err = fmt.Errorf("%w: %s", ErrInvalidMedia, fileName)
 		}
-		return Outcome{FileName: fileName, Staged: staged, Err: err}
+		return Outcome{FileName: fileName, Staged: true, Err: err}
 	}
 
 	jobID := uuid.NewString()
-	job := queue.NewJob(jobID, path, fileName, "", "")
+	job := queue.NewJob(jobID, resolved.SourcePath, fileName, "", "")
 	job.StagingPath = path
 	job.IsLight = resolved.HasChineseSubtitle
 	job.SubtitleDetectionReason = resolved.SubtitleDetectionReason
 	job.SidecarSubtitlePath = resolved.SidecarSubtitlePath
 	if err := s.queue.Accept(job); err != nil {
+		var conflict *queue.ConflictError
+		if errors.As(err, &conflict) {
+			return Outcome{FileName: fileName, JobID: conflict.JobID, Staged: true, Skipped: true}
+		}
 		return Outcome{FileName: fileName, Staged: true, Err: err}
 	}
 	return Outcome{FileName: fileName, JobID: jobID, Staged: true}
@@ -184,60 +203,5 @@ func validateFileName(name string) error {
 	if name == "" || name == "." || name == ".." || strings.HasPrefix(name, ".") || filepath.IsAbs(name) || strings.ContainsAny(name, `/\`) || filepath.Base(name) != name || filepath.Clean(name) != name {
 		return fmt.Errorf("%w: %q", ErrInvalidName, name)
 	}
-	return nil
-}
-
-func moveNoReplace(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return fmt.Errorf("create staging: %w", err)
-	}
-	if err := os.Link(src, dst); err == nil {
-		if err := os.Remove(src); err != nil {
-			_ = os.Remove(dst)
-			return fmt.Errorf("remove failed media: %w", err)
-		}
-		return nil
-	} else if errors.Is(err, os.ErrExist) {
-		return fmt.Errorf("%w: %s", ErrConflict, filepath.Base(dst))
-	} else if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("%w: %s", ErrNotFound, filepath.Base(src))
-	}
-
-	source, err := os.Open(src)
-	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("%w: %s", ErrNotFound, filepath.Base(src))
-	}
-	if err != nil {
-		return fmt.Errorf("open failed media: %w", err)
-	}
-	defer source.Close()
-	info, err := source.Stat()
-	if err != nil {
-		return fmt.Errorf("stat failed media: %w", err)
-	}
-	destination, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode())
-	if errors.Is(err, os.ErrExist) {
-		return fmt.Errorf("%w: %s", ErrConflict, filepath.Base(dst))
-	}
-	if err != nil {
-		return fmt.Errorf("create staging media: %w", err)
-	}
-	removeDestination := true
-	defer func() {
-		_ = destination.Close()
-		if removeDestination {
-			_ = os.Remove(dst)
-		}
-	}()
-	if _, err := io.Copy(destination, source); err != nil {
-		return fmt.Errorf("copy to staging: %w", err)
-	}
-	if err := destination.Close(); err != nil {
-		return fmt.Errorf("close staging media: %w", err)
-	}
-	if err := os.Remove(src); err != nil {
-		return fmt.Errorf("remove failed media: %w", err)
-	}
-	removeDestination = false
 	return nil
 }

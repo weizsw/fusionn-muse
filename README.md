@@ -117,6 +117,8 @@ See [config.example.yaml](config/config.example.yaml) for full documentation.
     ├── processing/        # Active: currently being processed
     ├── scraping/          # Output: videos ready for media server
     ├── subtitles/         # Output: translated .srt files
+    ├── transcriptions/    # Durable source subtitles for retranslation
+    ├── meta/fusionn-muse.db # Durable SQLite job state
     └── failed/            # Failed jobs (manual inspection)
 ```
 
@@ -128,6 +130,9 @@ See [config.example.yaml](config/config.example.yaml) for full documentation.
 | GET | `/api/v1/queue` | List all jobs |
 | GET | `/api/v1/queue/stats` | Queue statistics |
 | GET | `/api/v1/queue/:id` | Get job details |
+| POST | `/api/v1/jobs/:id/retry` | Retry a failed job from its checkpoint |
+| POST | `/api/v1/jobs/:id/resume` | Resume an interrupted job |
+| POST | `/api/v1/jobs/:id/retranslate` | Translate again from the persisted source subtitle |
 | POST | `/api/v1/retry/staging` | Re-queue all staging files |
 | POST | `/api/v1/retry/failed` | Re-queue all failed files |
 | POST | `/api/v1/retry/failed/:name` | Re-queue specific failed file |

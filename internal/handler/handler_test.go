@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,6 +30,10 @@ func (noopProcessor) Process(context.Context, *queue.Job) error {
 	return nil
 }
 
+type errorProcessor struct{ err error }
+
+func (p errorProcessor) Process(context.Context, *queue.Job) error { return p.err }
+
 type recordingProcessor struct {
 	called chan *queue.Job
 	once   sync.Once
@@ -40,7 +45,8 @@ func newRecordingProcessor() *recordingProcessor {
 
 func (p *recordingProcessor) Process(_ context.Context, job *queue.Job) error {
 	p.once.Do(func() {
-		p.called <- job
+		snapshot := *job
+		p.called <- &snapshot
 	})
 	return nil
 }
@@ -50,7 +56,7 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
-func TestTorrentCompleteReceiptOmitsJobUntilQueueAcceptance(t *testing.T) {
+func TestTorrentCompleteAcknowledgesAfterQueueAcceptance(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "downloads", "SSNI-083-C.mp4")
 	mustWriteSizedHandlerFile(t, source, mediaintake.MinVideoSize+1)
@@ -74,43 +80,41 @@ func TestTorrentCompleteReceiptOmitsJobUntilQueueAcceptance(t *testing.T) {
 	}
 }
 
-func TestManualRequeuesCreateNewFullJobIDs(t *testing.T) {
+func TestTorrentCompleteDoesNotAcknowledgeQueueRejection(t *testing.T) {
 	root := t.TempDir()
-	folders := config.FoldersConfig{
-		Staging: filepath.Join(root, "staging"),
-		Failed:  filepath.Join(root, "failed"),
+	source := filepath.Join(root, "downloads", "SSNI-083-C.mp4")
+	mustWriteSizedHandlerFile(t, source, mediaintake.MinVideoSize+1)
+	handler := newTestHandler(root)
+
+	response := postTorrentComplete(t, handler, `{"path":"`+source+`","name":"SSNI-083"}`)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", response.Code, http.StatusServiceUnavailable, response.Body.String())
 	}
+}
+
+func TestManualFailedRequeueReportsSkippedWithoutJobID(t *testing.T) {
+	root := t.TempDir()
+	folders := config.FoldersConfig{Staging: filepath.Join(root, "staging"), Failed: filepath.Join(root, "failed")}
+	fileName := "movie-C.mp4"
+	failedPath := filepath.Join(folders.Failed, fileName)
+	mustWriteSizedHandlerFile(t, failedPath, 1)
 	q := queue.New(noopProcessor{}, 1, 0)
-	h := &Handler{
-		queue:   q,
-		manual:  manualrequeue.New(q, folders, nil),
-		folders: folders,
+	h := &Handler{queue: q, manual: manualrequeue.New(q, folders, nil), folders: folders}
+
+	response := manualRequeueOneFailed(t, h, fileName)
+	var body struct {
+		Outcome string `json:"outcome"`
+		Job     string `json:"job"`
+		Staged  bool   `json:"staged"`
 	}
-	h.queue.Start()
-	defer h.queue.Stop()
-
-	ids := make(map[string]bool)
-	for _, fileName := range []string{"movie-a-C.mp4", "movie-b-C.mp4"} {
-		mustWriteSizedHandlerFile(t, filepath.Join(folders.Failed, fileName), 1)
-		response := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(response)
-		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/retry/failed/"+fileName, nil)
-		c.Params = gin.Params{{Key: "name", Value: fileName}}
-		h.RetryOneFailed(c)
-
-		var body struct {
-			Job string `json:"job"`
-		}
-		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-		if _, err := uuid.Parse(body.Job); err != nil {
-			t.Fatalf("job ID = %q, want full UUID: %v", body.Job, err)
-		}
-		if ids[body.Job] {
-			t.Fatalf("duplicate manual requeue Job ID %q", body.Job)
-		}
-		ids[body.Job] = true
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusOK || body.Outcome != "skipped" || body.Job != "" || body.Staged {
+		t.Fatalf("status/body = %d %+v, want untouched skipped orphan", response.Code, body)
+	}
+	if _, err := os.Stat(failedPath); err != nil {
+		t.Fatalf("failed media changed: %v", err)
 	}
 }
 
@@ -212,42 +216,25 @@ func (a rejectingAccepter) Accept(job *queue.Job) error {
 	return a.reject[job.FileName]
 }
 
-func TestManualRequeueOneFailedDistinguishesHTTPFailures(t *testing.T) {
+func TestManualRequeueOneFailedValidatesThenSkipsOrphan(t *testing.T) {
 	tests := []struct {
 		name     string
 		fileName string
-		prepare  func(t *testing.T, folders config.FoldersConfig)
+		prepare  bool
 		wantCode int
-		staged   bool
+		outcome  string
 	}{
 		{name: "invalid input", fileName: "..", wantCode: http.StatusBadRequest},
 		{name: "missing media", fileName: "missing-C.mp4", wantCode: http.StatusNotFound},
-		{
-			name:     "conflict",
-			fileName: "movie-C.mp4",
-			prepare: func(t *testing.T, folders config.FoldersConfig) {
-				mustWriteSizedHandlerFile(t, filepath.Join(folders.Failed, "movie-C.mp4"), 1)
-				mustWriteSizedHandlerFile(t, filepath.Join(folders.Staging, "movie-C.mp4"), 1)
-			},
-			wantCode: http.StatusConflict,
-		},
-		{
-			name:     "unavailable queue",
-			fileName: "movie-C.mp4",
-			prepare: func(t *testing.T, folders config.FoldersConfig) {
-				mustWriteSizedHandlerFile(t, filepath.Join(folders.Failed, "movie-C.mp4"), 1)
-			},
-			wantCode: http.StatusServiceUnavailable,
-			staged:   true,
-		},
+		{name: "orphan", fileName: "movie-C.mp4", prepare: true, wantCode: http.StatusOK, outcome: "skipped"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
 			folders := config.FoldersConfig{Staging: filepath.Join(root, "staging"), Failed: filepath.Join(root, "failed")}
-			if tt.prepare != nil {
-				tt.prepare(t, folders)
+			if tt.prepare {
+				mustWriteSizedHandlerFile(t, filepath.Join(folders.Failed, tt.fileName), 1)
 			}
 			q := queue.New(noopProcessor{}, 1, 0)
 			h := &Handler{queue: q, manual: manualrequeue.New(q, folders, nil), folders: folders}
@@ -255,15 +242,8 @@ func TestManualRequeueOneFailedDistinguishesHTTPFailures(t *testing.T) {
 			if response.Code != tt.wantCode {
 				t.Fatalf("status = %d, want %d; body = %s", response.Code, tt.wantCode, response.Body.String())
 			}
-			var body struct {
-				Job    string `json:"job"`
-				Staged bool   `json:"staged"`
-			}
-			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
-				t.Fatalf("decode response: %v", err)
-			}
-			if body.Job != "" || body.Staged != tt.staged {
-				t.Fatalf("body = %+v, want no Job and staged=%v", body, tt.staged)
+			if tt.outcome != "" && !strings.Contains(response.Body.String(), `"outcome":"`+tt.outcome+`"`) {
+				t.Fatalf("body = %s, want outcome %q", response.Body.String(), tt.outcome)
 			}
 		})
 	}
@@ -309,6 +289,135 @@ func TestManagedFileListRoutesRemainAvailableWhenEmpty(t *testing.T) {
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"count":0`) {
 			t.Fatalf("GET %s = %d %s, want empty success", path, response.Code, response.Body.String())
 		}
+	}
+}
+
+func TestJobActionRoutes(t *testing.T) {
+	root := t.TempDir()
+	h := newTestHandler(root)
+	h.queue.Start()
+	defer h.queue.Stop()
+	router := gin.New()
+	h.RegisterRoutes(router)
+
+	for _, action := range []string{"retry", "resume", "retranslate"} {
+		response := httptest.NewRecorder()
+		path := "/api/v1/jobs/missing/" + action
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("POST %s = %d %s, want 404", path, response.Code, response.Body.String())
+		}
+	}
+
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"jobs":[]`) {
+		t.Fatalf("GET /api/v1/jobs = %d %s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("GET /api/v1/jobs/missing = %d %s, want 404", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/jobs?limit=bad", nil))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("GET /api/v1/jobs?limit=bad = %d %s, want 400", response.Code, response.Body.String())
+	}
+
+	job := queue.NewJob("completed-job", "/tmp/completed.mp4", "completed.mp4", "", "")
+	job.SubtitlePath = filepath.Join(root, "completed.srt")
+	mustWriteSizedHandlerFile(t, job.SubtitlePath, 1)
+	if err := h.queue.Accept(job); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for h.queue.GetJob(job.ID).Status != queue.StatusCompleted {
+		if time.Now().After(deadline) {
+			t.Fatal("job did not complete")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/completed-job/retry", nil))
+	body := response.Body.String()
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(body, `"code":"invalid_job_action"`) ||
+		!strings.Contains(body, `"action_url":"/api/v1/jobs/completed-job/retranslate"`) {
+		t.Fatalf("invalid action response = %d %s", response.Code, body)
+	}
+
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/completed-job/retranslate", nil))
+	body = response.Body.String()
+	if response.Code != http.StatusAccepted || !strings.Contains(body, `"attempt":{"id":`) ||
+		!strings.Contains(body, `"kind":"retranslation"`) || !strings.Contains(body, `"status":"pending"`) {
+		t.Fatalf("accepted action response = %d %s, want durable pending Attempt", response.Code, body)
+	}
+
+	response = httptest.NewRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/events", nil).WithContext(ctx)
+	router.ServeHTTP(response, req)
+	if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Type"), "text/event-stream") ||
+		!strings.Contains(response.Body.String(), "event:attempt_status") || !strings.Contains(response.Body.String(), `"attempt_id":`) {
+		t.Fatalf("GET /api/v1/jobs/events = %d %s, headers=%v", response.Code, response.Body.String(), response.Header())
+	}
+}
+
+func TestRetryJobAdoptsUniqueMatchingStagedFile(t *testing.T) {
+	root := t.TempDir()
+	folders := config.FoldersConfig{
+		Staging: filepath.Join(root, "staging"), Process: filepath.Join(root, "processing"),
+		Scraping: filepath.Join(root, "scraping"), Failed: filepath.Join(root, "failed"),
+	}
+	q := queue.New(errorProcessor{err: errors.New("move failed")}, 1, 0)
+	h := &Handler{queue: q, manual: manualrequeue.New(q, folders, nil), folders: folders}
+	q.Start()
+	defer q.Stop()
+
+	source := filepath.Join(root, "downloads", "original.mp4")
+	mustWriteSizedHandlerFile(t, source, 1024)
+	job := queue.NewJob("job", source, "original.mp4", "", "")
+	job.StagingPath = filepath.Join(folders.Staging, job.FileName)
+	if err := q.Accept(job); err != nil {
+		t.Fatalf("accept job: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for q.GetJob(job.ID).Status != queue.StatusFailed {
+		if time.Now().After(deadline) {
+			t.Fatal("initial attempt did not fail")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(job.StagingPath); err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(folders.Staging, "renamed.mp4")
+	mustWriteSizedHandlerFile(t, replacement, 1024)
+	ambiguous := filepath.Join(folders.Staging, "also-renamed.mp4")
+	mustWriteSizedHandlerFile(t, ambiguous, 1024)
+	if got := h.retryStagingMatch(job.ID); got != "" {
+		t.Fatalf("ambiguous staging match = %q, want no adoption", got)
+	}
+	if err := os.Remove(ambiguous); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job/retry", nil)
+	c.Params = gin.Params{{Key: "id", Value: job.ID}}
+	h.RetryJob(c)
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"kind":"manual_retry"`) {
+		t.Fatalf("retry response = %d %s", response.Code, response.Body.String())
+	}
+	if got := q.GetJob(job.ID); got == nil || got.StagingPath != replacement {
+		t.Fatalf("retry staging path = %#v, want %q", got, replacement)
 	}
 }
 

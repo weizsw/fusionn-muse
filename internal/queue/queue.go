@@ -2,10 +2,16 @@ package queue
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/fusionn-muse/internal/fileops"
 	"github.com/fusionn-muse/pkg/logger"
 )
 
@@ -15,7 +21,8 @@ var (
 	ErrQueueNotRunning = errors.New("queue is not running")
 	ErrQueueStopping   = errors.New("queue is stopping")
 	ErrQueueStopped    = errors.New("queue is stopped")
-	ErrQueueFull       = errors.New("heavy queue is full")
+	// Kept for API compatibility. Durable admission has no fixed queue capacity.
+	ErrQueueFull = errors.New("heavy queue is full")
 )
 
 type queueState uint8
@@ -27,18 +34,27 @@ const (
 	queueStopped
 )
 
-// Processor is the interface that processes a job.
+// Processor runs one durable Job Attempt.
+
 type Processor interface {
 	Process(ctx context.Context, job *Job) error
 }
 
-// Queue manages the sequential processing of jobs.
+type failureNotifier interface {
+	NotifyFailure(context.Context, *Job, Stage, error)
+}
+
+type settingsSnapshotter interface {
+	SnapshotSettings() (string, error)
+}
+
+// Queue manages durable heavy and light Job processing.
+
 type Queue struct {
 	mu       sync.RWMutex
-	jobs     []*Job
-	jobMap   map[string]*Job // For quick lookup by ID
 	jobsChan chan *Job
 
+	store      *store
 	processor  Processor
 	maxRetries int
 	retryDelay time.Duration
@@ -50,26 +66,39 @@ type Queue struct {
 	stoppedCh chan struct{}
 }
 
-// New creates a new job queue.
-func New(processor Processor, maxRetries, retryDelayMs int) *Queue {
-	ctx, cancel := context.WithCancel(context.Background())
+var memoryQueueID atomic.Uint64
 
-	q := &Queue{
-		jobs:       make([]*Job, 0),
-		jobMap:     make(map[string]*Job),
-		jobsChan:   make(chan *Job, 100), // Buffer for incoming jobs
+// New creates an in-memory queue. Production should use Open with a durable path.
+func New(processor Processor, maxRetries, retryDelayMs int) *Queue {
+	dsn := fmt.Sprintf("file:queue-%d?mode=memory&cache=shared", memoryQueueID.Add(1))
+	q, err := Open(dsn, processor, maxRetries, retryDelayMs)
+	if err != nil {
+		panic(err)
+	}
+	return q
+}
+
+// Open creates a queue backed by SQLite at path.
+func Open(path string, processor Processor, maxRetries, retryDelayMs int) (*Queue, error) {
+	store, err := openStore(path)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Queue{
+		jobsChan:   make(chan *Job, 100),
+		store:      store,
 		processor:  processor,
 		maxRetries: maxRetries,
 		retryDelay: time.Duration(retryDelayMs) * time.Millisecond,
 		ctx:        ctx,
 		cancel:     cancel,
 		stoppedCh:  make(chan struct{}),
-	}
-
-	return q
+	}, nil
 }
 
-// Start begins the worker goroutine.
+// Start begins the heavy and light worker goroutines.
+
 func (q *Queue) Start() {
 	q.mu.Lock()
 	if q.state != queueNotRunning {
@@ -77,14 +106,15 @@ func (q *Queue) Start() {
 		return
 	}
 	q.state = queueRunning
-	q.wg.Add(1)
+	q.wg.Add(2)
 	q.mu.Unlock()
-
-	go q.worker()
-	logger.Info("📥 Job queue started (sequential processing)")
+	go q.worker(false)
+	go q.worker(true)
+	logger.Info("📥 Job queue started (durable heavy/light processing)")
 }
 
 // Stop gracefully stops the queue.
+
 func (q *Queue) Stop() {
 	q.mu.Lock()
 	switch q.state {
@@ -92,9 +122,9 @@ func (q *Queue) Stop() {
 		q.mu.Unlock()
 		return
 	case queueStopping:
-		stoppedCh := q.stoppedCh
+		stopped := q.stoppedCh
 		q.mu.Unlock()
-		<-stoppedCh
+		<-stopped
 		return
 	}
 	q.state = queueStopping
@@ -111,169 +141,375 @@ func (q *Queue) Stop() {
 	logger.Info("✅ Job queue stopped")
 }
 
-// Accept registers a valid Job and assigns its heavy or light execution.
+// Close stops the queue and closes its durable store.
+
+func (q *Queue) Close() error {
+	q.Stop()
+	return q.store.db.Close()
+}
+
+// Accept persists a Job before workers can observe it.
 func (q *Queue) Accept(job *Job) error {
 	if job == nil || job.ID == "" || job.SourcePath == "" || job.FileName == "" || job.Status != StatusPending {
 		return ErrInvalidJob
 	}
 	owned := *job
+	if snapshotter, ok := q.processor.(settingsSnapshotter); ok {
+		snapshot, err := snapshotter.SnapshotSettings()
+		if err != nil {
+			return err
+		}
+		owned.SettingsSnapshot = snapshot
+	}
 
 	q.mu.Lock()
-	defer q.mu.Unlock()
-
 	switch q.state {
 	case queueStopping:
+		q.mu.Unlock()
 		return ErrQueueStopping
 	case queueStopped:
+		q.mu.Unlock()
 		return ErrQueueStopped
 	case queueNotRunning:
+		q.mu.Unlock()
 		return ErrQueueNotRunning
 	}
-	if _, exists := q.jobMap[owned.ID]; exists {
-		return ErrDuplicateJobID
-	}
+	q.wg.Add(1)
+	q.mu.Unlock()
+	defer q.wg.Done()
 
-	if owned.IsLight {
-		q.wg.Add(1)
-	} else {
-		select {
-		case q.jobsChan <- &owned:
-		default:
-			return ErrQueueFull
+	if err := q.store.reserveJob(&owned); err != nil {
+		return err
+	}
+	staged := owned.StagingPath != ""
+	if staged && owned.SourcePath != owned.StagingPath {
+		if signature := fileSignature(owned.StagingPath); signature != "" {
+			if signature != owned.ContentSignature {
+				return q.failAdmission(&owned, fmt.Errorf("staging destination already contains different media: %s", owned.StagingPath))
+			}
+		} else if err := fileops.HardlinkOrCopyNoReplace(q.ctx, owned.SourcePath, owned.StagingPath); err != nil {
+			return q.failAdmission(&owned, fmt.Errorf("stage media: %w", err))
 		}
 	}
-
-	q.jobs = append(q.jobs, &owned)
-	q.jobMap[owned.ID] = &owned
-	if owned.IsLight {
-		go q.processLightJob(&owned)
+	if err := q.store.completeAdmission(&owned, staged); err != nil {
+		return q.failAdmission(&owned, fmt.Errorf("persist prepared admission: %w", err))
 	}
+	q.wake(&owned)
 	return nil
 }
 
-// GetJob returns a snapshot of a job by ID.
+func (q *Queue) failAdmission(job *Job, admissionErr error) error {
+	if _, _, err := q.store.finish(job, admissionErr, 0); err != nil {
+		return fmt.Errorf("%v; persist admission failure: %w", admissionErr, err)
+	}
+	return admissionErr
+}
+
+func (q *Queue) wake(job *Job) {
+	select {
+	case q.jobsChan <- job:
+	default:
+	}
+}
+
+// GetJob returns a snapshot of a Job by ID.
+
 func (q *Queue) GetJob(id string) *Job {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-	job := q.jobMap[id]
-	if job == nil {
+	job, err := q.store.job(id)
+	if err != nil {
 		return nil
 	}
-	snapshot := *job
-	return &snapshot
+	return job
 }
 
-// GetAllJobs returns snapshots of all jobs.
+// FindJobByMedia returns the tracked Job matching a file's full media identity.
+func (q *Queue) FindJobByMedia(path, fileName string) *Job {
+	job, err := q.store.jobByIdentity(fileSignature(path), MediaID(fileName))
+	if err != nil {
+		return nil
+	}
+	return job
+}
+
+// GetJobDetail returns a Job and all of its Attempts.
+
+func (q *Queue) GetJobDetail(id string) *JobDetail {
+	job, err := q.store.job(id)
+	if err != nil {
+		return nil
+	}
+	attempts, err := q.store.attempts(id)
+	if err != nil {
+		return nil
+	}
+	return &JobDetail{Job: *job, Attempts: attempts}
+}
+
+// GetAllJobs returns snapshots of all Jobs.
+
 func (q *Queue) GetAllJobs() []*Job {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-
-	result := make([]*Job, len(q.jobs))
-	for i, job := range q.jobs {
-		snapshot := *job
-		result[i] = &snapshot
+	jobs, err := q.store.list("")
+	if err != nil {
+		logger.Errorf("list jobs: %v", err)
+		return nil
 	}
-	return result
+	return jobs
 }
 
-// GetPendingJobs returns snapshots of all pending jobs.
-func (q *Queue) GetPendingJobs() []*Job {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-
-	var pending []*Job
-	for _, job := range q.jobs {
-		if job.Status == StatusPending {
-			snapshot := *job
-			pending = append(pending, &snapshot)
+// ListJobs returns newest-first Job history and an optional continuation cursor.
+func (q *Queue) ListJobs(cursor string, limit int) ([]*Job, string, error) {
+	if limit <= 0 {
+		limit = 50
+	} else if limit > 200 {
+		limit = 200
+	}
+	var before int64
+	var beforeID string
+	if cursor != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid cursor")
 		}
+		value, id, ok := strings.Cut(string(decoded), ":")
+		if !ok || id == "" {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+		before, err = strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+		beforeID = id
 	}
-	return pending
+	jobs, err := q.store.listPage(before, beforeID, limit+1)
+	if err != nil {
+		return nil, "", err
+	}
+	if jobs == nil {
+		jobs = []*Job{}
+	}
+	if len(jobs) <= limit {
+		return jobs, "", nil
+	}
+	jobs = jobs[:limit]
+	last := jobs[len(jobs)-1]
+	return jobs, base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%d:%s", last.CreatedAt.UnixNano(), last.ID))), nil
 }
 
-// GetQueueStats returns queue statistics.
+// GetPendingJobs returns snapshots of all pending Jobs.
+
+func (q *Queue) GetPendingJobs() []*Job {
+	jobs, err := q.store.list("WHERE status='pending'")
+	if err != nil {
+		logger.Errorf("list pending jobs: %v", err)
+		return nil
+	}
+	return jobs
+}
+
+// GetQueueStats returns persisted Job counts grouped by status.
+
 func (q *Queue) GetQueueStats() map[string]int {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-
-	// Count heavy jobs (queued jobs)
-	heavyPending := 0
-	heavyProcessing := 0
-	heavyCompleted := 0
-	heavyFailed := 0
-
-	lightCompleted := 0
-	lightFailed := 0
-	for _, job := range q.jobs {
+	jobs := q.GetAllJobs()
+	stats := map[string]int{
+		"total": 0, "heavy_pending": 0, "heavy_processing": 0,
+		"heavy_completed": 0, "heavy_failed": 0,
+		"light_completed": 0, "light_failed": 0,
+	}
+	for _, job := range jobs {
+		stats["total"]++
+		prefix := "heavy_"
 		if job.IsLight {
-			switch job.Status {
-			case StatusCompleted:
-				lightCompleted++
-			case StatusFailed:
-				lightFailed++
-			}
-			continue
+			prefix = "light_"
 		}
 		switch job.Status {
 		case StatusPending:
-			heavyPending++
+			stats[prefix+"pending"]++
 		case StatusProcessing:
-			heavyProcessing++
+			stats[prefix+"processing"]++
 		case StatusCompleted:
-			heavyCompleted++
-		case StatusFailed:
-			heavyFailed++
+			stats[prefix+"completed"]++
+		case StatusFailed, StatusInterrupted:
+			stats[prefix+"failed"]++
 		}
 	}
-
-	return map[string]int{
-		"total":            len(q.jobs),
-		"heavy_pending":    heavyPending,
-		"heavy_processing": heavyProcessing,
-		"heavy_completed":  heavyCompleted,
-		"heavy_failed":     heavyFailed,
-		"light_completed":  lightCompleted,
-		"light_failed":     lightFailed,
-	}
+	return stats
 }
 
-// worker processes heavy jobs sequentially.
-func (q *Queue) worker() {
-	defer q.wg.Done()
+// Retry starts a manual retry for a failed Job.
+func (q *Queue) Retry(id string) error {
+	_, err := q.RetryAttempt(id)
+	return err
+}
 
+// RetryAttempt starts a manual retry and returns the durable Attempt.
+func (q *Queue) RetryAttempt(id string) (*Attempt, error) {
+	return q.createAction(id, AttemptManual)
+}
+
+// RetryFrom starts a failed Job using replacement media at path.
+func (q *Queue) RetryFrom(id, path string) error {
+	_, err := q.createActionFrom(id, AttemptManual, path)
+	return err
+}
+
+// RetryFromAttempt starts a failed Job with replacement media and returns the durable Attempt.
+func (q *Queue) RetryFromAttempt(id, path string) (*Attempt, error) {
+	return q.createActionFrom(id, AttemptManual, path)
+}
+
+// Resume continues an interrupted Job from its last checkpoint.
+func (q *Queue) Resume(id string) error {
+	_, err := q.ResumeAttempt(id)
+	return err
+}
+
+// ResumeAttempt continues an interrupted Job and returns the durable Attempt.
+func (q *Queue) ResumeAttempt(id string) (*Attempt, error) {
+	return q.createAction(id, AttemptResume)
+}
+
+// Retranslate reruns translation from the persisted transcription.
+func (q *Queue) Retranslate(id string) error {
+	_, err := q.RetranslateAttempt(id)
+	return err
+}
+
+// RetranslateAttempt reruns translation and returns the durable Attempt.
+func (q *Queue) RetranslateAttempt(id string) (*Attempt, error) {
+	return q.createAction(id, AttemptRetranslate)
+}
+
+func (q *Queue) createAction(id string, kind AttemptKind) (*Attempt, error) {
+	return q.createActionFrom(id, kind, "")
+}
+
+func (q *Queue) createActionFrom(id string, kind AttemptKind, path string) (*Attempt, error) {
+	q.mu.RLock()
+	state := q.state
+	q.mu.RUnlock()
+	if state != queueRunning {
+		return nil, ErrQueueNotRunning
+	}
+	var settings string
+	if kind == AttemptRetranslate {
+		if snapshotter, ok := q.processor.(settingsSnapshotter); ok {
+			var err error
+			settings, err = snapshotter.SnapshotSettings()
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	attempt, err := q.store.createAction(id, kind, settings, path)
+	if err != nil {
+		return nil, err
+	}
+	q.wake(&Job{ID: id, IsLight: attempt.StartStage == StageDelivering || attempt.StartStage == StageTranslating})
+	return attempt, nil
+}
+
+func (q *Queue) worker(light bool) {
+	defer q.wg.Done()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 	for {
-		if q.ctx.Err() != nil {
-			q.cancelPendingJobs()
+		q.mu.RLock()
+		if q.state != queueRunning {
+			q.mu.RUnlock()
 			return
+		}
+		job, err := q.store.claimNext(light, time.Now().Add(-q.retryDelay))
+		q.mu.RUnlock()
+		if err != nil {
+			logger.Errorf("claim queued attempt: %v", err)
+		} else if job != nil {
+			if light {
+				q.launchLight(job)
+			} else {
+				q.processAttempt(job)
+			}
+			continue
 		}
 		select {
 		case <-q.ctx.Done():
-			q.cancelPendingJobs()
 			return
-		case job := <-q.jobsChan:
-			q.processHeavyJob(job)
+		case <-q.jobsChan:
+		case <-ticker.C:
 		}
 	}
 }
 
-func (q *Queue) processHeavyJob(job *Job) {
-	maxAttempts := q.maxRetries
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
+func (q *Queue) launchLight(job *Job) {
+	q.mu.Lock()
+	q.wg.Add(1)
+	q.mu.Unlock()
+	go func() {
+		defer q.wg.Done()
+		q.processAttempt(job)
+	}()
+}
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if err := q.ctx.Err(); err != nil {
-			q.failJob(job, err)
+func (q *Queue) processAttempt(job *Job) {
+	for {
+		job.progress = q.store.updateProgress
+		job.settings = q.store.saveSettings
+		ctx := logger.WithAttempt(logger.WithJob(q.ctx, job.ID), job.Retries+1)
+		log := logger.FromContext(ctx)
+		log.Infof("🔄 Processing job: %s", job.FileName)
+
+		lifecycle := *job
+		processErr := q.processor.Process(ctx, job)
+		if processErr != nil && q.ctx.Err() != nil {
+			processErr = q.ctx.Err()
+		}
+		job.ID = lifecycle.ID
+		job.MediaID = lifecycle.MediaID
+		job.Status = lifecycle.Status
+		job.Retries = lifecycle.Retries
+		job.CreatedAt = lifecycle.CreatedAt
+		job.StartedAt = lifecycle.StartedAt
+		job.CompletedAt = lifecycle.CompletedAt
+		job.AttemptID = lifecycle.AttemptID
+		job.AttemptKind = lifecycle.AttemptKind
+		job.StartStage = lifecycle.StartStage
+		job.TranslationCacheEnabled = lifecycle.TranslationCacheEnabled
+
+		failureStage, next, persistErr := q.store.finish(job, processErr, q.maxRetries)
+		if persistErr != nil {
+			log.Errorf("persist attempt result: %v", persistErr)
 			return
 		}
-		if err := q.runAttempt(job, attempt, attempt == maxAttempts); err == nil || attempt == maxAttempts {
+		if processErr == nil {
+			log.Info("✅ Job completed")
 			return
 		}
-
+		if errors.Is(processErr, context.Canceled) {
+			return
+		}
+		if next == nil {
+			log.Errorf("❌ Job failed at %s after %d attempt(s): %v", failureStage, job.Retries+1, processErr)
+			q.notifyFailure(ctx, job, failureStage, processErr)
+			return
+		}
+		log.Warnf("⚠️ Translation failed; retrying in %s: %v", q.retryDelay, processErr)
 		timer := time.NewTimer(q.retryDelay)
 		select {
 		case <-timer.C:
+			q.mu.RLock()
+			if q.state != queueRunning {
+				q.mu.RUnlock()
+				return
+			}
+			claimed, claimErr := q.store.claimAttempt(next.AttemptID)
+			q.mu.RUnlock()
+			if claimErr != nil {
+				log.Errorf("claim translation retry: %v", claimErr)
+				return
+			}
+			if claimed == nil {
+				return
+			}
+			job = claimed
 		case <-q.ctx.Done():
 			if !timer.Stop() {
 				select {
@@ -281,85 +517,13 @@ func (q *Queue) processHeavyJob(job *Job) {
 				default:
 				}
 			}
-			q.failJob(job, q.ctx.Err())
 			return
 		}
 	}
 }
 
-func (q *Queue) processLightJob(job *Job) {
-	defer q.wg.Done()
-	_ = q.runAttempt(job, 1, true)
-}
-
-func (q *Queue) runAttempt(job *Job, attempt int, isFinalAttempt bool) error {
-	q.mu.Lock()
-	job.Status = StatusProcessing
-	job.Error = ""
-	job.Retries = attempt - 1
-	job.CompletedAt = time.Time{}
-	if job.StartedAt.IsZero() {
-		job.StartedAt = time.Now()
+func (q *Queue) notifyFailure(ctx context.Context, job *Job, stage Stage, err error) {
+	if notifier, ok := q.processor.(failureNotifier); ok {
+		notifier.NotifyFailure(ctx, job, stage, err)
 	}
-	jobID := job.ID
-	createdAt := job.CreatedAt
-	startedAt := job.StartedAt
-	attemptJob := *job
-	q.mu.Unlock()
-
-	ctx := logger.WithAttempt(logger.WithJob(q.ctx, job.ID), attempt)
-	log := logger.FromContext(ctx)
-	log.Infof("🔄 Processing job: %s", attemptJob.FileName)
-	err := q.processor.Process(ctx, &attemptJob)
-
-	q.mu.Lock()
-	*job = attemptJob
-	job.ID = jobID
-	job.CreatedAt = createdAt
-	job.StartedAt = startedAt
-	job.Retries = attempt - 1
-	job.Error = ""
-	job.CompletedAt = time.Time{}
-	if err == nil {
-		job.Status = StatusCompleted
-		job.CompletedAt = time.Now()
-	} else {
-		job.Retries = attempt
-		job.Error = err.Error()
-		if isFinalAttempt {
-			job.Status = StatusFailed
-			job.CompletedAt = time.Now()
-		} else {
-			job.Status = StatusPending
-		}
-	}
-	q.mu.Unlock()
-
-	if err == nil {
-		log.Info("✅ Job completed")
-	} else if isFinalAttempt {
-		log.Errorf("❌ Job failed after %d attempt(s): %v", attempt, err)
-	} else {
-		log.Warnf("⚠️ Job failed (attempt %d/%d): %v", attempt, q.maxRetries, err)
-	}
-	return err
-}
-
-func (q *Queue) cancelPendingJobs() {
-	for {
-		select {
-		case job := <-q.jobsChan:
-			q.failJob(job, q.ctx.Err())
-		default:
-			return
-		}
-	}
-}
-
-func (q *Queue) failJob(job *Job, err error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	job.Status = StatusFailed
-	job.Error = err.Error()
-	job.CompletedAt = time.Now()
 }

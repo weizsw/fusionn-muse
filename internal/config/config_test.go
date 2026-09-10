@@ -31,10 +31,9 @@ func TestManagerReloadUsesOwnConfigFile(t *testing.T) {
 	defer bMgr.Stop()
 
 	writeConfig(t, aPath, true)
-	if err := aMgr.v.ReadInConfig(); err != nil {
-		t.Fatalf("read a config: %v", err)
+	if err := aMgr.Reload(); err != nil {
+		t.Fatalf("reload a config: %v", err)
 	}
-	aMgr.reload()
 
 	if !aMgr.Get().DryRun {
 		t.Fatal("a manager reloaded the wrong config file")
@@ -91,6 +90,9 @@ llm_subtrans:
 	}
 	if cfg.LLMSubtrans.TimeoutMinutes != 180 {
 		t.Fatalf("llm-subtrans timeout = %d", cfg.LLMSubtrans.TimeoutMinutes)
+	}
+	if cfg.Queue.DBPath != "/data/meta/fusionn-muse.db" || cfg.Queue.MaxRetries != 4 || cfg.Queue.RetryDelayMs != 10000 {
+		t.Fatalf("queue defaults = %+v", cfg.Queue)
 	}
 }
 

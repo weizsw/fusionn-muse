@@ -177,12 +177,14 @@ hard_sub_ocr:
 # QUEUE
 # ─────────────────────────────────────────────────────────────────────────────
 queue:
-  # Max retries before marking job as failed
-  # Failed files are moved to /data/failed for manual inspection
-  max_retries: 3
+  # Durable SQLite state. Keep this path on persistent storage.
+  db_path: "/data/meta/fusionn-muse.db"
+  # Maximum total translation attempts before marking the job as failed.
+  # Transcription failures are not retried automatically.
+  max_retries: 4
 
   # Delay between retries (milliseconds)
-  retry_delay_ms: 5000
+  retry_delay_ms: 10000
 
 # ─────────────────────────────────────────────────────────────────────────────
 # APPRISE (Notifications)
@@ -209,6 +211,8 @@ apprise:
 #   /data/automation/processing - Internal: active processing
 #   /data/automation/scraping   - Output: videos ready for scraping
 #   /data/automation/subtitles  - Output: translated subtitles
+#   /data/automation/transcriptions - Durable source subtitles for retranslation
+#   /data/automation/meta/fusionn-muse.db - Durable job and attempt state
 #   /data/automation/failed     - Failed jobs (for manual inspection)
 #
 # ════════════════════════════════════════════════════════════════════════════
@@ -232,6 +236,9 @@ apprise:
 # GET  /api/v1/queue               - List all jobs
 # GET  /api/v1/queue/stats         - Queue statistics
 # GET  /api/v1/queue/:id           - Get job details
+# POST /api/v1/jobs/:id/retry      - Retry a failed job
+# POST /api/v1/jobs/:id/resume     - Resume an interrupted job
+# POST /api/v1/jobs/:id/retranslate - Translate again from the persisted source subtitle
 # POST /api/v1/retry/staging       - Re-queue all staging files
 # POST /api/v1/retry/failed        - Re-queue all failed files
 # POST /api/v1/retry/failed/:name  - Re-queue specific failed file
