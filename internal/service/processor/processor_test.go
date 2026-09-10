@@ -372,6 +372,77 @@ func TestFileOperationsResumeAfterDestinationCommit(t *testing.T) {
 	}
 }
 
+func TestProcessTranslationStartRequiresPersistedTranscription(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		subtitlePath func(config.FoldersConfig) string
+	}{
+		{name: "empty", subtitlePath: func(config.FoldersConfig) string { return "" }},
+		{name: "missing", subtitlePath: func(folders config.FoldersConfig) string {
+			return filepath.Join(folders.Transcriptions, "missing.srt")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, folders, job := newProcessFixture(t, "movie.mp4")
+			job.StartStage = queue.StageTranslating
+			job.ProcessingPath = job.SourcePath
+			job.SubtitlePath = tc.subtitlePath(folders)
+			svc.resolveExecutors = func(config.Config) (transcriber, subtitleTranslator, error) {
+				return transcriberFunc(func(context.Context, string) (string, error) {
+						t.Fatal("transcription ran for a translation-start attempt")
+						return "", nil
+					}), subtitleTranslatorFunc(func(context.Context, string) (string, error) {
+						t.Fatal("translation ran without persisted transcription")
+						return "", nil
+					}), nil
+			}
+
+			err := svc.Process(context.Background(), job)
+			if err == nil || !strings.Contains(err.Error(), "read persisted transcription failed") {
+				t.Fatalf("Process error = %v, want persisted transcription failure", err)
+			}
+		})
+	}
+}
+
+func TestMoveToFailedRefusesUnrelatedDestination(t *testing.T) {
+	svc, _, folders, job := newProcessFixture(t, "movie.mp4")
+	currentPath := job.SourcePath
+	job.ProcessingPath = currentPath
+	failedPath := filepath.Join(folders.Failed, job.FileName)
+	mustWriteTestFile(t, failedPath, "unrelated")
+
+	err := svc.moveToFailed(context.Background(), job, currentPath)
+	if err == nil || !strings.Contains(err.Error(), "unrelated file") {
+		t.Fatalf("moveToFailed error = %v, want unrelated destination failure", err)
+	}
+	if got, readErr := os.ReadFile(currentPath); readErr != nil || string(got) != "video" {
+		t.Fatalf("source changed: %q, %v", got, readErr)
+	}
+	if got, readErr := os.ReadFile(failedPath); readErr != nil || string(got) != "unrelated" {
+		t.Fatalf("destination changed: %q, %v", got, readErr)
+	}
+	if job.ProcessingPath != currentPath {
+		t.Fatalf("processing path = %q, want %q", job.ProcessingPath, currentPath)
+	}
+}
+
+func TestMoveToFailedAcceptsIdenticalDestination(t *testing.T) {
+	svc, _, folders, job := newProcessFixture(t, "movie.mp4")
+	failedPath := filepath.Join(folders.Failed, job.FileName)
+	mustWriteTestFile(t, failedPath, "video")
+
+	if err := svc.moveToFailed(context.Background(), job, job.SourcePath); err != nil {
+		t.Fatalf("moveToFailed identical destination: %v", err)
+	}
+	if job.ProcessingPath != failedPath {
+		t.Fatalf("processing path = %q, want %q", job.ProcessingPath, failedPath)
+	}
+	if got, err := os.ReadFile(failedPath); err != nil || string(got) != "video" {
+		t.Fatalf("failed file = %q, %v", got, err)
+	}
+}
+
 func TestProcessSkipsExecutorResolutionForLightAndDryRunJobs(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
