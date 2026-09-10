@@ -45,6 +45,31 @@ func HardlinkOrCopy(ctx context.Context, src, dst string) error {
 	return nil
 }
 
+// HardlinkOrCopyNoReplace creates dst without overwriting an existing file.
+func HardlinkOrCopyNoReplace(ctx context.Context, src, dst string) error {
+	log := logger.FromContext(ctx)
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return fmt.Errorf("create dir: %w", err)
+	}
+	if samePath(src, dst) {
+		return nil
+	}
+	if _, err := os.Stat(src); err != nil {
+		return fmt.Errorf("stat source: %w", err)
+	}
+	if err := os.Link(src, dst); err == nil {
+		log.Debugf("🔗 Hard-linked: %s → %s", src, dst)
+		return nil
+	} else if os.IsExist(err) {
+		return fmt.Errorf("destination exists: %w", err)
+	}
+	if err := copyFileNoReplace(src, dst); err != nil {
+		return fmt.Errorf("copy: %w", err)
+	}
+	log.Debugf("📋 Copied: %s → %s", src, dst)
+	return nil
+}
+
 // Move moves a file from src to dst.
 func Move(ctx context.Context, src, dst string) error {
 	log := logger.FromContext(ctx)
@@ -155,6 +180,34 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(dstFile, srcFile)
 	return err
+}
+
+func copyFileNoReplace(src, dst string) (err error) {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := dstFile.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = os.Remove(dst)
+		}
+	}()
+	if _, err = io.Copy(dstFile, srcFile); err != nil {
+		return err
+	}
+	return dstFile.Sync()
 }
 
 // EnsureDir creates a directory if it doesn't exist.

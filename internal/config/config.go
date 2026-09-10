@@ -55,22 +55,26 @@ type LLMSubtransConfig struct {
 // Folders returns hardcoded folder paths (user mounts via Docker volumes).
 func Folders() FoldersConfig {
 	return FoldersConfig{
-		Input:     "/data/torrents",              // Mount: torrent download folder
-		Staging:   "/data/automation/staging",    // Internal: queue before processing
-		Process:   "/data/automation/processing", // Internal: active processing
-		Scraping:  "/data/automation/scraping",   // Output: videos ready for scraping
-		Subtitles: "/data/automation/subtitles",  // Output: translated subtitles
-		Failed:    "/data/automation/failed",     // Failed jobs (for manual inspection)
+		Input:          "/data/torrents",                  // Mount: torrent download folder
+		Staging:        "/data/automation/staging",        // Internal: queue before processing
+		Process:        "/data/automation/processing",     // Internal: active processing
+		Scraping:       "/data/automation/scraping",       // Output: videos ready for scraping
+		Subtitles:      "/data/automation/subtitles",      // Output: translated subtitles
+		Transcriptions: "/data/automation/transcriptions", // Output: reusable source subtitles
+		Meta:           "/data/automation/meta",           // Durable job metadata
+		Failed:         "/data/automation/failed",         // Failed jobs (for manual inspection)
 	}
 }
 
 type FoldersConfig struct {
-	Input     string // Source files from torrent client
-	Staging   string // Queue before processing
-	Process   string // Active processing
-	Scraping  string // Videos ready for scraping by another program
-	Subtitles string // Translated subtitles
-	Failed    string // Failed jobs
+	Input          string // Source files from torrent client
+	Staging        string // Queue before processing
+	Process        string // Active processing
+	Scraping       string // Videos ready for scraping by another program
+	Subtitles      string // Translated subtitles
+	Transcriptions string // Reusable source subtitles
+	Meta           string // Durable job metadata
+	Failed         string // Failed jobs
 }
 
 type WhisperConfig struct {
@@ -134,8 +138,9 @@ type AppriseConfig struct {
 }
 
 type QueueConfig struct {
-	MaxRetries   int `mapstructure:"max_retries"`    // Max retries per job
-	RetryDelayMs int `mapstructure:"retry_delay_ms"` // Delay between retries
+	DBPath       string `mapstructure:"db_path"`        // SQLite state database path
+	MaxRetries   int    `mapstructure:"max_retries"`    // Maximum total translation attempts
+	RetryDelayMs int    `mapstructure:"retry_delay_ms"` // Fixed delay between attempts
 }
 
 type SubtitleConfig struct {
@@ -233,40 +238,39 @@ func (m *Manager) pollForChanges(interval time.Duration) {
 
 			if stat.ModTime().After(lastMod) {
 				logger.Infof("🔄 Config file changed, reloading...")
-
-				if err := m.v.ReadInConfig(); err != nil {
-					logger.Errorf("❌ Failed to re-read config: %v", err)
-					continue
+				if err := m.Reload(); err != nil {
+					logger.Errorf("❌ Failed to reload config: %v", err)
 				}
-
-				m.mu.Lock()
-				m.lastModTime = stat.ModTime()
-				m.mu.Unlock()
-
-				m.reload()
 			}
 		}
 	}
 }
 
-func (m *Manager) reload() {
+// Reload synchronously reloads the configuration file.
+func (m *Manager) Reload() error {
+	m.mu.Lock()
+	if err := m.v.ReadInConfig(); err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	var newCfg Config
 	if err := m.v.Unmarshal(&newCfg); err != nil {
-		logger.Errorf("❌ Failed to reload config: %v", err)
-		return
+		m.mu.Unlock()
+		return err
 	}
-
-	m.mu.Lock()
 	oldCfg := m.cfg
 	m.cfg = &newCfg
-	callbacks := m.callbacks
+	if stat, err := os.Stat(m.path); err == nil {
+		m.lastModTime = stat.ModTime()
+	}
+	callbacks := append([]ChangeCallback(nil), m.callbacks...)
 	m.mu.Unlock()
 
 	logChanges(oldCfg, &newCfg, "")
-
 	for _, cb := range callbacks {
 		cb(oldCfg, &newCfg)
 	}
+	return nil
 }
 
 func logChanges(old, cur any, prefix string) {
@@ -334,5 +338,8 @@ func newParser(path string) *viper.Viper {
 	v.SetEnvPrefix("FUSIONN_MUSE")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
+	v.SetDefault("queue.db_path", "/data/meta/fusionn-muse.db")
+	v.SetDefault("queue.max_retries", 4)
+	v.SetDefault("queue.retry_delay_ms", 10000)
 	return v
 }

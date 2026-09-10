@@ -12,9 +12,12 @@ import (
 )
 
 type recordingAccepter struct {
-	jobs      []*queue.Job
-	reject    map[string]error
-	beforeErr func(*queue.Job)
+	jobs       []*queue.Job
+	reject     map[string]error
+	beforeErr  func(*queue.Job)
+	retries    []string
+	retryPaths []string
+	retryErr   error
 }
 
 func (a *recordingAccepter) Accept(job *queue.Job) error {
@@ -27,6 +30,17 @@ func (a *recordingAccepter) Accept(job *queue.Job) error {
 		return err
 	}
 	return nil
+}
+
+func (a *recordingAccepter) Retry(jobID string) error {
+	a.retries = append(a.retries, jobID)
+	return a.retryErr
+}
+
+func (a *recordingAccepter) RetryFrom(jobID, path string) error {
+	a.retries = append(a.retries, jobID)
+	a.retryPaths = append(a.retryPaths, path)
+	return a.retryErr
 }
 
 type probeRunner struct{}
@@ -64,35 +78,24 @@ func TestSingleRequeueRejectsUnsafeNamesBeforeFilesystemAccess(t *testing.T) {
 	}
 }
 
-func TestFailedRequeueMovesBeforeAcceptanceAndRecoversInStaging(t *testing.T) {
+func TestFailedRequeueLeavesOrphanUntouched(t *testing.T) {
 	root := t.TempDir()
 	folders := testFolders(root)
 	failedPath := filepath.Join(folders.Failed, "movie.mp4")
-	stagingPath := filepath.Join(folders.Staging, "movie.mp4")
 	mustWriteFile(t, failedPath, "media")
-
-	accepter := &recordingAccepter{reject: map[string]error{"movie.mp4": queue.ErrQueueNotRunning}}
-	accepter.beforeErr = func(*queue.Job) {
-		if _, err := os.Stat(failedPath); !os.IsNotExist(err) {
-			t.Errorf("failed source still exists at acceptance: %v", err)
-		}
-		if _, err := os.Stat(stagingPath); err != nil {
-			t.Errorf("staging media missing at acceptance: %v", err)
-		}
-	}
+	accepter := &recordingAccepter{}
 	service := New(accepter, folders, probeRunner{})
 	name := "movie.mp4"
 
 	result := service.Requeue(context.Background(), Request{Location: Failed, FileName: &name})
-	if len(result.Accepted) != 0 || len(result.Failed) != 1 {
-		t.Fatalf("result = %+v, want one failure", result)
+	if len(result.Skipped) != 1 || result.Skipped[0].FileName != name || result.Skipped[0].Staged {
+		t.Fatalf("result = %+v, want one untouched skipped orphan", result)
 	}
-	failure := result.Failed[0]
-	if !failure.Staged || failure.JobID != "" || !errors.Is(failure.Err, queue.ErrQueueNotRunning) {
-		t.Fatalf("failure = %+v, want staged queue rejection without Job ID", failure)
+	if got, err := os.ReadFile(failedPath); err != nil || string(got) != "media" {
+		t.Fatalf("failed orphan changed: %q, %v", got, err)
 	}
-	if got, err := os.ReadFile(stagingPath); err != nil || string(got) != "media" {
-		t.Fatalf("staged media = %q, %v", got, err)
+	if len(accepter.jobs) != 0 {
+		t.Fatalf("queue received %d jobs, want none", len(accepter.jobs))
 	}
 }
 
@@ -108,14 +111,14 @@ func TestFailedRequeueNeverOverwritesStagingConflict(t *testing.T) {
 	name := "movie.mp4"
 
 	result := service.Requeue(context.Background(), Request{Location: Failed, FileName: &name})
-	if len(result.Failed) != 1 || !errors.Is(result.Failed[0].Err, ErrConflict) {
-		t.Fatalf("result = %+v, want conflict", result)
+	if len(result.Skipped) != 1 || len(result.Accepted) != 0 || len(result.Failed) != 0 {
+		t.Fatalf("result = %+v, want skipped", result)
 	}
 	if got, _ := os.ReadFile(failedPath); string(got) != "failed" {
-		t.Fatalf("failed source overwritten or removed: %q", got)
+		t.Fatalf("failed source changed: %q", got)
 	}
 	if got, _ := os.ReadFile(stagingPath); string(got) != "staging" {
-		t.Fatalf("staging destination overwritten: %q", got)
+		t.Fatalf("staging destination changed: %q", got)
 	}
 	if len(accepter.jobs) != 0 {
 		t.Fatalf("queue received %d jobs, want none", len(accepter.jobs))
@@ -157,6 +160,50 @@ func TestManualRequeueCreatesFreshJobEachTime(t *testing.T) {
 	second := service.Requeue(context.Background(), Request{Location: Staging, FileName: &name})
 	if len(first.Accepted) != 1 || len(second.Accepted) != 1 || first.Accepted[0].JobID == second.Accepted[0].JobID {
 		t.Fatalf("Job IDs = %q and %q, want distinct accepted IDs", first.Accepted[0].JobID, second.Accepted[0].JobID)
+	}
+	if len(accepter.jobs) != 2 || accepter.jobs[0].ContentSignature == "" || accepter.jobs[0].SourceKey == "" {
+		t.Fatalf("manual jobs missing durable identity: %+v", accepter.jobs)
+	}
+	if accepter.jobs[0].ContentSignature != accepter.jobs[1].ContentSignature || accepter.jobs[0].SourceKey != accepter.jobs[1].SourceKey {
+		t.Fatalf("manual job identities differ: %+v", accepter.jobs)
+	}
+}
+
+func TestCompletedDuplicateIsReportedAsSkipped(t *testing.T) {
+	folders := testFolders(t.TempDir())
+	mustWriteFile(t, filepath.Join(folders.Staging, "movie.mp4"), "media")
+	accepter := &recordingAccepter{reject: map[string]error{
+		"movie.mp4": &queue.ConflictError{JobID: "existing", Status: queue.StatusCompleted},
+	}}
+
+	name := "movie.mp4"
+	result := New(accepter, folders, probeRunner{}).Requeue(context.Background(), Request{Location: Staging, FileName: &name})
+	if len(result.Skipped) != 1 || result.Skipped[0].JobID != "existing" || len(result.Accepted) != 0 || len(result.Failed) != 0 {
+		t.Fatalf("result = %+v, want completed duplicate reported as skipped", result)
+	}
+	if len(accepter.retries) != 0 {
+		t.Fatalf("retries = %v, want none", accepter.retries)
+	}
+}
+
+func TestFailedFolderItemDoesNotInferOrRetryExistingJob(t *testing.T) {
+	folders := testFolders(t.TempDir())
+	failedPath := filepath.Join(folders.Failed, "movie.mp4")
+	mustWriteFile(t, failedPath, "media")
+	accepter := &recordingAccepter{reject: map[string]error{
+		"movie.mp4": &queue.ConflictError{JobID: "existing", Status: queue.StatusFailed},
+	}}
+
+	name := "movie.mp4"
+	result := New(accepter, folders, probeRunner{}).Requeue(context.Background(), Request{Location: Failed, FileName: &name})
+	if len(result.Skipped) != 1 || result.Skipped[0].JobID != "" || len(result.Accepted) != 0 || len(result.Failed) != 0 {
+		t.Fatalf("result = %+v, want unmatched failed-folder item reported as skipped", result)
+	}
+	if len(accepter.retries) != 0 || len(accepter.jobs) != 0 {
+		t.Fatalf("failed-folder item reached queue: jobs=%d retries=%v", len(accepter.jobs), accepter.retries)
+	}
+	if _, err := os.Stat(failedPath); err != nil {
+		t.Fatalf("failed media changed: %v", err)
 	}
 }
 

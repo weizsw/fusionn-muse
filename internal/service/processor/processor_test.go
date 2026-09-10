@@ -136,11 +136,12 @@ func TestProcessCopiesSidecarSubtitleForLightJob(t *testing.T) {
 	defer cfgMgr.Stop()
 
 	folders := config.FoldersConfig{
-		Staging:   filepath.Join(root, "staging"),
-		Process:   filepath.Join(root, "processing"),
-		Scraping:  filepath.Join(root, "scraping"),
-		Subtitles: filepath.Join(root, "subtitles"),
-		Failed:    filepath.Join(root, "failed"),
+		Staging:        filepath.Join(root, "staging"),
+		Process:        filepath.Join(root, "processing"),
+		Scraping:       filepath.Join(root, "scraping"),
+		Subtitles:      filepath.Join(root, "subtitles"),
+		Transcriptions: filepath.Join(root, "transcriptions"),
+		Failed:         filepath.Join(root, "failed"),
 	}
 	source := filepath.Join(root, "input", "SSNI-083.mp4")
 	sidecar := filepath.Join(root, "input", "SSNI-083.ass")
@@ -183,11 +184,12 @@ func TestProcessUsesOCRToSkipHardSubbedVideo(t *testing.T) {
 	cfgMgr := newTestConfigManager(t, root, "")
 	defer cfgMgr.Stop()
 	folders := config.FoldersConfig{
-		Staging:   filepath.Join(root, "staging"),
-		Process:   filepath.Join(root, "processing"),
-		Scraping:  filepath.Join(root, "scraping"),
-		Subtitles: filepath.Join(root, "subtitles"),
-		Failed:    filepath.Join(root, "failed"),
+		Staging:        filepath.Join(root, "staging"),
+		Process:        filepath.Join(root, "processing"),
+		Scraping:       filepath.Join(root, "scraping"),
+		Subtitles:      filepath.Join(root, "subtitles"),
+		Transcriptions: filepath.Join(root, "transcriptions"),
+		Failed:         filepath.Join(root, "failed"),
 	}
 	source := filepath.Join(root, "input", "SSNI-083.mp4")
 	mustWriteTestFile(t, source, "video")
@@ -234,11 +236,12 @@ func TestProcessContinuesHeavyProcessingWhenHardSubProbeFails(t *testing.T) {
 	cfgMgr := newTestConfigManager(t, root, "")
 	defer cfgMgr.Stop()
 	folders := config.FoldersConfig{
-		Staging:   filepath.Join(root, "staging"),
-		Process:   filepath.Join(root, "processing"),
-		Scraping:  filepath.Join(root, "scraping"),
-		Subtitles: filepath.Join(root, "subtitles"),
-		Failed:    filepath.Join(root, "failed"),
+		Staging:        filepath.Join(root, "staging"),
+		Process:        filepath.Join(root, "processing"),
+		Scraping:       filepath.Join(root, "scraping"),
+		Subtitles:      filepath.Join(root, "subtitles"),
+		Transcriptions: filepath.Join(root, "transcriptions"),
+		Failed:         filepath.Join(root, "failed"),
 	}
 	source := filepath.Join(root, "input", "SSNI-083.mp4")
 	mustWriteTestFile(t, source, "video")
@@ -295,8 +298,77 @@ func TestProcessHeavyUsesExecutorPairInOrder(t *testing.T) {
 	if !fileExists(filepath.Join(folders.Subtitles, "movie.srt")) {
 		t.Fatal("translated subtitle was not delivered")
 	}
+	if !fileExists(filepath.Join(folders.Transcriptions, "movie.srt")) {
+		t.Fatal("source transcription was not persisted")
+	}
 	if !fileExists(filepath.Join(folders.Scraping, "movie.mp4")) {
 		t.Fatal("video was not delivered")
+	}
+}
+
+func TestProcessRetranslatesPersistedSourceWithoutTranscribing(t *testing.T) {
+	svc, _, folders, job := newProcessFixture(t, "movie.mp4")
+	job.StartStage = queue.StageTranslating
+	job.AttemptKind = queue.AttemptRetranslate
+	job.AttemptID = 7
+	job.SubtitlePath = filepath.Join(folders.Transcriptions, "movie.srt")
+	mustWriteTestFile(t, job.SubtitlePath, "source subtitle")
+	final := filepath.Join(folders.Subtitles, "movie.srt")
+	mustWriteTestFile(t, final, "old translation")
+	failedMedia := filepath.Join(folders.Failed, "movie.mp4")
+	if err := os.MkdirAll(folders.Failed, 0755); err != nil {
+		t.Fatalf("create failed folder: %v", err)
+	}
+	if err := os.Rename(job.SourcePath, failedMedia); err != nil {
+		t.Fatalf("move media to failed: %v", err)
+	}
+	job.ProcessingPath = failedMedia
+
+	svc.resolveExecutors = func(config.Config) (transcriber, subtitleTranslator, error) {
+		return transcriberFunc(func(context.Context, string) (string, error) {
+				t.Fatal("retranslation invoked transcriber")
+				return "", nil
+			}), subtitleTranslatorFunc(func(_ context.Context, source string) (string, error) {
+				if source != job.SubtitlePath {
+					t.Fatalf("translation source = %q, want %q", source, job.SubtitlePath)
+				}
+				generated := filepath.Join(folders.Transcriptions, "movie.new.srt")
+				return generated, os.WriteFile(generated, []byte("new translation"), 0644)
+			}), nil
+	}
+
+	if err := svc.Process(context.Background(), job); err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	got, err := os.ReadFile(final)
+	if err != nil || string(got) != "new translation" {
+		t.Fatalf("published translation = %q, %v", got, err)
+	}
+	if !fileExists(job.SubtitlePath) {
+		t.Fatal("persisted transcription was removed")
+	}
+	if !fileExists(filepath.Join(folders.Scraping, "movie.mp4")) {
+		t.Fatal("failed media was not delivered after successful retranslation")
+	}
+}
+
+func TestFileOperationsResumeAfterDestinationCommit(t *testing.T) {
+	root := t.TempDir()
+	committedMove := filepath.Join(root, "scraping.mp4")
+	mustWriteTestFile(t, committedMove, "media")
+	if err := moveOnce(context.Background(), filepath.Join(root, "missing-processing.mp4"), committedMove); err != nil {
+		t.Fatalf("resume committed move: %v", err)
+	}
+
+	source := filepath.Join(root, "new.srt")
+	destination := filepath.Join(root, "published.srt")
+	mustWriteTestFile(t, source, "new translation")
+	mustWriteTestFile(t, destination, "old translation")
+	if err := publishAtomically(context.Background(), source, destination, 9); err != nil {
+		t.Fatalf("replace committed publication: %v", err)
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != "new translation" {
+		t.Fatalf("published translation = %q, %v", got, err)
 	}
 }
 
@@ -353,28 +425,20 @@ func TestProcessUnsupportedProviderFailsOnlyForHeavyWork(t *testing.T) {
 	}
 }
 
-func TestProcessExecutorFailuresShortCircuitAndMoveVideoToFailed(t *testing.T) {
+func TestProcessExecutorFailuresPreserveTranslationInputs(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		transcribeErr error
 		translateErr  error
 		wantCalls     string
 		wantStep      string
+		wantMoved     bool
 	}{
-		{name: "transcription", transcribeErr: errors.New("transcribe boom"), wantCalls: "transcribe", wantStep: "transcription failed"},
-		{name: "translation", translateErr: errors.New("translate boom"), wantCalls: "transcribe,translate", wantStep: "translation failed"},
+		{name: "transcription", transcribeErr: errors.New("transcribe boom"), wantCalls: "transcribe", wantStep: "transcription failed", wantMoved: true},
+		{name: "translation", translateErr: errors.New("translate boom"), wantCalls: "transcribe,translate", wantStep: "translation failed", wantMoved: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _, folders, job := newProcessFixture(t, "movie.mp4")
-			var notification apprise.NotifyRequest
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if err := json.NewDecoder(r.Body).Decode(&notification); err != nil {
-					t.Errorf("decode notification: %v", err)
-				}
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
-			svc.apprise = apprise.NewClient(config.AppriseConfig{Enabled: true, BaseURL: server.URL, Key: "test"})
 			var calls []string
 			svc.resolveExecutors = func(config.Config) (transcriber, subtitleTranslator, error) {
 				return transcriberFunc(func(_ context.Context, videoPath string) (string, error) {
@@ -392,6 +456,10 @@ func TestProcessExecutorFailuresShortCircuitAndMoveVideoToFailed(t *testing.T) {
 						return subtitlePath, nil
 					}), nil
 			}
+			finalPath := filepath.Join(folders.Subtitles, "movie.srt")
+			if tc.translateErr != nil {
+				mustWriteTestFile(t, finalPath, "old translation")
+			}
 
 			err := svc.Process(context.Background(), job)
 			if err == nil || !strings.Contains(err.Error(), tc.wantStep) {
@@ -400,11 +468,17 @@ func TestProcessExecutorFailuresShortCircuitAndMoveVideoToFailed(t *testing.T) {
 			if got := strings.Join(calls, ","); got != tc.wantCalls {
 				t.Fatalf("calls = %q, want %q", got, tc.wantCalls)
 			}
-			if !fileExists(filepath.Join(folders.Failed, "movie.mp4")) {
-				t.Fatal("video was not moved to failed")
+			if moved := fileExists(filepath.Join(folders.Failed, "movie.mp4")); moved != tc.wantMoved {
+				t.Fatalf("video moved to failed = %t, want %t", moved, tc.wantMoved)
 			}
-			if !strings.Contains(notification.Body, "Failed at: "+tc.name) {
-				t.Fatalf("notification body = %q, want failure step", notification.Body)
+			if tc.translateErr != nil {
+				got, readErr := os.ReadFile(finalPath)
+				if readErr != nil || string(got) != "old translation" {
+					t.Fatalf("existing translation changed after failure: %q, %v", got, readErr)
+				}
+				if !fileExists(job.ProcessingPath) {
+					t.Fatalf("processing media %q was not retained for translation retry", job.ProcessingPath)
+				}
 			}
 		})
 	}
@@ -461,16 +535,48 @@ func TestProcessReadsFreshConfigForEachAttempt(t *testing.T) {
 	}
 }
 
+func TestConfigForAttemptFreezesSettingsWithoutPersistingSecrets(t *testing.T) {
+	frozen := config.Config{}
+	frozen.Pipeline.Provider = "frozen-provider"
+	frozen.Translate.Model = "frozen-model"
+	frozen.Translate.APIKey = "old-secret"
+	frozen.Apprise.Key = "old-apprise-secret"
+	snapshot, err := snapshotSettings(frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(snapshot, "secret") {
+		t.Fatalf("settings snapshot contains a secret: %s", snapshot)
+	}
+
+	current := config.Config{}
+	current.Pipeline.Provider = "current-provider"
+	current.Translate.Model = "current-model"
+	current.Translate.APIKey = "current-secret"
+	current.Apprise.Key = "current-apprise-secret"
+	got, err := configForAttempt(current, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Pipeline.Provider != "frozen-provider" || got.Translate.Model != "frozen-model" {
+		t.Fatalf("config = %#v, want frozen non-secret settings", got)
+	}
+	if got.Translate.APIKey != "current-secret" || got.Apprise.Key != "current-apprise-secret" {
+		t.Fatalf("config secrets = %q/%q, want current secrets", got.Translate.APIKey, got.Apprise.Key)
+	}
+}
+
 func TestProcessDoesNotCreateDummySubtitleForProductionLightJob(t *testing.T) {
 	root := t.TempDir()
 	cfgMgr := newTestConfigManager(t, root, "")
 	defer cfgMgr.Stop()
 	folders := config.FoldersConfig{
-		Staging:   filepath.Join(root, "staging"),
-		Process:   filepath.Join(root, "processing"),
-		Scraping:  filepath.Join(root, "scraping"),
-		Subtitles: filepath.Join(root, "subtitles"),
-		Failed:    filepath.Join(root, "failed"),
+		Staging:        filepath.Join(root, "staging"),
+		Process:        filepath.Join(root, "processing"),
+		Scraping:       filepath.Join(root, "scraping"),
+		Subtitles:      filepath.Join(root, "subtitles"),
+		Transcriptions: filepath.Join(root, "transcriptions"),
+		Failed:         filepath.Join(root, "failed"),
 	}
 	source := filepath.Join(root, "input", "SSNI-083-C.mp4")
 	mustWriteTestFile(t, source, "video")
@@ -516,7 +622,7 @@ func TestNotificationsIncludeJobID(t *testing.T) {
 	ctx := logger.WithAttempt(logger.WithJob(context.Background(), job.ID), 1)
 
 	svc.notifySuccess(ctx, job, map[string]time.Duration{})
-	svc.notifyError(ctx, job, "transcription", errors.New("boom"))
+	svc.NotifyFailure(ctx, job, queue.StageTranscribing, errors.New("boom"))
 
 	for range 2 {
 		body := <-bodies
@@ -548,11 +654,12 @@ func newProcessFixture(t *testing.T, fileName string) (*Service, *config.Manager
 	cfgMgr := newTestConfigManager(t, root, "")
 	t.Cleanup(cfgMgr.Stop)
 	folders := config.FoldersConfig{
-		Staging:   filepath.Join(root, "staging"),
-		Process:   filepath.Join(root, "processing"),
-		Scraping:  filepath.Join(root, "scraping"),
-		Subtitles: filepath.Join(root, "subtitles"),
-		Failed:    filepath.Join(root, "failed"),
+		Staging:        filepath.Join(root, "staging"),
+		Process:        filepath.Join(root, "processing"),
+		Scraping:       filepath.Join(root, "scraping"),
+		Subtitles:      filepath.Join(root, "subtitles"),
+		Transcriptions: filepath.Join(root, "transcriptions"),
+		Failed:         filepath.Join(root, "failed"),
 	}
 	source := filepath.Join(root, "input", fileName)
 	mustWriteTestFile(t, source, "video")
