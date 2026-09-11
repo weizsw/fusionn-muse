@@ -1,80 +1,103 @@
+version: "2"
+
 run:
-  timeout: 5m
   modules-download-mode: readonly
+  go: "1.23"
 
 linters:
   enable:
-    - errcheck
-    - gosimple
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
-    - gofmt
-    - goimports
+    - errorlint
+    - gocritic
     - misspell
+    - nilerr
+    - revive
     - unconvert
     - unparam
-    - gocritic
-    - revive
-    - errorlint
-    - nilerr
 
-linters-settings:
-  gofmt:
-    simplify: true
+  settings:
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
 
-  goimports:
-    local-prefixes: github.com/fusionn-air
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - hugeParam # Too strict
+        - rangeValCopy # Allow value copies in range loops
+        - unnamedResult # Not enforcing named results
+        - ifElseChain # Allow if-else chains
+        - unnecessaryBlock # Allow grouped blocks (common in Gin routes)
+        - octalLiteral # Allow old-style octal
 
-  misspell:
-    locale: US
+    govet:
+      disable:
+        - inline # Go 1.27 stdlib aliases cannot be replaced while supporting Go 1.23.
 
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-    disabled-checks:
-      - hugeParam # Too strict
-      - rangeValCopy # Allow value copies in range loops
-      - unnamedResult # Not enforcing named results
-      - ifElseChain # Allow if-else chains
-      - unnecessaryBlock # Allow grouped blocks (common in Gin routes)
-      - octalLiteral # Allow old-style octal
+    misspell:
+      locale: US
 
-  revive:
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: increment-decrement
+        - name: var-naming
+        - name: package-comments
+          disabled: true
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: blank-imports
-      - name: context-as-argument
-      - name: context-keys-type
-      - name: dot-imports
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
-      - name: exported
-      - name: increment-decrement
-      - name: var-naming
-      - name: package-comments
-        disabled: true
-      - name: range
-      - name: receiver-naming
-      - name: time-naming
-      - name: unexported-return
-      - name: indent-error-flow
-      - name: errorf
-
-  errorlint:
-    errorf: true
-    asserts: true
-    comparison: true
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gocritic
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 
 issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gocritic
-
   max-issues-per-linter: 50
   max-same-issues: 10
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  settings:
+    gofmt:
+      simplify: true
+
+    goimports:
+      local-prefixes:
+        - github.com/fusionn-air
+
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

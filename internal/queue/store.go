@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // Register the SQLite driver.
 )
 
 const jobColumns = `id, media_id, content_signature, source_key, source_path, file_name, torrent_name, category,
@@ -137,7 +137,7 @@ CREATE INDEX IF NOT EXISTS attempts_pending_order ON attempts(status, id);
 	if err != nil {
 		return fmt.Errorf("begin state database migration: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	for _, statement := range []string{
 		`ALTER TABLE jobs ADD COLUMN content_signature TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE jobs ADD COLUMN source_key TEXT NOT NULL DEFAULT ''`,
@@ -170,7 +170,7 @@ func (s *store) interruptAbandoned() error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(`UPDATE attempts SET status=?, error=?, completed_at=? WHERE status=?`, AttemptInterrupted, "service stopped during processing", now, AttemptProcessing); err != nil {
 		return fmt.Errorf("interrupt attempts: %w", err)
 	}
@@ -213,7 +213,7 @@ func (s *store) insertJobWithStatus(job *Job, attemptStatus AttemptStatus) error
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if existing, getErr := queryJobByIdentity(tx, job.ContentSignature, job.SourceKey); getErr == nil {
 		return &ConflictError{JobID: existing.ID, Status: existing.Status}
 	} else if !errors.Is(getErr, ErrNotFound) {
@@ -270,7 +270,7 @@ func (s *store) completeAdmission(job *Job, staged bool) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	result, err := tx.Exec(`UPDATE attempts SET status=?, start_stage=?, current_stage=?, started_at=0 WHERE id=? AND status=?`,
 		AttemptPending, start, current, job.AttemptID, AttemptProcessing)
 	if err != nil {
@@ -310,7 +310,7 @@ func (s *store) claimNext(light bool, automaticReadyBefore time.Time) (*Job, err
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var attempt Attempt
 	var cache int
 	err = tx.QueryRow(`SELECT a.id, a.job_id, a.kind, a.retry_index, a.start_stage, a.translation_cache_enabled, a.settings_snapshot
@@ -342,7 +342,7 @@ func (s *store) claimAttempt(id int64) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var attempt Attempt
 	var cache int
 	err = tx.QueryRow(`SELECT id, job_id, kind, retry_index, start_stage, translation_cache_enabled, settings_snapshot
@@ -397,7 +397,7 @@ func (s *store) updateProgress(ctx context.Context, job *Job, stage Stage, check
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	result, err := tx.ExecContext(ctx, `UPDATE attempts SET current_stage=? WHERE id=? AND status=?`, stage, job.AttemptID, AttemptProcessing)
 	if err != nil {
 		return fmt.Errorf("persist progress: %w", err)
@@ -430,7 +430,7 @@ func (s *store) finish(job *Job, processErr error, maxAttempts int) (Stage, *Job
 	if err != nil {
 		return "", nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var current Stage
 	var kind AttemptKind
 	var attemptStatus AttemptStatus
@@ -529,7 +529,7 @@ func (s *store) createAction(jobID string, kind AttemptKind, settings, replaceme
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	job, err := queryJob(tx, jobID)
 	if err != nil {
 		return nil, err
@@ -597,17 +597,17 @@ func (s *store) createAction(jobID string, kind AttemptKind, settings, replaceme
 			return nil, err
 		}
 	case AttemptRetranslate:
-		if job.Status != StatusCompleted && !(job.Status == StatusFailed && job.Checkpoint == StageTranscribed) {
+		if job.Status != StatusCompleted && (job.Status != StatusFailed || job.Checkpoint != StageTranscribed) {
 			return nil, fmt.Errorf("%w: retranslation requires terminal job with transcription", ErrInvalidAction)
 		}
 		if job.SubtitlePath == "" {
 			return nil, fmt.Errorf("%w: persisted transcription is missing", ErrInvalidAction)
 		}
-		if file, err := os.Open(job.SubtitlePath); err != nil {
-			return nil, fmt.Errorf("%w: persisted transcription is unreadable: %v", ErrInvalidAction, err)
-		} else {
-			file.Close()
+		file, err := os.Open(job.SubtitlePath)
+		if err != nil {
+			return nil, fmt.Errorf("%w: persisted transcription is unreadable: %w", ErrInvalidAction, err)
 		}
+		file.Close()
 		start = StageTranslating
 		cache = false
 	default:

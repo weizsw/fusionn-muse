@@ -200,7 +200,7 @@ func (q *Queue) Accept(job *Job) error {
 
 func (q *Queue) failAdmission(job *Job, admissionErr error) error {
 	if _, _, err := q.store.finish(job, admissionErr, 0); err != nil {
-		return fmt.Errorf("%v; persist admission failure: %w", admissionErr, err)
+		return fmt.Errorf("%w; persist admission failure: %w", admissionErr, err)
 	}
 	return admissionErr
 }
