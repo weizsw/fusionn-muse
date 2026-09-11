@@ -60,11 +60,11 @@ type Service struct {
 	runner  mediaintake.CommandRunner
 }
 
-func New(queue accepter, folders config.FoldersConfig, runner mediaintake.CommandRunner) *Service {
+func New(q accepter, folders config.FoldersConfig, runner mediaintake.CommandRunner) *Service {
 	if runner == nil {
 		runner = mediaintake.ExecCommandRunner{}
 	}
-	return &Service{queue: queue, folders: folders, runner: runner}
+	return &Service{queue: q, folders: folders, runner: runner}
 }
 
 // Requeue manually returns one or all managed media files to processing.

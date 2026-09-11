@@ -65,6 +65,18 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Completion Gate
+
+**Repository changes are complete only after lint and tests pass.**
+
+Before reporting any repository change as complete:
+
+1. Run `make lint`.
+2. Run `make test`.
+3. Report both commands and their outcomes in the final response.
+
+If either command fails or cannot run, report the failure or blocker and keep the work incomplete.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

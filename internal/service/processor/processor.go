@@ -178,7 +178,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		log.Infof("📥 Step 1: Staging file...")
 		t := startStep(ctx, "Staging")
 		if err := hardlinkOrCopyOnce(ctx, job.SourcePath, stagingPath); err != nil {
-			return s.handleError(ctx, job, "staging", err)
+			return s.handleError(ctx, "staging", err)
 		}
 		job.StagingPath = stagingPath
 		durations["staging"] = t.done()
@@ -207,7 +207,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		t := startStep(ctx, "Move to processing")
 		preserveStaging, err = moveToProcessing(ctx, job, stagingPath, processingPath)
 		if err != nil {
-			return s.handleError(ctx, job, "move to processing", err)
+			return s.handleError(ctx, "move to processing", err)
 		}
 		job.ProcessingPath = processingPath
 		if !preserveStaging {
@@ -239,7 +239,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 					resolveErr = errors.Join(resolveErr, moveErr)
 				}
 			}
-			return s.handleError(ctx, job, string(start), resolveErr)
+			return s.handleError(ctx, string(start), resolveErr)
 		}
 
 		if stageDue(start, queue.StageTranscribing) {
@@ -255,16 +255,16 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 					if moveErr := s.moveToFailed(ctx, job, processingPath); moveErr != nil {
 						transcribeErr = errors.Join(transcribeErr, moveErr)
 					}
-					return s.handleError(ctx, job, "transcription", transcribeErr)
+					return s.handleError(ctx, "transcription", transcribeErr)
 				}
 				if err := atomicCopy(ctx, generated, job.SubtitlePath); err != nil {
-					return s.handleError(ctx, job, "persist transcription", err)
+					return s.handleError(ctx, "persist transcription", err)
 				}
 				if !samePath(generated, job.SubtitlePath) {
 					_ = fileops.Remove(generated) //nolint:errcheck // Best-effort cleanup after durable copy.
 				}
 			} else if statErr != nil {
-				return s.handleError(ctx, job, "read persisted transcription", statErr)
+				return s.handleError(ctx, "read persisted transcription", statErr)
 			}
 			job.TranscriptionSource = provider
 			durations["transcription"] = t.done()
@@ -278,18 +278,18 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 				return err
 			}
 			if job.SubtitlePath == "" {
-				return s.handleError(ctx, job, "read persisted transcription", fmt.Errorf("persisted transcription is missing"))
+				return s.handleError(ctx, "read persisted transcription", fmt.Errorf("persisted transcription is missing"))
 			}
-			if file, statErr := os.Open(job.SubtitlePath); statErr != nil {
-				return s.handleError(ctx, job, "read persisted transcription", statErr)
-			} else {
-				file.Close()
+			file, statErr := os.Open(job.SubtitlePath)
+			if statErr != nil {
+				return s.handleError(ctx, "read persisted transcription", statErr)
 			}
+			file.Close()
 			log.Infof("🌐 Step 4: Translating subtitle → %s...", cfg.Translate.TargetLang)
 			t := startStep(ctx, "Translation")
 			job.TranslatedPath, err = translator.Translate(ctx, job.SubtitlePath)
 			if err != nil {
-				return s.handleError(ctx, job, "translation", err)
+				return s.handleError(ctx, "translation", err)
 			}
 			durations["translation"] = t.done()
 			if err := job.SaveCheckpoint(ctx, queue.StageTranslated); err != nil {
@@ -307,13 +307,13 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 				baseName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName))
 				dummy := filepath.Join(filepath.Dir(processingPath), baseName+".srt")
 				if err := mediaintake.WriteDummySubtitle(dummy); err != nil {
-					return s.handleError(ctx, job, "create dummy subtitle", err)
+					return s.handleError(ctx, "create dummy subtitle", err)
 				}
 				_ = fileops.Remove(dummy) //nolint:errcheck // Best-effort dry-run cleanup.
 			} else if job.SubtitleDetectionReason == mediaintake.SubtitleDetectionSidecar && job.SidecarSubtitlePath != "" {
 				final := filepath.Join(s.folders.Subtitles, subtitleOutputName(job.FileName, filepath.Ext(job.SidecarSubtitlePath), cfg.Subtitle.LanguageSuffix))
 				if err := atomicCopy(ctx, job.SidecarSubtitlePath, final); err != nil {
-					return s.handleError(ctx, job, "copy sidecar subtitle", err)
+					return s.handleError(ctx, "copy sidecar subtitle", err)
 				}
 				job.TranslatedPath = final
 			}
@@ -321,7 +321,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 			final := filepath.Join(s.folders.Subtitles, subtitleOutputName(job.FileName, ".srt", cfg.Subtitle.LanguageSuffix))
 			if !samePath(job.TranslatedPath, final) {
 				if err := publishAtomically(ctx, job.TranslatedPath, final, job.AttemptID); err != nil {
-					return s.handleError(ctx, job, "publish translated subtitle", err)
+					return s.handleError(ctx, "publish translated subtitle", err)
 				}
 				if !samePath(job.TranslatedPath, job.SubtitlePath) {
 					_ = fileops.Remove(job.TranslatedPath) //nolint:errcheck // Best-effort cleanup after publish.
@@ -333,12 +333,12 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		scrapingPath := filepath.Join(s.folders.Scraping, job.FileName)
 		if !retranslation || !samePath(processingPath, scrapingPath) {
 			if err := os.MkdirAll(s.folders.Scraping, 0755); err != nil {
-				return s.handleError(ctx, job, "prepare scraping folder", err)
+				return s.handleError(ctx, "prepare scraping folder", err)
 			}
 			log.Infof("📦 Step 6: Moving video to scraping...")
 			t := startStep(ctx, "Move to scraping")
 			if err := moveOnce(ctx, processingPath, scrapingPath); err != nil {
-				return s.handleError(ctx, job, "move video to scraping", err)
+				return s.handleError(ctx, "move video to scraping", err)
 			}
 			job.ProcessingPath = scrapingPath
 			if preserveStaging {
@@ -554,7 +554,7 @@ func (s *Service) moveToFailed(ctx context.Context, job *queue.Job, currentPath 
 	return nil
 }
 
-func (s *Service) handleError(ctx context.Context, job *queue.Job, step string, err error) error {
+func (s *Service) handleError(ctx context.Context, step string, err error) error {
 	fullErr := fmt.Errorf("%s failed: %w", step, err)
 	logger.FromContext(ctx).Errorf("❌ %v", fullErr)
 	return fullErr
