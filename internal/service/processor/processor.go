@@ -138,19 +138,40 @@ func (s *Service) SnapshotSettings() (string, error) {
 
 // Process implements queue.Processor interface.
 func (s *Service) Process(ctx context.Context, job *queue.Job) error {
+	_, err := s.process(ctx, job, false)
+	return err
+}
+
+// ProcessStage runs one durable pipeline stage and returns the next runnable stage.
+func (s *Service) ProcessStage(ctx context.Context, job *queue.Job) (queue.Stage, error) {
+	return s.process(ctx, job, true)
+}
+
+// HandleTerminalFailure moves unfinished heavy media out of processing after retries are exhausted.
+func (s *Service) HandleTerminalFailure(ctx context.Context, job *queue.Job, stage queue.Stage, _ error) error {
+	if job.AttemptKind == queue.AttemptRetranslate && job.Status == queue.StatusCompleted {
+		return nil
+	}
+	if stage != queue.StageTranscribing && stage != queue.StageTranslating {
+		return nil
+	}
+	return s.moveToFailed(ctx, job, job.ProcessingPath)
+}
+
+func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool) (queue.Stage, error) {
 	totalStart := time.Now()
 	log := logger.FromContext(ctx)
 	cfg, err := configForAttempt(*s.cfgMgr.Get(), job.SettingsSnapshot)
 	if err != nil {
-		return err
+		return "", err
 	}
 	provider := pipelineProvider(cfg)
 	settings, err := snapshotSettings(cfg)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := job.SaveSettings(ctx, settings); err != nil {
-		return err
+		return "", err
 	}
 
 	log.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -159,11 +180,14 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 
 	durations := make(map[string]time.Duration)
 	start := job.StartStage
+	if singleStage && job.AttemptStage != "" {
+		start = job.AttemptStage
+	}
 	if start == "" {
 		start = queue.StagePreparing
 	}
 	if start == queue.StageDelivered {
-		return nil
+		return queue.StageDelivered, nil
 	}
 	retranslation := job.AttemptKind == queue.AttemptRetranslate
 	stagingPath := job.StagingPath
@@ -172,25 +196,28 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 
 	if stageDue(start, queue.StagePreparing) {
 		if err := job.BeginStage(ctx, queue.StagePreparing); err != nil {
-			return err
+			return "", err
 		}
 		stagingPath = filepath.Join(s.folders.Staging, job.FileName)
 		log.Infof("📥 Step 1: Staging file...")
 		t := startStep(ctx, "Staging")
 		if err := hardlinkOrCopyOnce(ctx, job.SourcePath, stagingPath); err != nil {
-			return s.handleError(ctx, "staging", err)
+			return "", s.handleError(ctx, "staging", err)
 		}
 		job.StagingPath = stagingPath
 		durations["staging"] = t.done()
 		if err := job.SaveCheckpoint(ctx, queue.StagePrepared); err != nil {
-			return err
+			return "", err
+		}
+		if singleStage {
+			return queue.StageMoving, nil
 		}
 	}
 
 	hasChineseSub := job.IsLight
 	if stageDue(start, queue.StageMoving) {
 		if err := job.BeginStage(ctx, queue.StageMoving); err != nil {
-			return err
+			return "", err
 		}
 		originalName := job.FileName
 		if !hasChineseSub && mediaintake.HasChineseSubtitle(originalName) {
@@ -207,7 +234,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		t := startStep(ctx, "Move to processing")
 		preserveStaging, err = moveToProcessing(ctx, job, stagingPath, processingPath)
 		if err != nil {
-			return s.handleError(ctx, "move to processing", err)
+			return "", s.handleError(ctx, "move to processing", err)
 		}
 		job.ProcessingPath = processingPath
 		if !preserveStaging {
@@ -226,7 +253,13 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 			}
 		}
 		if err := job.SaveCheckpoint(ctx, queue.StageMoved); err != nil {
-			return err
+			return "", err
+		}
+		if singleStage {
+			if cfg.DryRun || hasChineseSub {
+				return queue.StageDelivering, nil
+			}
+			return queue.StageTranscribing, nil
 		}
 	}
 
@@ -234,17 +267,12 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 	if !skipSubtitle && (stageDue(start, queue.StageTranscribing) || stageDue(start, queue.StageTranslating)) {
 		transcriber, translator, resolveErr := s.resolveExecutors(cfg)
 		if resolveErr != nil {
-			if stageDue(start, queue.StageTranscribing) {
-				if moveErr := s.moveToFailed(ctx, job, processingPath); moveErr != nil {
-					resolveErr = errors.Join(resolveErr, moveErr)
-				}
-			}
-			return s.handleError(ctx, string(start), resolveErr)
+			return "", s.handleError(ctx, string(start), resolveErr)
 		}
 
 		if stageDue(start, queue.StageTranscribing) {
 			if err := job.BeginStage(ctx, queue.StageTranscribing); err != nil {
-				return err
+				return "", err
 			}
 			log.Infof("🎤 Step 3: Transcribing with %s...", provider)
 			t := startStep(ctx, "Transcription")
@@ -252,68 +280,71 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 			if _, statErr := os.Stat(job.SubtitlePath); errors.Is(statErr, os.ErrNotExist) {
 				generated, transcribeErr := transcriber.Transcribe(ctx, processingPath)
 				if transcribeErr != nil {
-					if moveErr := s.moveToFailed(ctx, job, processingPath); moveErr != nil {
-						transcribeErr = errors.Join(transcribeErr, moveErr)
-					}
-					return s.handleError(ctx, "transcription", transcribeErr)
+					return "", s.handleError(ctx, "transcription", transcribeErr)
 				}
 				if err := atomicCopy(ctx, generated, job.SubtitlePath); err != nil {
-					return s.handleError(ctx, "persist transcription", err)
+					return "", s.handleError(ctx, "persist transcription", err)
 				}
 				if !samePath(generated, job.SubtitlePath) {
 					_ = fileops.Remove(generated) //nolint:errcheck // Best-effort cleanup after durable copy.
 				}
 			} else if statErr != nil {
-				return s.handleError(ctx, "read persisted transcription", statErr)
+				return "", s.handleError(ctx, "read persisted transcription", statErr)
 			}
 			job.TranscriptionSource = provider
 			durations["transcription"] = t.done()
 			if err := job.SaveCheckpoint(ctx, queue.StageTranscribed); err != nil {
-				return err
+				return "", err
+			}
+			if singleStage {
+				return queue.StageTranslating, nil
 			}
 		}
 
 		if stageDue(start, queue.StageTranslating) {
 			if err := job.BeginStage(ctx, queue.StageTranslating); err != nil {
-				return err
+				return "", err
 			}
 			if job.SubtitlePath == "" {
-				return s.handleError(ctx, "read persisted transcription", fmt.Errorf("persisted transcription is missing"))
+				return "", s.handleError(ctx, "read persisted transcription", fmt.Errorf("persisted transcription is missing"))
 			}
 			file, statErr := os.Open(job.SubtitlePath)
 			if statErr != nil {
-				return s.handleError(ctx, "read persisted transcription", statErr)
+				return "", s.handleError(ctx, "read persisted transcription", statErr)
 			}
 			file.Close()
 			log.Infof("🌐 Step 4: Translating subtitle → %s...", cfg.Translate.TargetLang)
 			t := startStep(ctx, "Translation")
 			job.TranslatedPath, err = translator.Translate(ctx, job.SubtitlePath)
 			if err != nil {
-				return s.handleError(ctx, "translation", err)
+				return "", s.handleError(ctx, "translation", err)
 			}
 			durations["translation"] = t.done()
 			if err := job.SaveCheckpoint(ctx, queue.StageTranslated); err != nil {
-				return err
+				return "", err
+			}
+			if singleStage {
+				return queue.StageDelivering, nil
 			}
 		}
 	}
 
 	if stageDue(start, queue.StageDelivering) {
 		if err := job.BeginStage(ctx, queue.StageDelivering); err != nil {
-			return err
+			return "", err
 		}
 		if skipSubtitle {
 			if cfg.DryRun {
 				baseName := strings.TrimSuffix(job.FileName, filepath.Ext(job.FileName))
 				dummy := filepath.Join(filepath.Dir(processingPath), baseName+".srt")
 				if err := mediaintake.WriteDummySubtitle(dummy); err != nil {
-					return s.handleError(ctx, "create dummy subtitle", err)
+					return "", s.handleError(ctx, "create dummy subtitle", err)
 				}
 				_ = fileops.Remove(dummy) //nolint:errcheck // Best-effort dry-run cleanup.
 			} else if job.SubtitleDetectionReason == mediaintake.SubtitleDetectionSidecar && job.SidecarSubtitlePath != "" {
 				final := filepath.Join(s.folders.Subtitles, subtitleOutputName(job.FileName, filepath.Ext(job.SidecarSubtitlePath), cfg.Subtitle.LanguageSuffix))
 				if err := atomicCopy(ctx, job.SidecarSubtitlePath, final); err != nil {
-					return s.handleError(ctx, "copy sidecar subtitle", err)
+					return "", s.handleError(ctx, "copy sidecar subtitle", err)
 				}
 				job.TranslatedPath = final
 			}
@@ -321,7 +352,7 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 			final := filepath.Join(s.folders.Subtitles, subtitleOutputName(job.FileName, ".srt", cfg.Subtitle.LanguageSuffix))
 			if !samePath(job.TranslatedPath, final) {
 				if err := publishAtomically(ctx, job.TranslatedPath, final, job.AttemptID); err != nil {
-					return s.handleError(ctx, "publish translated subtitle", err)
+					return "", s.handleError(ctx, "publish translated subtitle", err)
 				}
 				if !samePath(job.TranslatedPath, job.SubtitlePath) {
 					_ = fileops.Remove(job.TranslatedPath) //nolint:errcheck // Best-effort cleanup after publish.
@@ -333,12 +364,12 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 		scrapingPath := filepath.Join(s.folders.Scraping, job.FileName)
 		if !retranslation || !samePath(processingPath, scrapingPath) {
 			if err := os.MkdirAll(s.folders.Scraping, 0755); err != nil {
-				return s.handleError(ctx, "prepare scraping folder", err)
+				return "", s.handleError(ctx, "prepare scraping folder", err)
 			}
 			log.Infof("📦 Step 6: Moving video to scraping...")
 			t := startStep(ctx, "Move to scraping")
 			if err := moveOnce(ctx, processingPath, scrapingPath); err != nil {
-				return s.handleError(ctx, "move video to scraping", err)
+				return "", s.handleError(ctx, "move video to scraping", err)
 			}
 			job.ProcessingPath = scrapingPath
 			if preserveStaging {
@@ -350,13 +381,13 @@ func (s *Service) Process(ctx context.Context, job *queue.Job) error {
 			durations["move_to_scraping"] = t.done()
 		}
 		if err := job.SaveCheckpoint(ctx, queue.StageDelivered); err != nil {
-			return err
+			return "", err
 		}
 	}
 
 	s.notifySuccess(ctx, job, durations)
 	log.Infof("✅ Job completed: %s (%s)", job.FileName, formatDuration(time.Since(totalStart)))
-	return nil
+	return queue.StageDelivered, nil
 }
 
 func stageDue(start, stage queue.Stage) bool {

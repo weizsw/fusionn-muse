@@ -40,8 +40,24 @@ type Processor interface {
 	Process(ctx context.Context, job *Job) error
 }
 
+type stageProcessor interface {
+	ProcessStage(context.Context, *Job) (Stage, error)
+}
+
+type workerLane uint8
+
+const (
+	laneOrchestration workerLane = iota
+	laneTranscription
+	laneTranslation
+)
+
 type failureNotifier interface {
 	NotifyFailure(context.Context, *Job, Stage, error)
+}
+
+type terminalFailureHandler interface {
+	HandleTerminalFailure(context.Context, *Job, Stage, error) error
 }
 
 type settingsSnapshotter interface {
@@ -106,6 +122,15 @@ func (q *Queue) Start() {
 		return
 	}
 	q.state = queueRunning
+	if _, ok := q.processor.(stageProcessor); ok {
+		q.wg.Add(3)
+		q.mu.Unlock()
+		go q.stagedWorker(laneOrchestration)
+		go q.stagedWorker(laneTranscription)
+		go q.stagedWorker(laneTranslation)
+		logger.Info("📥 Job queue started (durable orchestration/transcription/translation processing)")
+		return
+	}
 	q.wg.Add(2)
 	q.mu.Unlock()
 	go q.worker(false)
@@ -449,6 +474,109 @@ func (q *Queue) launchLight(job *Job) {
 	}()
 }
 
+func (q *Queue) stagedWorker(lane workerLane) {
+	defer q.wg.Done()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		q.mu.RLock()
+		if q.state != queueRunning {
+			q.mu.RUnlock()
+			return
+		}
+		job, err := q.store.claimNextStage(lane, time.Now().Add(-q.retryDelay))
+		q.mu.RUnlock()
+		if err != nil {
+			logger.Errorf("claim queued stage: %v", err)
+		} else if job != nil {
+			if lane == laneOrchestration {
+				q.launchStaged(job)
+			} else {
+				q.processStagedAttempt(job)
+			}
+			continue
+		}
+		select {
+		case <-q.ctx.Done():
+			return
+		case <-q.jobsChan:
+		case <-ticker.C:
+		}
+	}
+}
+
+func (q *Queue) launchStaged(job *Job) {
+	q.mu.Lock()
+	q.wg.Add(1)
+	q.mu.Unlock()
+	go func() {
+		defer q.wg.Done()
+		q.processStagedAttempt(job)
+	}()
+}
+
+func (q *Queue) processStagedAttempt(job *Job) {
+	processor := q.processor.(stageProcessor)
+	job.progress = q.store.updateProgress
+	job.settings = q.store.saveSettings
+	ctx := logger.WithAttempt(logger.WithJob(q.ctx, job.ID), job.Retries+1)
+	log := logger.FromContext(ctx)
+	log.Infof("🔄 Processing %s stage: %s", job.AttemptStage, job.FileName)
+
+	lifecycle := *job
+	nextStage, processErr := processor.ProcessStage(ctx, job)
+	if processErr == nil && nextStage == "" {
+		processErr = errors.New("stage processor returned no next stage")
+	}
+	if processErr != nil && q.ctx.Err() != nil {
+		processErr = q.ctx.Err()
+	}
+	restoreLifecycle(job, lifecycle)
+
+	if processErr == nil && nextStage != StageDelivered {
+		if err := q.store.handoff(job, nextStage); err != nil {
+			log.Errorf("persist stage handoff: %v", err)
+			return
+		}
+		q.wake(job)
+		return
+	}
+
+	failureStage, retry, persistErr := q.finishAttempt(ctx, job, processErr)
+	if persistErr != nil {
+		log.Errorf("persist attempt result: %v", persistErr)
+		return
+	}
+	if processErr == nil {
+		log.Info("✅ Job completed")
+		return
+	}
+	if errors.Is(processErr, context.Canceled) {
+		return
+	}
+	if retry != nil {
+		log.Warnf("⚠️ Translation failed; retry queued after %s: %v", q.retryDelay, processErr)
+		q.wake(retry)
+		return
+	}
+	log.Errorf("❌ Job failed at %s after %d attempt(s): %v", failureStage, job.Retries+1, processErr)
+	q.notifyFailure(ctx, job, failureStage, processErr)
+}
+
+func restoreLifecycle(job *Job, lifecycle Job) {
+	job.ID = lifecycle.ID
+	job.MediaID = lifecycle.MediaID
+	job.Status = lifecycle.Status
+	job.Retries = lifecycle.Retries
+	job.CreatedAt = lifecycle.CreatedAt
+	job.StartedAt = lifecycle.StartedAt
+	job.CompletedAt = lifecycle.CompletedAt
+	job.AttemptID = lifecycle.AttemptID
+	job.AttemptKind = lifecycle.AttemptKind
+	job.StartStage = lifecycle.StartStage
+	job.TranslationCacheEnabled = lifecycle.TranslationCacheEnabled
+}
+
 func (q *Queue) processAttempt(job *Job) {
 	for {
 		job.progress = q.store.updateProgress
@@ -462,19 +590,9 @@ func (q *Queue) processAttempt(job *Job) {
 		if processErr != nil && q.ctx.Err() != nil {
 			processErr = q.ctx.Err()
 		}
-		job.ID = lifecycle.ID
-		job.MediaID = lifecycle.MediaID
-		job.Status = lifecycle.Status
-		job.Retries = lifecycle.Retries
-		job.CreatedAt = lifecycle.CreatedAt
-		job.StartedAt = lifecycle.StartedAt
-		job.CompletedAt = lifecycle.CompletedAt
-		job.AttemptID = lifecycle.AttemptID
-		job.AttemptKind = lifecycle.AttemptKind
-		job.StartStage = lifecycle.StartStage
-		job.TranslationCacheEnabled = lifecycle.TranslationCacheEnabled
+		restoreLifecycle(job, lifecycle)
 
-		failureStage, next, persistErr := q.store.finish(job, processErr, q.maxRetries)
+		failureStage, next, persistErr := q.finishAttempt(ctx, job, processErr)
 		if persistErr != nil {
 			log.Errorf("persist attempt result: %v", persistErr)
 			return
@@ -526,4 +644,22 @@ func (q *Queue) notifyFailure(ctx context.Context, job *Job, stage Stage, err er
 	if notifier, ok := q.processor.(failureNotifier); ok {
 		notifier.NotifyFailure(ctx, job, stage, err)
 	}
+}
+
+func (q *Queue) finishAttempt(ctx context.Context, job *Job, processErr error) (Stage, *Job, error) {
+	stage := job.AttemptStage
+	if processErr != nil && !errors.Is(processErr, context.Canceled) &&
+		!canAutomaticallyRetry(job, stage, processErr, q.maxRetries) {
+		if handler, ok := q.processor.(terminalFailureHandler); ok {
+			if err := handler.HandleTerminalFailure(ctx, job, stage, processErr); err != nil {
+				processErr = errors.Join(processErr, fmt.Errorf("handle terminal failure: %w", err))
+			}
+		}
+	}
+	return q.store.finish(job, processErr, q.maxRetries)
+}
+
+func canAutomaticallyRetry(job *Job, stage Stage, processErr error, maxAttempts int) bool {
+	return processErr != nil && !errors.Is(processErr, context.Canceled) &&
+		stage == StageTranslating && !job.IsLight && job.Retries+1 < maxAttempts
 }

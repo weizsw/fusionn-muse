@@ -263,7 +263,7 @@ func (s *store) insertJobWithStatus(job *Job, attemptStatus AttemptStatus) error
 func (s *store) completeAdmission(job *Job, staged bool) error {
 	start, current, checkpoint := StagePreparing, Stage(""), Stage("")
 	if staged {
-		start, current, checkpoint = StageMoving, StagePrepared, StagePrepared
+		start, checkpoint = StageMoving, StagePrepared
 	}
 	now := time.Now()
 	tx, err := s.db.Begin()
@@ -337,6 +337,58 @@ func (s *store) claimNext(light bool, automaticReadyBefore time.Time) (*Job, err
 	return job, nil
 }
 
+func (s *store) claimNextStage(lane workerLane, automaticReadyBefore time.Time) (*Job, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const effectiveStage = `CASE WHEN a.current_stage='' THEN a.start_stage ELSE a.current_stage END`
+	predicate := ""
+	args := []any{AttemptPending, AttemptAutomatic, AttemptRetranslate, automaticReadyBefore.UnixNano()}
+	switch lane {
+	case laneOrchestration:
+		predicate = `AND (j.is_light=1 OR ` + effectiveStage + ` IN (?,?,?))`
+		args = append(args, StagePreparing, StageMoving, StageDelivering)
+	case laneTranscription:
+		predicate = `AND j.is_light=0 AND ` + effectiveStage + `=?`
+		args = append(args, StageTranscribing)
+	case laneTranslation:
+		predicate = `AND j.is_light=0 AND ` + effectiveStage + `=?`
+		args = append(args, StageTranslating)
+	default:
+		return nil, fmt.Errorf("unknown worker lane %d", lane)
+	}
+
+	var attempt Attempt
+	var cache int
+	var startedAt int64
+	query := `SELECT a.id, a.job_id, a.kind, a.retry_index, a.start_stage, ` + effectiveStage + `,
+		a.translation_cache_enabled, a.settings_snapshot, a.started_at
+		FROM attempts a JOIN jobs j ON j.id=a.job_id
+		WHERE a.status=? AND (NOT (a.kind=? OR (a.kind=? AND a.retry_index>0)) OR a.created_at<=?) ` + predicate + `
+		ORDER BY a.id LIMIT 1`
+	err = tx.QueryRow(query, args...).Scan(&attempt.ID, &attempt.JobID, &attempt.Kind, &attempt.RetryIndex,
+		&attempt.StartStage, &attempt.CurrentStage, &cache, &attempt.SettingsSnapshot, &startedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select pending stage: %w", err)
+	}
+	attempt.TranslationCacheEnabled = cache != 0
+	attempt.StartedAt = fromUnixNano(startedAt)
+	job, err := startStagedAttemptTx(tx, attempt)
+	if err != nil || job == nil {
+		return job, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
 func (s *store) claimAttempt(id int64) (*Job, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -391,6 +443,35 @@ func startAttemptTx(tx *sql.Tx, attempt Attempt) (*Job, error) {
 	return job, nil
 }
 
+func startStagedAttemptTx(tx *sql.Tx, attempt Attempt) (*Job, error) {
+	now := time.Now()
+	result, err := tx.Exec(`UPDATE attempts SET status=?, current_stage=?,
+		started_at=CASE WHEN started_at=0 THEN ? ELSE started_at END WHERE id=? AND status=?`,
+		AttemptProcessing, attempt.CurrentStage, now.UnixNano(), attempt.ID, AttemptPending)
+	if err != nil {
+		return nil, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return nil, nil
+	}
+	if _, err := tx.Exec(`UPDATE jobs SET status=?, error='', failure_stage='',
+		started_at=CASE WHEN started_at=0 THEN ? ELSE started_at END, updated_at=?
+		WHERE id=? AND NOT(status=? AND ?=?)`, StatusProcessing, now.UnixNano(), now.UnixNano(),
+		attempt.JobID, StatusCompleted, attempt.Kind, AttemptRetranslate); err != nil {
+		return nil, err
+	}
+	job, err := queryJob(tx, attempt.JobID)
+	if err != nil {
+		return nil, err
+	}
+	attempt.Status = AttemptProcessing
+	if attempt.StartedAt.IsZero() {
+		attempt.StartedAt = now
+	}
+	setAttempt(job, attempt)
+	return job, nil
+}
+
 func (s *store) updateProgress(ctx context.Context, job *Job, stage Stage, checkpoint bool) error {
 	now := time.Now().UnixNano()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -415,6 +496,43 @@ func (s *store) updateProgress(ctx context.Context, job *Job, stage Stage, check
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *store) handoff(job *Job, next Stage) error {
+	now := time.Now()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var kind AttemptKind
+	if err := tx.QueryRow(`SELECT kind FROM attempts WHERE id=? AND status=?`, job.AttemptID, AttemptProcessing).Scan(&kind); err != nil {
+		return fmt.Errorf("handoff attempt %d: %w", job.AttemptID, err)
+	}
+	result, err := tx.Exec(`UPDATE attempts SET status=?, current_stage=? WHERE id=? AND status=?`,
+		AttemptPending, next, job.AttemptID, AttemptProcessing)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return fmt.Errorf("handoff attempt %d: no longer processing", job.AttemptID)
+	}
+	if kind != AttemptRetranslate || job.Status != StatusCompleted {
+		if _, err := tx.Exec(`UPDATE jobs SET status=?, error='', failure_stage='', updated_at=? WHERE id=?`,
+			StatusPending, now.UnixNano(), job.ID); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	job.AttemptStatus = AttemptPending
+	job.AttemptStage = next
+	if kind != AttemptRetranslate || job.Status != StatusCompleted {
+		job.Status = StatusPending
+	}
+	job.UpdatedAt = now
+	return nil
 }
 
 func (s *store) saveSettings(ctx context.Context, attemptID int64, snapshot string) error {
@@ -469,7 +587,7 @@ func (s *store) finish(job *Job, processErr error, maxAttempts int) (Stage, *Job
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return current, nil, fmt.Errorf("finish attempt %d: no longer processing", job.AttemptID)
 	}
-	if status == AttemptFailed && current == StageTranslating && !job.IsLight && job.Retries+1 < maxAttempts {
+	if status == AttemptFailed && canAutomaticallyRetry(job, current, processErr, maxAttempts) {
 		next, err := createAutomaticTx(tx, job, now)
 		if err != nil {
 			return current, nil, err

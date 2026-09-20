@@ -216,6 +216,24 @@ func (a rejectingAccepter) Accept(job *queue.Job) error {
 	return a.reject[job.FileName]
 }
 
+func (rejectingAccepter) FindJobByMedia(string, string) *queue.Job { return nil }
+func (rejectingAccepter) RetryFrom(string, string) error           { return nil }
+
+type failedRetryAccepter struct {
+	jobs      map[string]*queue.Job
+	retryErrs map[string]error
+}
+
+func (a *failedRetryAccepter) Accept(*queue.Job) error { return nil }
+
+func (a *failedRetryAccepter) FindJobByMedia(_ string, fileName string) *queue.Job {
+	return a.jobs[fileName]
+}
+
+func (a *failedRetryAccepter) RetryFrom(jobID, _ string) error {
+	return a.retryErrs[jobID]
+}
+
 func TestManualRequeueOneFailedValidatesThenSkipsOrphan(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -246,6 +264,75 @@ func TestManualRequeueOneFailedValidatesThenSkipsOrphan(t *testing.T) {
 				t.Fatalf("body = %s, want outcome %q", response.Body.String(), tt.outcome)
 			}
 		})
+	}
+}
+
+func TestManualRequeueOneFailedReturnsAcceptedExistingJob(t *testing.T) {
+	root := t.TempDir()
+	folders := config.FoldersConfig{Process: filepath.Join(root, "processing"), Failed: filepath.Join(root, "failed")}
+	fileName := "movie-C.mp4"
+	mustWriteSizedHandlerFile(t, filepath.Join(folders.Failed, fileName), 1)
+	accepter := &failedRetryAccepter{jobs: map[string]*queue.Job{
+		fileName: {ID: "existing", FileName: fileName, Status: queue.StatusFailed},
+	}}
+	h := &Handler{manual: manualrequeue.New(accepter, folders, nil), folders: folders}
+
+	response := manualRequeueOneFailed(t, h, fileName)
+	var body struct {
+		Outcome string `json:"outcome"`
+		File    string `json:"file"`
+		Job     string `json:"job"`
+		Staged  bool   `json:"staged"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusAccepted || body.Outcome != "accepted" || body.File != fileName || body.Job != "existing" || body.Staged {
+		t.Fatalf("status/body = %d %+v, want accepted existing Job", response.Code, body)
+	}
+}
+
+func TestManualRequeueFailedBulkReturnsPartialSuccess(t *testing.T) {
+	root := t.TempDir()
+	folders := config.FoldersConfig{Process: filepath.Join(root, "processing"), Failed: filepath.Join(root, "failed")}
+	mustWriteSizedHandlerFile(t, filepath.Join(folders.Failed, "a-conflict-C.mp4"), 1)
+	mustWriteSizedHandlerFile(t, filepath.Join(folders.Failed, "b-retry-C.mp4"), 1)
+	mustWriteSizedHandlerFile(t, filepath.Join(folders.Process, "a-conflict-C.mp4"), 1)
+	accepter := &failedRetryAccepter{jobs: map[string]*queue.Job{
+		"a-conflict-C.mp4": {ID: "job-a", FileName: "a-conflict-C.mp4", Status: queue.StatusFailed},
+		"b-retry-C.mp4":    {ID: "job-b", FileName: "b-retry-C.mp4", Status: queue.StatusFailed},
+	}}
+	h := &Handler{manual: manualrequeue.New(accepter, folders, nil), folders: folders}
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/retry/failed", nil)
+	h.RetryFailed(c)
+
+	var body struct {
+		Count    int      `json:"count"`
+		Jobs     []string `json:"jobs"`
+		Accepted []struct {
+			File   string `json:"file"`
+			Job    string `json:"job"`
+			Staged bool   `json:"staged"`
+		} `json:"accepted"`
+		Failed []struct {
+			File   string `json:"file"`
+			Error  string `json:"error"`
+			Staged bool   `json:"staged"`
+		} `json:"failed"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusMultiStatus || body.Count != 1 || len(body.Jobs) != 1 || body.Jobs[0] != "job-b" {
+		t.Fatalf("status/body = %d %+v, want partial success", response.Code, body)
+	}
+	if len(body.Accepted) != 1 || body.Accepted[0].File != "b-retry-C.mp4" || body.Accepted[0].Job != "job-b" || body.Accepted[0].Staged {
+		t.Fatalf("accepted = %+v, want retried failed media", body.Accepted)
+	}
+	if len(body.Failed) != 1 || body.Failed[0].File != "a-conflict-C.mp4" || body.Failed[0].Error == "" || body.Failed[0].Staged {
+		t.Fatalf("failed = %+v, want processing conflict", body.Failed)
 	}
 }
 

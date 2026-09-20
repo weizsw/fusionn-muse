@@ -166,10 +166,13 @@ func NewJob(id, sourcePath, fileName, torrentName, category string) *Job {
 
 // BeginStage records the stage that is about to run.
 func (j *Job) BeginStage(ctx context.Context, stage Stage) error {
-	if j.progress == nil {
-		return nil
+	if j.progress != nil {
+		if err := j.progress(ctx, j, stage, false); err != nil {
+			return err
+		}
 	}
-	return j.progress(ctx, j, stage, false)
+	j.AttemptStage = stage
+	return nil
 }
 
 // SaveCheckpoint persists the Job fields after a stage succeeds.
@@ -180,6 +183,7 @@ func (j *Job) SaveCheckpoint(ctx context.Context, checkpoint Stage) error {
 		}
 	}
 	j.Checkpoint = checkpoint
+	j.AttemptStage = checkpoint
 	return nil
 }
 

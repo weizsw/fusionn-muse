@@ -15,12 +15,7 @@ A readable Media item is identified primarily by a strong sampled-content signat
 
 Content signatures make copies and renamed files converge on one Job while allowing distinct files with the same cleaned filename to remain separate. If the file cannot be read, the normalized filename is used conservatively as the identity. Existing filename-only records migrate into fallback aliases. Database uniqueness constraints, not in-memory checks, arbitrate concurrent submissions.
 
-Every admission path uses the same reservation operation:
-
-- torrent completion webhook;
-- `/api/v1/retry/staging`;
-- existing failed-file compatibility routes; and
-- operator Job actions.
+New Job admission uses one reservation operation for the torrent completion webhook and `/api/v1/retry/staging`. Operator Job actions and failed-folder retry routes instead create later Attempts for an existing Job.
 
 A Duplicate submission is an idempotent success. It returns the existing Job ID and does not change queue position or create an Attempt. This remains true for completed, failed, interrupted, queued, and running Jobs. Reprocessing requires an explicit Job action.
 
@@ -51,11 +46,13 @@ Only one fusionn-muse service instance may run against this database. Cross-proc
 
 The pipeline records a checkpoint immediately after each stage succeeds. At minimum, recovery distinguishes preparation, move to processing, Transcription persistence, Translation publication, and video delivery. Recovery trusts a checkpoint plus the presence and readability of its required artifact; no content hash is required.
 
+A normal execution keeps the same durable Attempt while it hands work from preparation to Transcription, Translation, and delivery. The handoff persists the next current stage and returns the Attempt to pending state; it does not create another Attempt. A later Attempt is created only for an automatic Translation retry, Manual retry, Resume, or Retranslation.
+
 If a filesystem move succeeds but the process stops before its checkpoint commit, Resume reconciles known automation folders. It accepts recovery only when exactly one expected location proves the completed move. Missing or conflicting files fail explicitly.
 
 A Job that has Sufficient Chinese subtitle coverage completes without Transcription or Translation. An older sidecar subtitle alone does not qualify and is not reused as the persisted Transcription.
 
-A failure before Transcription persistence fails the Job immediately. A Transcription command that succeeds but cannot persist its artifact also fails the Job immediately.
+A failure before Transcription persistence fails the Job immediately. A Transcription command that succeeds but cannot persist its artifact also fails the Job immediately. A terminal Transcription failure or exhausted Translation failure moves unfinished media from `processing` to `failed`. An intermediate Translation failure leaves media in `processing` for the automatic retry. A failed Retranslation of an already completed Job leaves its delivered media untouched.
 
 ## Persisted Transcriptions
 
@@ -75,7 +72,7 @@ A completed Job may be Retranslated when its original video is gone. Media prese
 
 A Translation failure creates a new Attempt under the same Job and starts at Translation from the persisted Transcription. It never repeats Transcription.
 
-Allow three automatic retries after the first translation attempt, for at most four translation attempts. Wait 10 seconds between attempts. The heavy worker remains reserved for that Job during each delay so another long Transcription cannot overtake it.
+Allow three automatic retries after the first translation attempt, for at most four translation attempts. Wait 10 seconds between attempts. The retry wait is persisted outside the Translation lane; it does not reserve a worker, and another eligible Translation may run during the delay.
 
 Automatic Translation retries use the original accepted non-secret settings snapshot and the current credential. Successfully cached translation chunks from the failed Attempt may be reused. Every failed Attempt is logged and recorded, but send the error notification only after all retries are exhausted.
 
@@ -83,7 +80,7 @@ The same automatic retry policy applies when a manually requested Retranslation 
 
 ## Manual retry, Resume, and Retranslation
 
-A Manual retry applies to a terminally failed Job. It creates an Attempt at the first incomplete stage and uses the Job's original accepted settings. It may adopt the uniquely matching staged file when the recorded media path is unavailable.
+A Manual retry applies to a terminally failed Job. It creates an Attempt at the first incomplete stage and uses the Job's original accepted settings. It may adopt the uniquely matching staged file when the Job's recorded media path is missing. The failed-folder compatibility routes provide the same action after safely moving matched media directly from `failed` to `processing`.
 
 A Resume applies only to an Interrupted Job. It creates an Attempt at the first incomplete stage under the same Job ID.
 
@@ -103,7 +100,9 @@ On graceful shutdown, stop claiming work, cancel the running external command, m
 
 Remove the current hard-coded 100-heavy-job admission limit. SQLite may retain any number of queued Attempts.
 
-Heavy Attempts remain sequential. Pre-detected light Attempts preserve the current immediate concurrent behavior: they are persisted, claimed independently, and never wait behind heavy work.
+Use independent FIFO lanes for Transcription and Translation. At most one Transcription and one Translation run at a time, and those two operations may overlap. A stage-aware claim preserves FIFO order within each lane.
+
+Preparation, file movement, delivery, and pre-detected light work use concurrent orchestration outside both heavy lanes. They do not occupy a Transcription or Translation slot.
 
 ## HTTP API
 
@@ -119,7 +118,7 @@ Preserve `/api/v1/queue`, `/api/v1/queue/stats`, and `/api/v1/queue/:id` as comp
 
 A wrong action returns `409 Conflict` without performing another action implicitly. The response includes `code: "invalid_job_action"`, the Job ID, current status, `allowed_actions`, and the correct action URL.
 
-Preserve `/api/v1/retry/staging`, `/api/v1/retry/failed`, and `/api/v1/retry/failed/:name` as compatibility shims. They resolve persisted Jobs rather than creating duplicate work. Failed-file routes skip and report pre-SQLite orphan files rather than adopting them. Bulk routes continue after per-file errors and return accepted, skipped, and failed results for each file.
+Preserve `/api/v1/retry/staging`, `/api/v1/retry/failed`, and `/api/v1/retry/failed/:name` as compatibility shims. Staging admits only untracked media. Failed-file routes match a persisted failed Job, skip orphans and Jobs with an active or non-failed status, create the `processing/<job.FileName>` destination without replacement, remove the failed source, and call `RetryFrom` with the existing Job ID. If durable Attempt creation fails, restore the media to `failed`. A same-name unrelated processing file is never overwritten. Bulk routes continue after per-file errors and preserve accepted, skipped, and failed results plus partial-success status behavior.
 
 ## Rollout
 
