@@ -362,12 +362,12 @@ func (h *Handler) RetryStaging(c *gin.Context) {
 	h.writeBulkRequeue(c, manualrequeue.Staging, "no files in staging")
 }
 
-// RetryFailed reports failed-folder files without moving or implicitly retrying them.
+// RetryFailed retries all eligible failed-folder media and reports per-file outcomes.
 func (h *Handler) RetryFailed(c *gin.Context) {
 	h.writeBulkRequeue(c, manualrequeue.Failed, "no files in failed folder")
 }
 
-// RetryOneFailed reports one failed-folder file without moving or implicitly retrying it.
+// RetryOneFailed retries one eligible failed-folder media item.
 func (h *Handler) RetryOneFailed(c *gin.Context) {
 	fileName := c.Param("name")
 	result := h.manual.Requeue(c.Request.Context(), manualrequeue.Request{

@@ -353,6 +353,409 @@ func TestAcceptedHeavyJobsRunSequentially(t *testing.T) {
 	}
 }
 
+type stagedLaneProcessor struct {
+	started map[string]map[Stage]chan struct{}
+	release map[string]map[Stage]chan struct{}
+}
+
+func (p *stagedLaneProcessor) Process(context.Context, *Job) error {
+	return errors.New("legacy processor path called")
+}
+
+func (p *stagedLaneProcessor) ProcessStage(ctx context.Context, job *Job) (Stage, error) {
+	stage := job.AttemptStage
+	if err := job.BeginStage(ctx, stage); err != nil {
+		return "", err
+	}
+	if stages := p.started[job.ID]; stages != nil && stages[stage] != nil {
+		close(stages[stage])
+	}
+	if stages := p.release[job.ID]; stages != nil && stages[stage] != nil {
+		select {
+		case <-stages[stage]:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	switch stage {
+	case StageTranscribing:
+		if err := job.SaveCheckpoint(ctx, StageTranscribed); err != nil {
+			return "", err
+		}
+		return StageTranslating, nil
+	case StageTranslating:
+		if err := job.SaveCheckpoint(ctx, StageTranslated); err != nil {
+			return "", err
+		}
+		return StageDelivering, nil
+	case StageDelivering:
+		if err := job.SaveCheckpoint(ctx, StageDelivered); err != nil {
+			return "", err
+		}
+		return StageDelivered, nil
+	default:
+		return "", fmt.Errorf("unexpected stage %q", stage)
+	}
+}
+
+func TestStagedProcessorUsesIndependentFIFOLanesAndOneAttempt(t *testing.T) {
+	started := map[string]map[Stage]chan struct{}{}
+	release := map[string]map[Stage]chan struct{}{}
+	for _, id := range []string{"a", "b", "c"} {
+		started[id] = map[Stage]chan struct{}{
+			StageTranscribing: make(chan struct{}),
+			StageTranslating:  make(chan struct{}),
+		}
+		release[id] = map[Stage]chan struct{}{}
+	}
+	release["a"][StageTranslating] = make(chan struct{})
+	release["b"][StageTranscribing] = make(chan struct{})
+	release["b"][StageTranslating] = make(chan struct{})
+	release["c"][StageTranscribing] = make(chan struct{})
+	release["c"][StageTranslating] = make(chan struct{})
+
+	q := New(&stagedLaneProcessor{started: started, release: release}, 1, 0)
+	for _, id := range []string{"a", "b", "c"} {
+		job := NewJob(id, "/tmp/"+id+".mp4", id+".mp4", "", "")
+		if err := q.store.insertJob(job); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+		if _, err := q.store.db.Exec(`UPDATE attempts SET start_stage=?, current_stage='' WHERE job_id=?`, StageTranscribing, id); err != nil {
+			t.Fatalf("queue %s for transcription: %v", id, err)
+		}
+		if _, err := q.store.db.Exec(`UPDATE jobs SET checkpoint=? WHERE id=?`, StageMoved, id); err != nil {
+			t.Fatalf("checkpoint %s: %v", id, err)
+		}
+	}
+	q.Start()
+	defer q.Stop()
+
+	waitClosed(t, started["a"][StageTranscribing], "job a transcription")
+	waitClosed(t, started["a"][StageTranslating], "job a translation")
+	waitClosed(t, started["b"][StageTranscribing], "job b transcription while a translates")
+	assertOpen(t, started["c"][StageTranscribing], "job c transcription while b transcribes")
+	assertOpen(t, started["b"][StageTranslating], "job b translation while a translates")
+
+	close(release["b"][StageTranscribing])
+	waitClosed(t, started["c"][StageTranscribing], "job c transcription after b")
+	assertOpen(t, started["b"][StageTranslating], "job b translation while a still translates")
+
+	close(release["a"][StageTranslating])
+	waitClosed(t, started["b"][StageTranslating], "job b translation after a")
+	close(release["c"][StageTranscribing])
+	assertOpen(t, started["c"][StageTranslating], "job c translation while b translates")
+
+	close(release["b"][StageTranslating])
+	waitClosed(t, started["c"][StageTranslating], "job c translation after b")
+	close(release["c"][StageTranslating])
+
+	for _, id := range []string{"a", "b", "c"} {
+		waitForStatus(t, q, id, StatusCompleted)
+		detail := q.GetJobDetail(id)
+		if detail == nil || len(detail.Attempts) != 1 || detail.Attempts[0].Status != AttemptCompleted {
+			t.Fatalf("job %s detail = %#v, want one completed attempt", id, detail)
+		}
+	}
+}
+
+func waitClosed(t *testing.T, ch <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func assertOpen(t *testing.T, ch <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-ch:
+		t.Fatalf("unexpectedly started %s", description)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+type stageProcessorFunc func(context.Context, *Job) (Stage, error)
+
+func (f stageProcessorFunc) Process(context.Context, *Job) error {
+	return errors.New("legacy processor path called")
+}
+
+func (f stageProcessorFunc) ProcessStage(ctx context.Context, job *Job) (Stage, error) {
+	return f(ctx, job)
+}
+
+func TestStagedProcessorDoesNotHoldTranslationLaneDuringRetryDelay(t *testing.T) {
+	var aCalls int
+	processor := stageProcessorFunc(func(ctx context.Context, job *Job) (Stage, error) {
+		if err := job.BeginStage(ctx, job.AttemptStage); err != nil {
+			return "", err
+		}
+		switch job.AttemptStage {
+		case StageTranslating:
+			if job.ID == "a" {
+				aCalls++
+				return "", errors.New("translation unavailable")
+			}
+			if err := job.SaveCheckpoint(ctx, StageTranslated); err != nil {
+				return "", err
+			}
+			return StageDelivering, nil
+		case StageDelivering:
+			if err := job.SaveCheckpoint(ctx, StageDelivered); err != nil {
+				return "", err
+			}
+			return StageDelivered, nil
+		default:
+			return "", fmt.Errorf("unexpected stage %q", job.AttemptStage)
+		}
+	})
+	q := New(processor, 2, 60_000)
+	for _, id := range []string{"a", "b"} {
+		job := NewJob(id, "/tmp/"+id+".mp4", id+".mp4", "", "")
+		if err := q.store.insertJob(job); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+		if _, err := q.store.db.Exec(`UPDATE attempts SET start_stage=?, current_stage='' WHERE job_id=?`, StageTranslating, id); err != nil {
+			t.Fatalf("queue %s for translation: %v", id, err)
+		}
+		if _, err := q.store.db.Exec(`UPDATE jobs SET checkpoint=? WHERE id=?`, StageTranscribed, id); err != nil {
+			t.Fatalf("checkpoint %s: %v", id, err)
+		}
+	}
+	q.Start()
+	defer q.Stop()
+
+	waitForStatus(t, q, "b", StatusCompleted)
+	if aCalls != 1 {
+		t.Fatalf("job a translation calls = %d, want delayed retry to remain pending", aCalls)
+	}
+	detail := q.GetJobDetail("a")
+	if detail == nil || detail.Status != StatusPending || len(detail.Attempts) != 2 || detail.Attempts[1].Status != AttemptPending {
+		t.Fatalf("job a after first failure = %#v, want delayed pending retry", detail)
+	}
+}
+
+func TestStagedProcessorDoesNotDelayManualRetryWithPositiveRetryIndex(t *testing.T) {
+	started := make(chan struct{})
+	processor := stageProcessorFunc(func(ctx context.Context, job *Job) (Stage, error) {
+		if err := job.BeginStage(ctx, job.AttemptStage); err != nil {
+			return "", err
+		}
+		close(started)
+		return StageDelivered, nil
+	})
+	q := New(processor, 1, 60_000)
+	job := NewJob("manual", "/tmp/manual.mp4", "manual.mp4", "", "")
+	if err := q.store.insertJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.store.db.Exec(`UPDATE attempts SET kind=?, retry_index=?, start_stage=?, current_stage='' WHERE job_id=?`,
+		AttemptManual, 2, StageTranslating, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.store.db.Exec(`UPDATE jobs SET checkpoint=? WHERE id=?`, StageTranscribed, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	q.Start()
+	defer q.Stop()
+
+	waitClosed(t, started, "manual retry without automatic delay")
+}
+
+func TestStagedProcessorDelaysAutomaticRetranslationRetry(t *testing.T) {
+	started := make(chan struct{})
+	processor := stageProcessorFunc(func(ctx context.Context, job *Job) (Stage, error) {
+		close(started)
+		return StageDelivered, nil
+	})
+	q := New(processor, 1, 60_000)
+	job := NewJob("retranslate", "/tmp/retranslate.mp4", "retranslate.mp4", "", "")
+	if err := q.store.insertJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.store.db.Exec(`UPDATE attempts SET kind=?, retry_index=?, start_stage=?, current_stage='' WHERE job_id=?`,
+		AttemptRetranslate, 1, StageTranslating, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.store.db.Exec(`UPDATE jobs SET checkpoint=? WHERE id=?`, StageTranscribed, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	q.Start()
+	defer q.Stop()
+
+	select {
+	case <-started:
+		t.Fatal("automatic retranslation retry started before its delay elapsed")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestStagedProcessorClaimsPreparedAdmissionAtMoving(t *testing.T) {
+	firstStage := make(chan Stage, 1)
+	processor := stageProcessorFunc(func(ctx context.Context, job *Job) (Stage, error) {
+		select {
+		case firstStage <- job.AttemptStage:
+		default:
+		}
+		if err := job.BeginStage(ctx, job.AttemptStage); err != nil {
+			return "", err
+		}
+		switch job.AttemptStage {
+		case StageMoving:
+			if err := job.SaveCheckpoint(ctx, StageMoved); err != nil {
+				return "", err
+			}
+			return StageDelivering, nil
+		case StageDelivering:
+			if err := job.SaveCheckpoint(ctx, StageDelivered); err != nil {
+				return "", err
+			}
+			return StageDelivered, nil
+		default:
+			return "", fmt.Errorf("unexpected stage %q", job.AttemptStage)
+		}
+	})
+	q := New(processor, 1, 0)
+	q.Start()
+	defer q.Stop()
+
+	root := t.TempDir()
+	source := filepath.Join(root, "source.mp4")
+	staging := filepath.Join(root, "staging", "source.mp4")
+	if err := os.WriteFile(source, []byte("video"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	job := NewJob("job", source, "source.mp4", "", "")
+	job.StagingPath = staging
+	if err := q.Accept(job); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, q, job.ID, StatusCompleted)
+	select {
+	case stage := <-firstStage:
+		if stage != StageMoving {
+			t.Fatalf("first stage = %q, want %q", stage, StageMoving)
+		}
+	default:
+		t.Fatal("processor did not report a first stage")
+	}
+}
+
+type terminalFailureRecorder struct {
+	mu               sync.Mutex
+	translationCalls int
+	handled          chan Stage
+}
+
+func (p *terminalFailureRecorder) Process(context.Context, *Job) error {
+	return errors.New("legacy processor path called")
+}
+
+func (p *terminalFailureRecorder) ProcessStage(ctx context.Context, job *Job) (Stage, error) {
+	if err := job.BeginStage(ctx, job.AttemptStage); err != nil {
+		return "", err
+	}
+	if job.AttemptStage == StageTranslating {
+		p.mu.Lock()
+		p.translationCalls++
+		p.mu.Unlock()
+	}
+	return "", fmt.Errorf("%s failed", job.AttemptStage)
+}
+
+func (p *terminalFailureRecorder) HandleTerminalFailure(_ context.Context, job *Job, stage Stage, _ error) error {
+	job.ProcessingPath = "/failed/" + job.FileName
+	p.handled <- stage
+	return nil
+}
+
+func TestTranscriptionTerminalFailureRunsFailureHandler(t *testing.T) {
+	processor := &terminalFailureRecorder{handled: make(chan Stage, 1)}
+	q := New(processor, 3, 0)
+	job := NewJob("job", "/tmp/job.mp4", "job.mp4", "", "")
+	job.ProcessingPath = "/processing/job.mp4"
+	if err := q.store.insertJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.store.db.Exec(`UPDATE attempts SET start_stage=?, current_stage='' WHERE job_id=?`, StageTranscribing, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	q.Start()
+	defer q.Stop()
+
+	waitForStatus(t, q, job.ID, StatusFailed)
+	select {
+	case stage := <-processor.handled:
+		if stage != StageTranscribing {
+			t.Fatalf("handled stage = %q, want %q", stage, StageTranscribing)
+		}
+	default:
+		t.Fatal("terminal transcription failure was not handled")
+	}
+	if got := q.GetJob(job.ID).ProcessingPath; got != "/failed/job.mp4" {
+		t.Fatalf("processing path = %q, want terminal handler result", got)
+	}
+}
+
+func TestTranslationFailureHandlerRunsOnlyAfterRetriesExhausted(t *testing.T) {
+	processor := &terminalFailureRecorder{handled: make(chan Stage, 1)}
+	q := New(processor, 2, 200)
+	job := NewJob("job", "/tmp/job.mp4", "job.mp4", "", "")
+	job.ProcessingPath = "/processing/job.mp4"
+	if err := q.store.insertJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.store.db.Exec(`UPDATE attempts SET start_stage=?, current_stage='' WHERE job_id=?`, StageTranslating, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.store.db.Exec(`UPDATE jobs SET checkpoint=? WHERE id=?`, StageTranscribed, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	q.Start()
+	defer q.Stop()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		detail := q.GetJobDetail(job.ID)
+		if detail != nil && len(detail.Attempts) == 2 && detail.Attempts[1].Status == AttemptPending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("automatic retry not queued: %#v", detail)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case stage := <-processor.handled:
+		t.Fatalf("intermediate failure unexpectedly handled at %q", stage)
+	default:
+	}
+	if got := q.GetJob(job.ID).ProcessingPath; got != "/processing/job.mp4" {
+		t.Fatalf("intermediate processing path = %q, want unchanged", got)
+	}
+
+	waitForStatus(t, q, job.ID, StatusFailed)
+	select {
+	case stage := <-processor.handled:
+		if stage != StageTranslating {
+			t.Fatalf("handled stage = %q, want %q", stage, StageTranslating)
+		}
+	default:
+		t.Fatal("terminal translation failure was not handled")
+	}
+	processor.mu.Lock()
+	calls := processor.translationCalls
+	processor.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("translation calls = %d, want 2", calls)
+	}
+	if got := q.GetJob(job.ID).ProcessingPath; got != "/failed/job.mp4" {
+		t.Fatalf("terminal processing path = %q, want failure handler result", got)
+	}
+}
+
 type stoppingProcessor struct {
 	started   chan struct{}
 	canceled  chan struct{}

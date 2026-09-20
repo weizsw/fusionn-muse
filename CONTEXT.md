@@ -53,7 +53,7 @@ Durable evidence that a Job stage completed successfully.
 _Avoid_: Attempt, temporary output
 
 **Queue**:
-The durable set of Attempts waiting to start.
+The durable set of Attempt stages waiting to run. A multi-stage Attempt can return to pending state between stage claims without becoming a new Attempt.
 _Avoid_: Active Job, Job history
 
 **Active Attempt**:
@@ -67,3 +67,13 @@ _Avoid_: Interrupted Job, Active Attempt
 **Sufficient Chinese subtitle coverage**:
 Existing Chinese subtitle-like text present in separated portions of a video's main content, enough to make transcription and translation unnecessary. Text confined to one portion does not qualify.
 _Avoid_: Chinese text detected
+
+
+## Processing model
+
+- A normal Job uses one durable Attempt from its first runnable stage through delivery. Stage handoffs update that Attempt instead of creating another one.
+- Transcription and Translation have independent FIFO lanes. Each lane runs at most one operation, and the two lanes may overlap.
+- Preparation, file movement, delivery, and light-media work run outside the heavy lanes and may run concurrently.
+- An automatic Translation retry is a later Attempt. Its delay is persisted outside the Translation lane, so other eligible Translation work may run while it waits.
+- Exhausted Transcription or Translation failures move unfinished media from `processing` to `failed`. Intermediate Translation failures do not move media. A failed Retranslation of a completed Job preserves its delivered media.
+- `POST /api/v1/retry/failed` and `POST /api/v1/retry/failed/:name` retry eligible failed Jobs. Accepted media moves directly from `failed` to `processing`, and the new Attempt starts at the first incomplete durable checkpoint. Orphans and Jobs with active Attempts are skipped.

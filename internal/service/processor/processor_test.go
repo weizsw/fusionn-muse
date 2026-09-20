@@ -443,6 +443,42 @@ func TestMoveToFailedAcceptsIdenticalDestination(t *testing.T) {
 	}
 }
 
+func TestHandleTerminalFailureMovesUnfinishedHeavyMedia(t *testing.T) {
+	for _, stage := range []queue.Stage{queue.StageTranscribing, queue.StageTranslating} {
+		t.Run(string(stage), func(t *testing.T) {
+			svc, _, folders, job := newProcessFixture(t, "movie.mp4")
+			job.ProcessingPath = job.SourcePath
+
+			if err := svc.HandleTerminalFailure(context.Background(), job, stage, errors.New("pipeline failed")); err != nil {
+				t.Fatalf("HandleTerminalFailure: %v", err)
+			}
+			failedPath := filepath.Join(folders.Failed, job.FileName)
+			if job.ProcessingPath != failedPath || !fileExists(failedPath) || fileExists(job.SourcePath) {
+				t.Fatalf("terminal move = {processing:%q failed:%t source:%t}", job.ProcessingPath, fileExists(failedPath), fileExists(job.SourcePath))
+			}
+		})
+	}
+}
+
+func TestHandleTerminalFailurePreservesCompletedRetranslationMedia(t *testing.T) {
+	svc, _, folders, job := newProcessFixture(t, "movie.mp4")
+	scrapingPath := filepath.Join(folders.Scraping, job.FileName)
+	mustWriteTestFile(t, scrapingPath, "delivered video")
+	job.ProcessingPath = scrapingPath
+	job.Status = queue.StatusCompleted
+	job.AttemptKind = queue.AttemptRetranslate
+
+	if err := svc.HandleTerminalFailure(context.Background(), job, queue.StageTranslating, errors.New("translation failed")); err != nil {
+		t.Fatalf("HandleTerminalFailure: %v", err)
+	}
+	if job.ProcessingPath != scrapingPath || !fileExists(scrapingPath) {
+		t.Fatalf("completed retranslation media changed: path=%q exists=%t", job.ProcessingPath, fileExists(scrapingPath))
+	}
+	if fileExists(filepath.Join(folders.Failed, job.FileName)) {
+		t.Fatal("completed retranslation media was moved to failed")
+	}
+}
+
 func TestProcessSkipsExecutorResolutionForLightAndDryRunJobs(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -505,7 +541,7 @@ func TestProcessExecutorFailuresPreserveTranslationInputs(t *testing.T) {
 		wantStep      string
 		wantMoved     bool
 	}{
-		{name: "transcription", transcribeErr: errors.New("transcribe boom"), wantCalls: "transcribe", wantStep: "transcription failed", wantMoved: true},
+		{name: "transcription", transcribeErr: errors.New("transcribe boom"), wantCalls: "transcribe", wantStep: "transcription failed", wantMoved: false},
 		{name: "translation", translateErr: errors.New("translate boom"), wantCalls: "transcribe,translate", wantStep: "translation failed", wantMoved: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -541,6 +577,9 @@ func TestProcessExecutorFailuresPreserveTranslationInputs(t *testing.T) {
 			}
 			if moved := fileExists(filepath.Join(folders.Failed, "movie.mp4")); moved != tc.wantMoved {
 				t.Fatalf("video moved to failed = %t, want %t", moved, tc.wantMoved)
+			}
+			if !fileExists(job.ProcessingPath) {
+				t.Fatalf("processing media %q was not retained for terminal queue handling", job.ProcessingPath)
 			}
 			if tc.translateErr != nil {
 				got, readErr := os.ReadFile(finalPath)

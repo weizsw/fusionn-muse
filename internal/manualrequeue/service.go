@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fusionn-muse/internal/config"
+	"github.com/fusionn-muse/internal/fileops"
 	"github.com/fusionn-muse/internal/mediaintake"
 	"github.com/fusionn-muse/internal/queue"
 )
@@ -19,7 +20,7 @@ var (
 	ErrInvalidLocation = errors.New("invalid managed location")
 	ErrInvalidName     = errors.New("invalid file name")
 	ErrInvalidMedia    = errors.New("invalid media")
-	ErrConflict        = errors.New("staging destination exists")
+	ErrConflict        = errors.New("destination exists")
 	ErrNotFound        = errors.New("media not found")
 )
 
@@ -50,17 +51,19 @@ type Result struct {
 	Err      error
 }
 
-type accepter interface {
+type jobQueue interface {
 	Accept(*queue.Job) error
+	FindJobByMedia(mediaPath, fileName string) *queue.Job
+	RetryFrom(jobID, mediaPath string) error
 }
 
 type Service struct {
-	queue   accepter
+	queue   jobQueue
 	folders config.FoldersConfig
 	runner  mediaintake.CommandRunner
 }
 
-func New(q accepter, folders config.FoldersConfig, runner mediaintake.CommandRunner) *Service {
+func New(q jobQueue, folders config.FoldersConfig, runner mediaintake.CommandRunner) *Service {
 	if runner == nil {
 		runner = mediaintake.ExecCommandRunner{}
 	}
@@ -146,15 +149,34 @@ func (s *Service) requeueOne(ctx context.Context, location Location, fileName st
 	}
 
 	if location == Failed {
-		var jobID string
-		if finder, ok := s.queue.(interface {
-			FindJobByMedia(string, string) *queue.Job
-		}); ok {
-			if job := finder.FindJobByMedia(path, fileName); job != nil {
-				jobID = job.ID
+		job := s.queue.FindJobByMedia(path, fileName)
+		if job == nil || job.Status != queue.StatusFailed {
+			outcome := Outcome{FileName: fileName, Skipped: true}
+			if job != nil {
+				outcome.JobID = job.ID
 			}
+			return outcome
 		}
-		return Outcome{FileName: fileName, JobID: jobID, Skipped: true}
+		processingPath := filepath.Join(s.folders.Process, job.FileName)
+		if err := fileops.HardlinkOrCopyNoReplace(ctx, path, processingPath); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				err = fmt.Errorf("%w: %s", ErrConflict, processingPath)
+			}
+			return Outcome{FileName: fileName, JobID: job.ID, Err: err}
+		}
+		if err := os.Remove(path); err != nil {
+			_ = os.Remove(processingPath)
+			return Outcome{FileName: fileName, JobID: job.ID, Err: fmt.Errorf("remove failed source: %w", err)}
+		}
+		if err := s.queue.RetryFrom(job.ID, processingPath); err != nil {
+			if restoreErr := fileops.HardlinkOrCopyNoReplace(ctx, processingPath, path); restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("restore failed media: %w", restoreErr))
+			} else if removeErr := os.Remove(processingPath); removeErr != nil {
+				err = errors.Join(err, fmt.Errorf("remove processing media after restore: %w", removeErr))
+			}
+			return Outcome{FileName: fileName, JobID: job.ID, Err: err}
+		}
+		return Outcome{FileName: fileName, JobID: job.ID}
 	}
 
 	resolved, err := mediaintake.ResolveMedia(mediaintake.ResolveRequest{
