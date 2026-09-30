@@ -220,7 +220,7 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 			return "", err
 		}
 		originalName := job.FileName
-		if !hasChineseSub && mediaintake.HasChineseSubtitle(originalName) {
+		if !hasChineseSub && (mediaintake.HasChineseSubtitle(originalName) || mediaintake.HasChineseSubtitleInHierarchy(job.SourcePath, filepath.Dir(job.SourcePath), job.TorrentName)) {
 			hasChineseSub = true
 			job.IsLight = true
 			job.SubtitleDetectionReason = mediaintake.SubtitleDetectionFilename
