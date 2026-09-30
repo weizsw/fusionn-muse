@@ -165,6 +165,121 @@ func TestResolveMediaStopsAtFilenameSubtitleDetection(t *testing.T) {
 	}
 }
 
+func TestResolveMediaDetectsChineseSubtitleFromTorrentName(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "JUQ-250")
+	video := filepath.Join(folder, "JUQ-250.mp4")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "JUQ-250-C-篠田ゆう",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if !got.HasChineseSubtitle {
+		t.Fatal("HasChineseSubtitle = false, want true from torrent name")
+	}
+	if got.SubtitleDetectionReason != SubtitleDetectionFilename {
+		t.Fatalf("SubtitleDetectionReason = %q, want %q", got.SubtitleDetectionReason, SubtitleDetectionFilename)
+	}
+}
+
+func TestResolveMediaDetectsChineseSubtitleFromFolderName(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "JUQ-250-C-篠田ゆう")
+	video := filepath.Join(folder, "JUQ-250.mp4")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "fallback-name",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if !got.HasChineseSubtitle {
+		t.Fatal("HasChineseSubtitle = false, want true from folder name")
+	}
+	if got.SubtitleDetectionReason != SubtitleDetectionFilename {
+		t.Fatalf("SubtitleDetectionReason = %q, want %q", got.SubtitleDetectionReason, SubtitleDetectionFilename)
+	}
+}
+
+func TestResolveMediaDetectsChineseSubtitleWithDotDelimiterAndUC(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "JUQ-250.UC.篠田ゆう")
+	video := filepath.Join(folder, "JUQ-250.mp4")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        folder,
+		TorrentName: "JUQ-250.UC.篠田ゆう",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if !got.HasChineseSubtitle {
+		t.Fatal("HasChineseSubtitle = false, want true from .UC. tag")
+	}
+	if got.SubtitleDetectionReason != SubtitleDetectionFilename {
+		t.Fatalf("SubtitleDetectionReason = %q, want %q", got.SubtitleDetectionReason, SubtitleDetectionFilename)
+	}
+}
+
+func TestResolveMediaDetectsChineseSubtitleSingleVideoTorrentName(t *testing.T) {
+	root := t.TempDir()
+	video := filepath.Join(root, "JUQ-250.mp4")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	got, err := ResolveMedia(ResolveRequest{
+		Path:        video,
+		TorrentName: "JUQ-250-C-篠田ゆう",
+		StagingDir:  filepath.Join(root, "staging"),
+	})
+	if err != nil {
+		t.Fatalf("ResolveMedia returned error: %v", err)
+	}
+	if !got.HasChineseSubtitle {
+		t.Fatal("HasChineseSubtitle = false, want true from single video torrent name")
+	}
+	if got.SubtitleDetectionReason != SubtitleDetectionFilename {
+		t.Fatalf("SubtitleDetectionReason = %q, want %q", got.SubtitleDetectionReason, SubtitleDetectionFilename)
+	}
+}
+
+func TestResolveMediaDetectsChineseSubtitleWithSymbols(t *testing.T) {
+	root := t.TempDir()
+	video := filepath.Join(root, "JUQ-250.mp4")
+	mustWriteSizedFile(t, video, MinVideoSize+1)
+
+	for _, name := range []string{
+		"JUQ-250|C|篠田ゆう",
+		"JUQ-250?C?篠田ゆう",
+		"JUQ-250|UC|篠田ゆう",
+		"JUQ-250?UC?篠田ゆう",
+	} {
+		got, err := ResolveMedia(ResolveRequest{
+			Path:        video,
+			TorrentName: name,
+			StagingDir:  filepath.Join(root, "staging"),
+		})
+		if err != nil {
+			t.Fatalf("ResolveMedia(%q) returned error: %v", name, err)
+		}
+		if !got.HasChineseSubtitle {
+			t.Fatalf("ResolveMedia(%q) HasChineseSubtitle = false, want true", name)
+		}
+		if got.SubtitleDetectionReason != SubtitleDetectionFilename {
+			t.Fatalf("ResolveMedia(%q) SubtitleDetectionReason = %q, want %q", name, got.SubtitleDetectionReason, SubtitleDetectionFilename)
+		}
+	}
+}
+
 func TestResolveMediaDetectsEmbeddedChineseSubtitle(t *testing.T) {
 	root := t.TempDir()
 	video := filepath.Join(root, "SSNI-083.mp4")

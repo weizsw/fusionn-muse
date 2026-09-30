@@ -17,8 +17,8 @@ const MinVideoSize int64 = 200 * 1024 * 1024
 // chineseSubtitlePatterns detects Chinese subtitle indicators in filenames.
 // Matches -C/_C anywhere (bounded), language codes, and Chinese terms.
 var chineseSubtitlePatterns = []*regexp.Regexp{
-	// Any non-alphanumeric + C + non-letter (e.g., SSIS-127_C.mp4, xxx.C.mp4, xxx-C.mp4)
-	regexp.MustCompile(`(?i)[^a-zA-Z0-9]c([^a-zA-Z]|$)`),
+	// Any non-alphanumeric (or start) + C or UC + non-letter (or end) (e.g., SSIS-127_C.mp4, xxx.C.mp4, xxx-C.mp4, xxx-UC.mp4, xxx.UC.mp4)
+	regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(c|uc|[Ｃｃ]|[Ｕｕ][Ｃｃ])(?:[^a-z]|$)`),
 	// Language codes (word-bounded): zh, chs, cht, chi, cn, gb, big5
 	regexp.MustCompile(`(?i)(^|[^a-z0-9])(zh|chs|cht|chi|cn|gb|big5)([^a-z0-9]|$)`),
 	// English abbreviations: SC (Simplified Chinese), TC (Traditional Chinese)

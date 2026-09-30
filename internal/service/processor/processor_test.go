@@ -712,6 +712,40 @@ func TestProcessDoesNotCreateDummySubtitleForProductionLightJob(t *testing.T) {
 	}
 }
 
+func TestProcessTreatsJobAsLightWhenTorrentNameHasChineseSubtitle(t *testing.T) {
+	root := t.TempDir()
+	cfgMgr := newTestConfigManager(t, root, "")
+	defer cfgMgr.Stop()
+	folders := config.FoldersConfig{
+		Staging:        filepath.Join(root, "staging"),
+		Process:        filepath.Join(root, "processing"),
+		Scraping:       filepath.Join(root, "scraping"),
+		Subtitles:      filepath.Join(root, "subtitles"),
+		Transcriptions: filepath.Join(root, "transcriptions"),
+		Failed:         filepath.Join(root, "failed"),
+	}
+	source := filepath.Join(root, "input", "JUQ-250.mp4")
+	mustWriteTestFile(t, source, "video")
+
+	svc := New(cfgMgr, nil, folders, nil)
+	job := queue.NewJob("job1", source, "JUQ-250.mp4", "JUQ-250-C-篠田ゆう", "")
+	job.IsLight = false
+
+	if err := svc.Process(context.Background(), job); err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	if !job.IsLight {
+		t.Fatal("job.IsLight = false, want true from torrent name")
+	}
+	if job.SubtitleDetectionReason != mediaintake.SubtitleDetectionFilename {
+		t.Fatalf("job.SubtitleDetectionReason = %q, want %q", job.SubtitleDetectionReason, mediaintake.SubtitleDetectionFilename)
+	}
+	scrapingPath := filepath.Join(folders.Scraping, "JUQ-250.mp4")
+	if !fileExists(scrapingPath) {
+		t.Fatal("scraping file was not created")
+	}
+}
+
 func TestNotificationsIncludeJobID(t *testing.T) {
 	bodies := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

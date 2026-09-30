@@ -128,10 +128,10 @@ func resolveSingleVideo(ctx context.Context, runner CommandRunner, path, torrent
 		return nil, noValidMediaf("no code found in filename, folder, or torrent name")
 	}
 
-	return resolveSelectedVideo(ctx, runner, path, code, searchRoot)
+	return resolveSelectedVideo(ctx, runner, path, code, searchRoot, torrentName)
 }
 
-func resolveSelectedVideo(ctx context.Context, runner CommandRunner, path, code, searchRoot string) (*ResolvedMedia, error) {
+func resolveSelectedVideo(ctx context.Context, runner CommandRunner, path, code, searchRoot, torrentName string) (*ResolvedMedia, error) {
 	fileName := filepath.Base(path)
 	if code != "" {
 		fileName = code + strings.ToLower(filepath.Ext(path))
@@ -142,7 +142,7 @@ func resolveSelectedVideo(ctx context.Context, runner CommandRunner, path, code,
 		FileName:   fileName,
 		Code:       code,
 	}
-	if err := detectExistingSubtitle(ctx, runner, resolved, path, searchRoot); err != nil {
+	if err := detectExistingSubtitle(ctx, runner, resolved, path, searchRoot, torrentName); err != nil {
 		return nil, err
 	}
 	return resolved, nil
@@ -156,7 +156,7 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 
 	multipartPartPaths := validMultipartPartPaths(videos, req.Path, req.TorrentName)
 	if best := bestFilenameCodedVideoCandidate(videos, multipartPartPaths); best != nil {
-		return resolveSelectedVideo(req.Context, req.Runner, best.Path, best.Code, req.Path)
+		return resolveSelectedVideo(req.Context, req.Runner, best.Path, best.Code, req.Path, req.TorrentName)
 	}
 
 	parts := findMultipartSet(videos, req.Path, req.TorrentName)
@@ -165,7 +165,7 @@ func resolveFolder(req ResolveRequest) (*ResolvedMedia, error) {
 	}
 
 	if best := bestVideoCandidate(videos, req.Path, req.TorrentName, multipartPartPaths); best != nil {
-		return resolveSelectedVideo(req.Context, req.Runner, best.Path, best.Code, req.Path)
+		return resolveSelectedVideo(req.Context, req.Runner, best.Path, best.Code, req.Path, req.TorrentName)
 	}
 	if hasIncompleteMultipartSet(videos, req.Path, req.TorrentName) {
 		return nil, noValidMediaf("incomplete multipart video set")
@@ -182,8 +182,32 @@ func noValidMediaf(format string, args ...interface{}) error {
 	return fmt.Errorf("%w: %s", ErrNoValidMedia, fmt.Sprintf(format, args...))
 }
 
-func detectExistingSubtitle(ctx context.Context, runner CommandRunner, resolved *ResolvedMedia, mediaPath, searchRoot string) error {
-	if HasChineseSubtitle(filepath.Base(mediaPath)) {
+// HasChineseSubtitleInHierarchy checks if the media file name, any ancestor folder
+// up to searchRoot, or the torrent name indicates Chinese subtitles.
+func HasChineseSubtitleInHierarchy(mediaPath, searchRoot, torrentName string) bool {
+	if mediaPath != "" && HasChineseSubtitle(filepath.Base(mediaPath)) {
+		return true
+	}
+	if torrentName != "" && HasChineseSubtitle(torrentName) {
+		return true
+	}
+	if searchRoot != "" {
+		if HasChineseSubtitle(filepath.Base(searchRoot)) {
+			return true
+		}
+		if mediaPath != "" {
+			for _, dir := range candidateCodeFolders(mediaPath, searchRoot) {
+				if HasChineseSubtitle(filepath.Base(dir)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func detectExistingSubtitle(ctx context.Context, runner CommandRunner, resolved *ResolvedMedia, mediaPath, searchRoot, torrentName string) error {
+	if HasChineseSubtitleInHierarchy(mediaPath, searchRoot, torrentName) {
 		resolved.HasChineseSubtitle = true
 		resolved.SubtitleDetectionReason = SubtitleDetectionFilename
 		return nil

@@ -32,10 +32,10 @@ func prepareMultipart(req ResolveRequest, parts []string) (*ResolvedMedia, error
 		StagingPath: prepared,
 		Code:        code,
 	}
-	if anyChineseSubtitle(parts) {
+	if anyChineseSubtitle(parts) || HasChineseSubtitleInHierarchy(parts[0], req.Path, req.TorrentName) {
 		resolved.HasChineseSubtitle = true
 		resolved.SubtitleDetectionReason = SubtitleDetectionFilename
-	} else if err := detectExistingSubtitle(req.Context, req.Runner, resolved, prepared, req.Path); err != nil {
+	} else if err := detectExistingSubtitle(req.Context, req.Runner, resolved, prepared, req.Path, req.TorrentName); err != nil {
 		return nil, err
 	}
 	return resolved, nil
@@ -83,10 +83,11 @@ func prepareImage(req ResolveRequest, imagePath string) (*ResolvedMedia, error) 
 		StagingPath: prepared,
 		Code:        code,
 	}
-	if HasChineseSubtitle(filepath.Base(imagePath)) || anyChineseSubtitle(parts) {
+	fallbackFolder := imageFallbackFolder(req.Path)
+	if HasChineseSubtitle(filepath.Base(imagePath)) || anyChineseSubtitle(parts) || HasChineseSubtitleInHierarchy(imagePath, fallbackFolder, req.TorrentName) {
 		resolved.HasChineseSubtitle = true
 		resolved.SubtitleDetectionReason = SubtitleDetectionFilename
-	} else if err := detectExistingSubtitle(req.Context, req.Runner, resolved, prepared, imageFallbackFolder(req.Path)); err != nil {
+	} else if err := detectExistingSubtitle(req.Context, req.Runner, resolved, prepared, fallbackFolder, req.TorrentName); err != nil {
 		return nil, err
 	}
 	return resolved, nil
