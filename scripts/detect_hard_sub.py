@@ -11,11 +11,20 @@ REGION_COUNT = 3
 START_SECONDS = 30 * 60
 SAMPLE_COUNT = 30
 
-# ponytail: CJK is not language detection; add a calibrated classifier if persistent Japanese text causes false skips.
+# Kana identifies Japanese text, but kanji-only text remains ambiguous.
 
 
 def cjk_count(text):
     return sum("\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff" for char in text)
+
+
+def has_kana(text):
+    return any(
+        "\u3041" <= char <= "\u3096"
+        or "\u30a1" <= char <= "\u30fa"
+        or "\uff66" <= char <= "\uff9d"
+        for char in text
+    )
 
 
 def main():
@@ -45,7 +54,7 @@ def main():
         sampled += 1
         result = ocr(frame[int(frame.shape[0] * 0.6) :])
         if any(
-            score >= MIN_CONFIDENCE and cjk_count(text) >= MIN_CJK
+            score >= MIN_CONFIDENCE and cjk_count(text) >= MIN_CJK and not has_kana(text)
             for text, score in zip(result.txts or [], result.scores or [])
         ):
             regions_with_hits.add(sample_index * REGION_COUNT // SAMPLE_COUNT)
