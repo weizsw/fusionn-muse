@@ -42,7 +42,7 @@ class FakeVideo:
         pass
 
 
-def run_detector(duration, has_text):
+def run_detector(duration, recognize_text):
     cv2 = types.ModuleType("cv2")
     cv2.CAP_PROP_FRAME_COUNT = 1
     cv2.CAP_PROP_FPS = 2
@@ -51,10 +51,10 @@ def run_detector(duration, has_text):
 
     class FakeOCR:
         def __call__(self, frame):
-            present = has_text(frame.second)
+            results = recognize_text(frame.second)
             return types.SimpleNamespace(
-                txts=["中文字幕"] if present else [],
-                scores=[0.99] if present else [],
+                txts=[text for text, _score in results],
+                scores=[score for _text, score in results],
             )
 
     rapidocr = types.ModuleType("rapidocr")
@@ -72,14 +72,31 @@ def run_detector(duration, has_text):
 
 class DetectHardSubtitleTest(unittest.TestCase):
     def test_ignores_text_in_first_thirty_minutes_of_long_video(self):
-        self.assertEqual(run_detector(2 * 60 * 60, lambda second: second < 30 * 60), "false")
+        self.assertEqual(
+            run_detector(
+                2 * 60 * 60,
+                lambda second: [("中文字幕", 0.99)] if second < 30 * 60 else [],
+            ),
+            "false",
+        )
 
     def test_samples_only_second_half_of_short_video(self):
-        self.assertEqual(run_detector(20 * 60, lambda second: second < 10 * 60), "false")
+        self.assertEqual(
+            run_detector(
+                20 * 60,
+                lambda second: [("中文字幕", 0.99)] if second < 10 * 60 else [],
+            ),
+            "false",
+        )
 
     def test_requires_text_in_multiple_time_regions(self):
         self.assertEqual(
-            run_detector(2 * 60 * 60, lambda second: 30 * 60 <= second < 60 * 60),
+            run_detector(
+                2 * 60 * 60,
+                lambda second: [("中文字幕", 0.99)]
+                if 30 * 60 <= second < 60 * 60
+                else [],
+            ),
             "false",
         )
 
@@ -87,10 +104,48 @@ class DetectHardSubtitleTest(unittest.TestCase):
         self.assertEqual(
             run_detector(
                 2 * 60 * 60,
-                lambda second: 30 * 60 <= second < 45 * 60 or second >= 90 * 60,
+                lambda second: [("中文字幕", 0.99)]
+                if 30 * 60 <= second < 45 * 60 or second >= 90 * 60
+                else [],
             ),
             "true",
         )
+
+    def test_snos384_japanese_ocr_does_not_qualify_as_chinese_coverage(self):
+        # Minimal real OCR evidence at samples 7 and 24 of this 11131-second video.
+        results = {
+            4132: [("1pt払ったら組み立ててもらえろとが", 0.9331)],
+            9420: [("中平", 0.99435)],
+        }
+        self.assertEqual(run_detector(11131, lambda second: results.get(second, [])), "false")
+
+    def test_rejects_japanese_with_hiragana_katakana_or_halfwidth_kana(self):
+        for text in ("組み立て", "字幕テスト", "字幕ﾃｽﾄ"):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    run_detector(2 * 60 * 60, lambda _second: [(text, 0.99)]),
+                    "false",
+                )
+
+    def test_detects_chinese_alongside_japanese_text(self):
+        for text in ("请坐下来", "請坐下來"):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    run_detector(
+                        2 * 60 * 60,
+                        lambda _second: [("組み立て", 0.99), (text, 0.99)],
+                    ),
+                    "true",
+                )
+
+    def test_low_confidence_chinese_does_not_qualify(self):
+        self.assertEqual(
+            run_detector(2 * 60 * 60, lambda _second: [("中文字幕", 0.79)]),
+            "false",
+        )
+
+    def test_no_text_does_not_qualify(self):
+        self.assertEqual(run_detector(2 * 60 * 60, lambda _second: []), "false")
 
 
 if __name__ == "__main__":
