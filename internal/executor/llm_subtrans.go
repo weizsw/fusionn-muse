@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,18 +67,24 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 
 	_, stderrStr, err := t.runner.Stream(ctx, "python3", args...)
 	if err != nil {
-		return "", fmt.Errorf("llm-subtrans failed: %w\nStderr: %s", err, stderrStr)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("llm-subtrans timed out: %w", ctx.Err())
+		}
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("llm-subtrans canceled: %w", ctx.Err())
+		}
+		return "", fmt.Errorf("llm-subtrans failed: %w (see preceding process logs)", err)
 	}
 	if strings.Contains(stderrStr, "Error:") || strings.Contains(stderrStr, "Traceback") {
-		return "", fmt.Errorf("llm-subtrans reported errors:\n%s", stderrStr)
+		return "", errors.New("llm-subtrans reported errors; see preceding process logs")
 	}
 
 	info, err := os.Stat(translatedPath)
 	if err != nil {
-		return "", fmt.Errorf("translated file not created: %w\nStderr: %s", err, stderrStr)
+		return "", fmt.Errorf("translated file not created: %w", err)
 	}
 	if info.Size() == 0 {
-		return "", fmt.Errorf("translated file is empty\nStderr: %s", stderrStr)
+		return "", errors.New("translated file is empty; see preceding process logs")
 	}
 
 	log.Infof("✅ PySubtrans translation complete: %s", filepath.Base(translatedPath))

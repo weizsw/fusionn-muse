@@ -58,9 +58,15 @@ def main() -> int:
 
     instruction_args = [args.instruction] if args.instruction else None
     options = init_options(
-        provider="OpenAI",
+        provider="Custom Server",
+        server_address=args.base_url.rstrip("/"),
+        endpoint="/chat/completions",
+        supports_conversation=True,
+        supports_system_messages=True,
+        stream_responses=False,
+        timeout=180,
+        max_retries=1,
         api_key=args.api_key,
-        api_base=args.base_url,
         model=args.model,
         target_language=args.target,
         instruction_args=instruction_args,

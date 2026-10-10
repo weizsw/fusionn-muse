@@ -91,6 +91,8 @@ translate:
 
 Run `host_asr_server.py` on macOS with `mlx-qwen3-asr` installed. The container calls its `/transcribe` endpoint; the host process maps `/data/...` to `host_prefix` and runs the MLX CLI locally.
 
+This pipeline translates through PySubtrans's **Custom Server** client using the OpenAI-compatible `/chat/completions` endpoint. Keep `translate.custom_server` as the API base URL, including `/v1` or any reverse-proxy prefix. Requests are non-streaming, with a **180-second HTTP timeout and one retry**; there are no OpenAI SDK retries. The HTTP timeout measures inactivity, not total request duration. `llm_subtrans.timeout_minutes` remains the separate whole-file deadline. Python logs stream once at their original levels; translation failures report a short reason rather than replaying accumulated stderr, and deadlines/cancellation are distinguished from process failures.
+
 See [config.example.yaml](config/config.example.yaml) for full documentation.
 
 ## qBittorrent Setup
