@@ -13,6 +13,50 @@ llm_subtrans_translate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(llm_subtrans_translate)
 
 
+class CustomServerTranslationTest(unittest.TestCase):
+    def test_main_configures_chat_requests_with_bounded_retries(self):
+        for base_url in [
+            "http://example.test/v1",
+            "http://example.test/v1/",
+            "http://example.test/proxy/v1",
+            "http://example.test",
+        ]:
+            with self.subTest(base_url=base_url), tempfile.TemporaryDirectory() as tmp:
+                input_path = pathlib.Path(tmp, "input.srt")
+                input_path.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello.\n")
+                fake_pysubtrans = types.ModuleType("PySubtrans")
+                fake_pysubtrans.init_options = mock.Mock(return_value=object())
+                fake_pysubtrans.init_subtitles = mock.Mock()
+                fake_pysubtrans.init_translator = mock.Mock()
+                argv = [
+                    "llm_subtrans_translate.py",
+                    "--input", str(input_path),
+                    "--output", str(pathlib.Path(tmp, "output.srt")),
+                    "--target", "Simplified Chinese",
+                    "--api-key", "test-key",
+                    "--base-url", base_url,
+                    "--model", "grok-4.5",
+                    "--instruction", "Use natural spoken Chinese.",
+                ]
+                with mock.patch.dict(sys.modules, {"PySubtrans": fake_pysubtrans}), mock.patch.object(sys, "argv", argv):
+                    self.assertEqual(llm_subtrans_translate.main(), 0)
+
+                self.assertEqual(fake_pysubtrans.init_options.call_args.kwargs, {
+                    "provider": "Custom Server",
+                    "server_address": base_url.rstrip("/"),
+                    "endpoint": "/chat/completions",
+                    "supports_conversation": True,
+                    "supports_system_messages": True,
+                    "stream_responses": False,
+                    "timeout": 180,
+                    "max_retries": 1,
+                    "api_key": "test-key",
+                    "model": "grok-4.5",
+                    "target_language": "Simplified Chinese",
+                    "instruction_args": ["Use natural spoken Chinese."],
+                })
+
+
 class SanitizeSRTForTranslationTest(unittest.TestCase):
     def test_redacts_age_sensitive_sexual_cue(self):
         srt = """1

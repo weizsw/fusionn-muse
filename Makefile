@@ -14,7 +14,7 @@ run:
 # Run tests
 test:
 	go test -v -race ./...
-	python3 -B -m unittest discover -s scripts -p 'test_detect_hard_sub.py' -v
+	python3 -B -m unittest discover -s scripts -p 'test_*.py' -v
 
 # Run tests with coverage
 test-cover:
