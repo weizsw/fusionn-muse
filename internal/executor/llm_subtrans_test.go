@@ -172,3 +172,39 @@ func TestLLMSubtransEndpointAndLanguageCodesSurviveLegacyRemoval(t *testing.T) {
 		}
 	}
 }
+
+func TestLLMSubtransPassesConfiguredRateLimit(t *testing.T) {
+	for _, item := range []struct {
+		name string
+		rate float64
+		want string
+	}{
+		{"unlimited", 0, ""},
+		{"integer RPM", 80, "80"},
+		{"fractional RPM", 0.5, "0.5"},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			root := t.TempDir()
+			input := filepath.Join(root, "movie.srt")
+			runner := &fakeRunner{onStream: func(_ string, args ...string) (string, string, error) {
+				got := ""
+				for i, arg := range args {
+					if arg == "--ratelimit" {
+						got = args[i+1]
+					}
+				}
+				if got != item.want {
+					t.Fatalf("ratelimit=%q want=%q", got, item.want)
+				}
+				if err := os.WriteFile(filepath.Join(root, "movie.zh.srt"), []byte("translation"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				return "", "", nil
+			}}
+			translator := NewLLMSubtrans(config.LLMSubtransConfig{RateLimit: item.rate}, config.TranslateConfig{TargetLang: "Simplified Chinese"}, runner)
+			if _, err := translator.Translate(context.Background(), input); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

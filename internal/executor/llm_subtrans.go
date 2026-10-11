@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,10 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 	args = append(args, "--model", model)
 	if t.translateCfg.Instruction != "" {
 		args = append(args, "--instruction", t.translateCfg.Instruction)
+	}
+	if t.cfg.RateLimit > 0 {
+		args = append(args, "--ratelimit", strconv.FormatFloat(t.cfg.RateLimit, 'f', -1, 64))
+		log.Infof("⏱️ PySubtrans batch pacing: %g requests/minute", t.cfg.RateLimit)
 	}
 
 	log.Infof("🌐 Translating with PySubtrans: %s → %s", filepath.Base(subtitlePath), t.translateCfg.TargetLang)

@@ -27,6 +27,7 @@ class CustomServerProtocolTest(unittest.TestCase):
         self.input.write_text("1\n00:00:01,000 --> 00:00:02,000\nこんにちは。\n", encoding="utf-8")
         self.requests = []
         self.status = 200
+        self.response_line_numbers = None
         test = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -34,11 +35,12 @@ class CustomServerProtocolTest(unittest.TestCase):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 test.requests.append((self.path, self.headers.get("Authorization"), body))
                 if test.status == 200:
+                    line_number = test.response_line_numbers[len(test.requests) - 1] if test.response_line_numbers else 1
                     content = {
                         "model": "grok-4.5",
                         "choices": [{
                             "finish_reason": "stop",
-                            "message": {"content": "#1\nOriginal>\nこんにちは。\nTranslation>\n你好。\n<summary>A greeting.</summary>\n<scene>A greeting.</scene>"},
+                            "message": {"content": f"#{line_number}\nOriginal>\nこんにちは。\nTranslation>\n你好。\n<summary>A greeting.</summary>\n<scene>A greeting.</scene>"},
                         }],
                     }
                 else:
@@ -61,7 +63,7 @@ class CustomServerProtocolTest(unittest.TestCase):
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
 
-    def run_translation(self, base_url):
+    def run_translation(self, base_url, *extra_args):
         argv = [
             str(SCRIPT),
             "--input", str(self.input),
@@ -72,8 +74,36 @@ class CustomServerProtocolTest(unittest.TestCase):
             "--model", "grok-4.5",
             "--instruction", "Use natural spoken Chinese.",
         ]
+        argv.extend(extra_args)
         with mock.patch.object(sys, "argv", argv):
             return llm_subtrans_translate.main()
+
+    def test_rate_limit_spaces_successful_translation_requests(self):
+        # Separate scenes force two real Custom Server requests. Only the
+        # translation client's clock is replaced; HTTP and parsing stay real.
+        self.input.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nこんにちは。\n\n"
+            "2\n00:02:01,000 --> 00:02:02,000\nこんにちは。\n",
+            encoding="utf-8",
+        )
+        self.response_line_numbers = [1, 2]
+        for args, times, expected in [
+            (("--ratelimit", "80"), [0, 0, 1, 1], [0.75, 0.75]),
+            (("--ratelimit", "80"), [0, 2, 3, 5], []),
+            ((), [0, 0, 1, 1], []),
+            (("--ratelimit", "0"), [0, 0, 1, 1], []),
+        ]:
+            with self.subTest(args=args, times=times):
+                self.requests.clear()
+                self.output.unlink(missing_ok=True)
+                sleeps = []
+                with mock.patch("PySubtrans.TranslationClient.time") as clock:
+                    clock.monotonic.side_effect = times
+                    clock.sleep.side_effect = sleeps.append
+                    self.assertEqual(self.run_translation(self.base_url + "/v1", *args), 0)
+                self.assertEqual(len(self.requests), 2)
+                self.assertEqual(sleeps, expected)
+                self.assertTrue(self.output.exists())
 
     def test_translates_through_chat_endpoint_preserving_base_path(self):
         for prefix in ["/v1", "/v1/", "/proxy/v1"]:

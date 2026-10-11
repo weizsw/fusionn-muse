@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import pathlib
 import sys
 import tempfile
@@ -27,6 +28,7 @@ class CustomServerTranslationTest(unittest.TestCase):
                 fake_pysubtrans = types.ModuleType("PySubtrans")
                 fake_pysubtrans.init_options = mock.Mock(return_value=object())
                 fake_pysubtrans.init_subtitles = mock.Mock()
+                fake_pysubtrans.init_translation_provider = mock.Mock()
                 fake_pysubtrans.init_translator = mock.Mock()
                 argv = [
                     "llm_subtrans_translate.py",
@@ -55,6 +57,24 @@ class CustomServerTranslationTest(unittest.TestCase):
                     "target_language": "Simplified Chinese",
                     "instruction_args": ["Use natural spoken Chinese."],
                 })
+
+
+class RateLimitArgumentsTest(unittest.TestCase):
+    def test_rate_limit_defaults_to_disabled_and_accepts_fractional_rpm(self):
+        argv = [str(SCRIPT), "--input", "input.srt", "--output", "output.srt", "--target", "Chinese",
+                "--api-key", "offline-key", "--base-url", "http://example.test", "--model", "test-model"]
+        for value, expected in [(None, 0.0), ("80", 80.0), ("0.5", 0.5), ("0", 0.0)]:
+            with self.subTest(value=value), mock.patch.object(sys, "argv", argv + (["--ratelimit=" + value] if value else [])):
+                self.assertEqual(llm_subtrans_translate.parse_args().ratelimit, expected)
+
+    def test_rejects_invalid_rate_before_initializing_translation(self):
+        argv = [str(SCRIPT), "--input", "input.srt", "--output", "output.srt", "--target", "Chinese",
+                "--api-key", "offline-key", "--base-url", "http://example.test", "--model", "test-model"]
+        for value in ["-1", "nan", "inf", "-inf", "invalid"]:
+            with self.subTest(value=value), mock.patch.object(sys, "argv", argv + ["--ratelimit=" + value]), mock.patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    llm_subtrans_translate.parse_args()
+                self.assertEqual(raised.exception.code, 2)
 
 
 class SanitizeSRTForTranslationTest(unittest.TestCase):
@@ -123,7 +143,8 @@ JKとエッチしたい。
         fake_pysubtrans = types.ModuleType("PySubtrans")
         fake_pysubtrans.init_options = lambda **kwargs: object()
         fake_pysubtrans.init_subtitles = lambda path, options=None: FakeSubtitles(path)
-        fake_pysubtrans.init_translator = lambda options: FakeTranslator()
+        fake_pysubtrans.init_translation_provider = mock.Mock()
+        fake_pysubtrans.init_translator = lambda options, translation_provider=None: FakeTranslator()
 
         with tempfile.TemporaryDirectory() as tmp:
             input_path = pathlib.Path(tmp, "input.srt")

@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import math
 import os
 import re
 import sys
@@ -37,6 +38,13 @@ def sanitize_srt_for_translation(srt_text: str) -> str:
     return "\n\n".join(sanitized)
 
 
+def non_negative_rate(value: str) -> float:
+    rate = float(value)
+    if not math.isfinite(rate) or rate < 0:
+        raise argparse.ArgumentTypeError("Rate limit must be a finite non-negative number")
+    return rate
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Translate subtitles with PySubtrans")
     parser.add_argument("--input", required=True, help="Input subtitle path")
@@ -46,13 +54,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", required=True, help="OpenAI-compatible base URL")
     parser.add_argument("--model", required=True, help="Model name")
     parser.add_argument("--instruction", default="", help="Additional translation instruction")
+    parser.add_argument("--ratelimit", type=non_negative_rate, default=0.0, help="Translation requests per minute (0 disables pacing)")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
 
-    from PySubtrans import init_options, init_subtitles, init_translator
+    from PySubtrans import init_options, init_subtitles, init_translation_provider, init_translator
 
     logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
 
@@ -86,7 +95,14 @@ def main() -> int:
             logging.info("Replaced age-sensitive subtitle terms before translation")
 
         subtitles = init_subtitles(subtitle_input, options=options)
-        translator = init_translator(options)
+        translation_provider = None
+        if args.ratelimit > 0:
+            translation_provider = init_translation_provider("Custom Server", options)
+            # Custom Server 1.7.3 drops the top-level rate_limit option. Its
+            # client inherits these provider settings and applies batch pacing.
+            translation_provider.settings["rate_limit"] = args.ratelimit
+            translation_provider.settings["supports_parallel_threads"] = False
+        translator = init_translator(options, translation_provider=translation_provider)
         translator.events.connect_default_loggers()
         try:
             translator.TranslateSubtitles(subtitles)

@@ -91,6 +91,18 @@ Run `host_asr_server.py` on macOS with `mlx-qwen3-asr` installed. The container 
 
 This pipeline translates through PySubtrans's **Custom Server** client using the OpenAI-compatible `/chat/completions` endpoint. Keep `translate.custom_server` as the API base URL, including `/v1` or any reverse-proxy prefix. Requests are non-streaming, with a **180-second HTTP timeout and one retry**; there are no OpenAI SDK retries. The HTTP timeout measures inactivity, not total request duration. `llm_subtrans.timeout_minutes` remains the separate whole-file deadline. Python logs stream once at their original levels; translation failures report a short reason rather than replaying accumulated stderr, and deadlines/cancellation are distinguished from process failures.
 
+Optional `llm_subtrans.rate_limit` exposes PySubtrans's `--ratelimit` in **requests/minute (RPM)**. It accepts finite non-negative numbers; omitted or `0` preserves unpaced execution. For example:
+
+```yaml
+llm_subtrans:
+  timeout_minutes: 180
+  rate_limit: 80
+```
+
+This uses the actual Custom Server client: at 80 RPM each successful translation request takes at least 0.75 seconds, including its response time; slower requests need no extra wait. It is batch pacing, **not a strict global API quota**: HTTP retries inside a request and other proxy clients are not separately limited. It does not extend the 180-second read timeout or resolve a stalled upstream response. The 1.7.3 Custom Server ignores a top-level `init_options(rate_limit=...)`; Muse passes it through the explicit provider/client settings instead.
+
+Rate limits follow the Attempt's settings snapshot. Old snapshots without this option remain unpaced. To adopt a newly configured limit for a failed execution, explicitly select current settings with `{"action":"retry","use_current_settings":true}`; completed Jobs use `retranslate` instead.
+
 ### Container dependencies and retired pipeline
 
 The image contains only the MLX host client, PySubtrans Custom Server translation, CPU OCR, and media preparation tools. It does not include VideoCaptioner, FasterWhisper, OpenAI SDK, GUI, or local ASR models. Translation/OCR dependencies are pinned in `requirements.txt`; update them deliberately and run the offline protocol tests before upgrading. Docker uses Go/pip build caches, and `.dockerignore` excludes configuration secrets, databases, models and local caches from the build context.
