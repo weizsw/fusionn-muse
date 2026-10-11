@@ -74,6 +74,10 @@ translate:
 # still come from translate.* above.
 llm_subtrans:
   timeout_minutes: 180
+  # Successful translation request pacing, in requests/minute (RPM).
+  # 0 disables pacing. This is not an HTTP timeout or a global proxy limit;
+  # internal HTTP retries are not individually paced by PySubtrans.
+  rate_limit: 0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SUBTITLE (Output Settings)

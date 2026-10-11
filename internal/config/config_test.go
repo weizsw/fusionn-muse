@@ -158,3 +158,54 @@ func TestExampleRecommendsMLXWithoutChangingLegacyOmittedProvider(t *testing.T) 
 		t.Fatalf("legacy omitted provider was silently changed to %q", legacy.Pipeline.Provider)
 	}
 }
+
+func TestLoadAndReloadTranslationRateLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("llm_subtrans:\n  rate_limit: 80\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil || cfg.LLMSubtrans.RateLimit != 80 {
+		t.Fatalf("load=%+v error=%v", cfg, err)
+	}
+	manager, err := NewManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Stop()
+	if err := os.WriteFile(path, []byte("llm_subtrans:\n  rate_limit: 0.5\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Reload(); err != nil || manager.Get().LLMSubtrans.RateLimit != 0.5 {
+		t.Fatalf("reload=%+v error=%v", manager.Get(), err)
+	}
+}
+
+func TestTranslationRateLimitRejectsInvalidValuesWithoutReplacingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("llm_subtrans:\n  rate_limit: 80\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Stop()
+	for _, value := range []string{"-1", ".nan", ".inf", "-.inf"} {
+		t.Run(value, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte("llm_subtrans:\n  rate_limit: "+value+"\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("invalid rate accepted by Load")
+			}
+			if bad, err := NewManager(path); err == nil {
+				bad.Stop()
+				t.Fatal("invalid rate accepted by NewManager")
+			}
+			if err := manager.Reload(); err == nil || manager.Get().LLMSubtrans.RateLimit != 80 {
+				t.Fatalf("invalid reload replaced valid config: %+v error=%v", manager.Get(), err)
+			}
+		})
+	}
+}

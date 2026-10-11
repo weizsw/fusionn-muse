@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"reflect"
 	"strings"
@@ -50,7 +51,8 @@ type MLXQwen3ASRConfig struct {
 }
 
 type LLMSubtransConfig struct {
-	TimeoutMinutes int `mapstructure:"timeout_minutes"`
+	TimeoutMinutes int     `mapstructure:"timeout_minutes"`
+	RateLimit      float64 `mapstructure:"rate_limit"` // Translation requests/minute; 0 disables batch pacing.
 }
 
 // Folders returns hardcoded folder paths (user mounts via Docker volumes).
@@ -185,6 +187,9 @@ func NewManager(path string) (*Manager, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, err
 	}
+	if err := validate(&cfg); err != nil {
+		return nil, err
+	}
 
 	var lastMod time.Time
 	if stat, err := os.Stat(path); err == nil {
@@ -262,6 +267,10 @@ func (m *Manager) Reload() error {
 		m.mu.Unlock()
 		return err
 	}
+	if err := validate(&newCfg); err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	oldCfg := m.cfg
 	m.cfg = &newCfg
 	if stat, err := os.Stat(m.path); err == nil {
@@ -331,8 +340,19 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, err
 	}
+	if err := validate(&cfg); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
+}
+
+func validate(cfg *Config) error {
+	rate := cfg.LLMSubtrans.RateLimit
+	if rate < 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
+		return fmt.Errorf("llm_subtrans.rate_limit must be a finite non-negative number")
+	}
+	return nil
 }
 
 func newParser(path string) *viper.Viper {
@@ -345,5 +365,6 @@ func newParser(path string) *viper.Viper {
 	v.SetDefault("queue.db_path", "/data/automation/meta/fusionn-muse.db")
 	v.SetDefault("queue.max_retries", 4)
 	v.SetDefault("queue.retry_delay_ms", 10000)
+	v.SetDefault("llm_subtrans.rate_limit", 0.0)
 	return v
 }
