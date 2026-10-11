@@ -37,7 +37,7 @@ func HardlinkOrCopy(ctx context.Context, src, dst string) error {
 	log.Debugf("⚠️ Hardlink failed (%v), falling back to copy", err)
 
 	// Fallback to copy
-	if err := copyFile(src, dst); err != nil {
+	if err := copyFile(ctx, src, dst); err != nil {
 		return fmt.Errorf("copy: %w", err)
 	}
 
@@ -47,6 +47,9 @@ func HardlinkOrCopy(ctx context.Context, src, dst string) error {
 
 // HardlinkOrCopyNoReplace creates dst without overwriting an existing file.
 func HardlinkOrCopyNoReplace(ctx context.Context, src, dst string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	log := logger.FromContext(ctx)
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("create dir: %w", err)
@@ -58,16 +61,25 @@ func HardlinkOrCopyNoReplace(ctx context.Context, src, dst string) error {
 		return fmt.Errorf("stat source: %w", err)
 	}
 	if err := os.Link(src, dst); err == nil {
+		file, err := os.Open(dst)
+		if err != nil {
+			return err
+		}
+		err = file.Sync()
+		_ = file.Close()
+		if err != nil {
+			return err
+		}
 		log.Debugf("🔗 Hard-linked: %s → %s", src, dst)
-		return nil
+		return SyncDir(filepath.Dir(dst))
 	} else if os.IsExist(err) {
 		return fmt.Errorf("destination exists: %w", err)
 	}
-	if err := copyFileNoReplace(src, dst); err != nil {
+	if err := copyFileNoReplace(ctx, src, dst); err != nil {
 		return fmt.Errorf("copy: %w", err)
 	}
 	log.Debugf("📋 Copied: %s → %s", src, dst)
-	return nil
+	return SyncDir(filepath.Dir(dst))
 }
 
 // Move moves a file from src to dst.
@@ -98,7 +110,7 @@ func Move(ctx context.Context, src, dst string) error {
 	}
 
 	// Fallback: copy then delete
-	if err := copyFile(src, dst); err != nil {
+	if err := copyFile(ctx, src, dst); err != nil {
 		return fmt.Errorf("copy for move: %w", err)
 	}
 
@@ -108,6 +120,24 @@ func Move(ctx context.Context, src, dst string) error {
 
 	log.Debugf("📦 Moved (copy+delete): %s → %s", src, dst)
 	return nil
+}
+
+// MoveNoReplace publishes the entire file before removing src, without replacing dst.
+func MoveNoReplace(ctx context.Context, src, dst string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if samePath(src, dst) {
+		_, err := os.Stat(src)
+		return err
+	}
+	if err := HardlinkOrCopyNoReplace(ctx, src, dst); err != nil {
+		return err
+	}
+	if err := os.Remove(src); err != nil {
+		return fmt.Errorf("remove source after move: %w", err)
+	}
+	return SyncDir(filepath.Dir(src))
 }
 
 // Copy copies src to dst, replacing dst if it exists.
@@ -121,7 +151,7 @@ func Copy(ctx context.Context, src, dst string) error {
 	if err := removeExistingDestination(dst); err != nil {
 		return err
 	}
-	if err := copyFile(src, dst); err != nil {
+	if err := copyFile(ctx, src, dst); err != nil {
 		return fmt.Errorf("copy: %w", err)
 	}
 	logger.FromContext(ctx).Debugf("📋 Copied: %s → %s", src, dst)
@@ -160,7 +190,7 @@ func samePath(a, b string) bool {
 }
 
 // copyFile copies a file from src to dst.
-func copyFile(src, dst string) error {
+func copyFile(ctx context.Context, src, dst string) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -178,11 +208,16 @@ func copyFile(src, dst string) error {
 	}
 	defer dstFile.Close()
 
-	_, err = io.Copy(dstFile, srcFile)
-	return err
+	if _, err := io.Copy(dstFile, contextReader{ctx, srcFile}); err != nil {
+		return err
+	}
+	if err := dstFile.Sync(); err != nil {
+		return err
+	}
+	return dstFile.Close()
 }
 
-func copyFileNoReplace(src, dst string) (err error) {
+func copyFileNoReplace(ctx context.Context, src, dst string) (err error) {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -192,22 +227,25 @@ func copyFileNoReplace(src, dst string) (err error) {
 	if err != nil {
 		return err
 	}
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, srcInfo.Mode())
+	dstFile, err := os.CreateTemp(filepath.Dir(dst), ".muse-copy-*")
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if closeErr := dstFile.Close(); err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			_ = os.Remove(dst)
-		}
-	}()
-	if _, err = io.Copy(dstFile, srcFile); err != nil {
+	defer os.Remove(dstFile.Name())
+	defer dstFile.Close()
+	if err := dstFile.Chmod(srcInfo.Mode()); err != nil {
 		return err
 	}
-	return dstFile.Sync()
+	if _, err := io.Copy(dstFile, contextReader{ctx, srcFile}); err != nil {
+		return err
+	}
+	if err := dstFile.Sync(); err != nil {
+		return err
+	}
+	if err := dstFile.Close(); err != nil {
+		return err
+	}
+	return os.Link(dstFile.Name(), dst)
 }
 
 // EnsureDir creates a directory if it doesn't exist.
@@ -224,4 +262,26 @@ func Exists(path string) bool {
 // Remove deletes a file.
 func Remove(path string) error {
 	return os.Remove(path)
+}
+
+// SyncDir makes a completed rename or link durable before a Stage checkpoint.
+func SyncDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+type contextReader struct {
+	context.Context
+	io.Reader
+}
+
+func (r contextReader) Read(buffer []byte) (int, error) {
+	if err := r.Err(); err != nil {
+		return 0, err
+	}
+	return r.Reader.Read(buffer)
 }

@@ -141,3 +141,34 @@ func TestLLMSubtransPassesOpenAICompatibleSettingsAndInstruction(t *testing.T) {
 		t.Fatalf("calls = %#v, want %#v", runner.streamCalls, wantCalls)
 	}
 }
+
+func TestLLMSubtransEndpointAndLanguageCodesSurviveLegacyRemoval(t *testing.T) {
+	for _, tc := range []struct {
+		provider, custom, want string
+	}{
+		{"OPENAI", "", "https://api.openai.com"},
+		{"deepseek", "", "https://api.deepseek.com"},
+		{"siliconcloud", "", "https://api.siliconflow.cn/v1"},
+		{"siliconflow", "", "https://api.siliconflow.cn/v1"},
+		{"openrouter", "", "https://openrouter.ai/api"},
+		{"groq", "", "https://api.groq.com/openai"},
+		{"together", "", "https://api.together.xyz"},
+		{"fireworks", "", "https://api.fireworks.ai/inference"},
+		{"openai", "https://proxy.example/path/v1", "https://proxy.example/path/v1"},
+		{"unknown", "", "https://api.openai.com"},
+	} {
+		if got := getBaseURL(tc.provider, tc.custom); got != tc.want {
+			t.Fatalf("provider=%q custom=%q URL=%q want=%q", tc.provider, tc.custom, got, tc.want)
+		}
+	}
+	for _, tc := range []struct{ language, want string }{
+		{"Simplified Chinese", "zh"}, {"Traditional Chinese", "zh-tw"},
+		{"JAPANESE", "ja"}, {"French", "fr"}, {"Korean", "ko"},
+		{"Esperanto", "es"}, {"", "xx"}, {"x", "xx"},
+	} {
+		translator := NewLLMSubtrans(config.LLMSubtransConfig{}, config.TranslateConfig{TargetLang: tc.language}, nil)
+		if got := translator.getLangCode(); got != tc.want {
+			t.Fatalf("language=%q code=%q want=%q", tc.language, got, tc.want)
+		}
+	}
+}

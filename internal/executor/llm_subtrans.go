@@ -91,6 +91,62 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 	return translatedPath, nil
 }
 
+// getLangCode returns a short language code for filename.
 func (t *LLMSubtrans) getLangCode() string {
-	return (&Translator{cfg: t.translateCfg}).getLangCode()
+	langMap := map[string]string{
+		"simplified chinese":  "zh",
+		"traditional chinese": "zh-tw",
+		"chinese":             "zh",
+		"japanese":            "ja",
+		"korean":              "ko",
+		"spanish":             "es",
+		"french":              "fr",
+		"german":              "de",
+		"italian":             "it",
+		"portuguese":          "pt",
+		"russian":             "ru",
+		"english":             "en",
+		"thai":                "th",
+		"vietnamese":          "vi",
+		"indonesian":          "id",
+		"malay":               "ms",
+		"arabic":              "ar",
+		"hindi":               "hi",
+	}
+
+	lower := strings.ToLower(t.translateCfg.TargetLang)
+	if code, ok := langMap[lower]; ok {
+		return code
+	}
+
+	if len(t.translateCfg.TargetLang) >= 2 {
+		return strings.ToLower(t.translateCfg.TargetLang[:2])
+	}
+	return "xx"
+}
+
+// getBaseURL returns the OpenAI-compatible API base URL for the provider.
+func getBaseURL(provider, customServer string) string {
+	provider = strings.ToLower(provider)
+
+	baseURLs := map[string]string{
+		"openai":       "https://api.openai.com",
+		"deepseek":     "https://api.deepseek.com",
+		"openrouter":   "https://openrouter.ai/api",
+		"groq":         "https://api.groq.com/openai",
+		"together":     "https://api.together.xyz",
+		"fireworks":    "https://api.fireworks.ai/inference",
+		"siliconcloud": "https://api.siliconflow.cn/v1",
+		"siliconflow":  "https://api.siliconflow.cn/v1",
+	}
+
+	if customServer != "" {
+		return customServer
+	}
+
+	if url, ok := baseURLs[provider]; ok {
+		return url
+	}
+
+	return "https://api.openai.com"
 }

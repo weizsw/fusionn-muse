@@ -34,6 +34,7 @@ type subtitleTranslator interface {
 type Service struct {
 	cfgMgr             *config.Manager
 	folders            config.FoldersConfig
+	runner             toolrun.Runner
 	apprise            *apprise.Client
 	resolveExecutors   func(config.Config) (transcriber, subtitleTranslator, error)
 	detectHardSubtitle func(context.Context, string) (bool, error)
@@ -44,6 +45,7 @@ func New(cfgMgr *config.Manager, appriseClient *apprise.Client, folders config.F
 	return &Service{
 		cfgMgr:  cfgMgr,
 		folders: folders,
+		runner:  runner,
 		apprise: appriseClient,
 		resolveExecutors: func(cfg config.Config) (transcriber, subtitleTranslator, error) {
 			return resolveExecutorPair(cfg, runner)
@@ -57,7 +59,7 @@ func New(cfgMgr *config.Manager, appriseClient *apprise.Client, folders config.F
 func resolveExecutorPair(cfg config.Config, runner toolrun.Runner) (transcriber, subtitleTranslator, error) {
 	switch pipelineProvider(cfg) {
 	case "videocaptioner":
-		return executor.NewWhisper(cfg.Whisper, cfg.Translate, runner), executor.NewTranslator(cfg.Translate, runner), nil
+		return nil, nil, fmt.Errorf("VideoCaptioner/Whisper pipeline is no longer supported; configure mlx_qwen3_asr and explicitly select current settings to recover legacy attempts")
 	case "mlx_qwen3_asr":
 		return executor.NewHostASR(cfg.MLXQwen3ASR), executor.NewLLMSubtrans(cfg.LLMSubtrans, cfg.Translate, runner), nil
 	default:
@@ -68,6 +70,7 @@ func resolveExecutorPair(cfg config.Config, runner toolrun.Runner) (transcriber,
 func pipelineProvider(cfg config.Config) string {
 	provider := strings.ToLower(cfg.Pipeline.Provider)
 	if provider == "" {
+		// Preserve old snapshot meaning for rejection; never silently select MLX.
 		return "videocaptioner"
 	}
 	return provider
@@ -186,10 +189,27 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 	if start == "" {
 		start = queue.StagePreparing
 	}
+	if job.RecoveryTranslatedPath != "" {
+		job.TranslatedPath = job.RecoveryTranslatedPath
+	}
 	if start == queue.StageDelivered {
 		return queue.StageDelivered, nil
 	}
 	retranslation := job.AttemptKind == queue.AttemptRetranslate
+	paths := s.outputPaths(job, cfg)
+	if err := job.ClaimArtifacts(ctx, paths...); err != nil {
+		return "", err
+	}
+	if singleStage && start == queue.StageDelivering && !cfg.DryRun && !job.IsLight && s.isTranslationReceipt(job, job.TranslatedPath) {
+		input := filepath.Join(filepath.Dir(job.TranslatedPath), "source", filepath.Base(job.SubtitlePath))
+		same, err := fileOperationDone(job.SubtitlePath, input)
+		if err != nil {
+			return "", fmt.Errorf("verify translation source snapshot: %w", err)
+		}
+		if !same {
+			return queue.StageTranslating, nil
+		}
+	}
 	stagingPath := job.StagingPath
 	processingPath := job.ProcessingPath
 	preserveStaging := stagingPath != "" && samePath(job.SourcePath, stagingPath)
@@ -236,6 +256,9 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 		if err != nil {
 			return "", s.handleError(ctx, "move to processing", err)
 		}
+		if err := job.ValidateMedia(processingPath); err != nil {
+			return "", s.handleError(ctx, "move to processing", err)
+		}
 		job.ProcessingPath = processingPath
 		if !preserveStaging {
 			job.StagingPath = ""
@@ -271,16 +294,22 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 		}
 
 		if stageDue(start, queue.StageTranscribing) {
+			job.SubtitlePath = filepath.Join(s.folders.Transcriptions, subtitleOutputName(job.FileName, ".srt", ""))
 			if err := job.BeginStage(ctx, queue.StageTranscribing); err != nil {
 				return "", err
 			}
 			log.Infof("🎤 Step 3: Transcribing with %s...", provider)
 			t := startStep(ctx, "Transcription")
-			job.SubtitlePath = filepath.Join(s.folders.Transcriptions, subtitleOutputName(job.FileName, ".srt", ""))
 			if _, statErr := os.Stat(job.SubtitlePath); errors.Is(statErr, os.ErrNotExist) {
+				if err := job.ValidateMedia(processingPath); err != nil {
+					return "", s.handleError(ctx, "read processing media", err)
+				}
 				generated, transcribeErr := transcriber.Transcribe(ctx, processingPath)
 				if transcribeErr != nil {
 					return "", s.handleError(ctx, "transcription", transcribeErr)
+				}
+				if err := validateArtifact(generated); err != nil {
+					return "", s.handleError(ctx, "persist transcription", err)
 				}
 				if err := atomicCopy(ctx, generated, job.SubtitlePath); err != nil {
 					return "", s.handleError(ctx, "persist transcription", err)
@@ -290,6 +319,9 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 				}
 			} else if statErr != nil {
 				return "", s.handleError(ctx, "read persisted transcription", statErr)
+			}
+			if err := validateArtifact(job.SubtitlePath); err != nil {
+				return "", s.handleError(ctx, "read persisted transcription", err)
 			}
 			job.TranscriptionSource = provider
 			durations["transcription"] = t.done()
@@ -302,22 +334,20 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 		}
 
 		if stageDue(start, queue.StageTranslating) {
-			if err := job.BeginStage(ctx, queue.StageTranslating); err != nil {
-				return "", err
-			}
 			if job.SubtitlePath == "" {
-				return "", s.handleError(ctx, "read persisted transcription", fmt.Errorf("persisted transcription is missing"))
+				return "", s.handleError(ctx, "read persisted transcription", fmt.Errorf("%w: persisted transcription is missing", queue.ErrArtifactUnavailable))
 			}
-			file, statErr := os.Open(job.SubtitlePath)
-			if statErr != nil {
-				return "", s.handleError(ctx, "read persisted transcription", statErr)
+			if err := validateArtifact(job.SubtitlePath); err != nil {
+				return "", s.handleError(ctx, "read persisted transcription", err)
 			}
-			file.Close()
 			log.Infof("🌐 Step 4: Translating subtitle → %s...", cfg.Translate.TargetLang)
 			t := startStep(ctx, "Translation")
-			job.TranslatedPath, err = translator.Translate(ctx, job.SubtitlePath)
+			job.TranslatedPath, err = s.translateWithReceipt(ctx, job, translator)
 			if err != nil {
 				return "", s.handleError(ctx, "translation", err)
+			}
+			if err := validateArtifact(job.TranslatedPath); err != nil {
+				return "", s.handleError(ctx, "persist translation", err)
 			}
 			durations["translation"] = t.done()
 			if err := job.SaveCheckpoint(ctx, queue.StageTranslated); err != nil {
@@ -330,8 +360,18 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 	}
 
 	if stageDue(start, queue.StageDelivering) {
+		if singleStage && retranslation && job.Status == queue.StatusCompleted && job.RecoveryTranslatedPath == "" {
+			job.TranslatedPath = s.translationReceiptPath(job)
+		}
 		if err := job.BeginStage(ctx, queue.StageDelivering); err != nil {
 			return "", err
+		}
+		if !retranslation || job.Status != queue.StatusCompleted {
+			processingPath, err = s.reconcileMedia(job)
+			if err != nil {
+				return "", s.handleError(ctx, "read delivery media", err)
+			}
+			job.ProcessingPath = processingPath
 		}
 		if skipSubtitle {
 			if cfg.DryRun {
@@ -349,20 +389,20 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 				job.TranslatedPath = final
 			}
 		} else {
+			if err := validateArtifact(job.TranslatedPath); err != nil {
+				return "", s.handleError(ctx, "read translated subtitle", err)
+			}
 			final := filepath.Join(s.folders.Subtitles, subtitleOutputName(job.FileName, ".srt", cfg.Subtitle.LanguageSuffix))
 			if !samePath(job.TranslatedPath, final) {
 				if err := publishAtomically(ctx, job.TranslatedPath, final, job.AttemptID); err != nil {
 					return "", s.handleError(ctx, "publish translated subtitle", err)
-				}
-				if !samePath(job.TranslatedPath, job.SubtitlePath) {
-					_ = fileops.Remove(job.TranslatedPath) //nolint:errcheck // Best-effort cleanup after publish.
 				}
 			}
 			job.TranslatedPath = final
 		}
 
 		scrapingPath := filepath.Join(s.folders.Scraping, job.FileName)
-		if !retranslation || !samePath(processingPath, scrapingPath) {
+		if !retranslation || job.Status != queue.StatusCompleted {
 			if err := os.MkdirAll(s.folders.Scraping, 0755); err != nil {
 				return "", s.handleError(ctx, "prepare scraping folder", err)
 			}
@@ -411,7 +451,7 @@ func publishAtomically(ctx context.Context, src, dst string, attemptID int64) er
 		_ = os.Remove(tmp)
 		return fmt.Errorf("replace destination: %w", err)
 	}
-	return nil
+	return fileops.SyncDir(filepath.Dir(dst))
 }
 
 func moveToProcessing(ctx context.Context, job *queue.Job, stagingPath, processingPath string) (bool, error) {
@@ -421,9 +461,12 @@ func moveToProcessing(ctx context.Context, job *queue.Job, stagingPath, processi
 		return preserveStaging, err
 	}
 	if preserveStaging {
-		return true, fileops.HardlinkOrCopy(ctx, stagingPath, processingPath)
+		return true, fileops.HardlinkOrCopyNoReplace(ctx, stagingPath, processingPath)
 	}
-	return false, fileops.Move(ctx, stagingPath, processingPath)
+	if err := rejectExistingDestination(processingPath); err != nil {
+		return false, err
+	}
+	return false, fileops.MoveNoReplace(ctx, stagingPath, processingPath)
 }
 
 func hardlinkOrCopyOnce(ctx context.Context, source, destination string) error {
@@ -431,7 +474,7 @@ func hardlinkOrCopyOnce(ctx context.Context, source, destination string) error {
 	if err != nil || done {
 		return err
 	}
-	return fileops.HardlinkOrCopy(ctx, source, destination)
+	return fileops.HardlinkOrCopyNoReplace(ctx, source, destination)
 }
 
 func moveOnce(ctx context.Context, source, destination string) error {
@@ -439,7 +482,19 @@ func moveOnce(ctx context.Context, source, destination string) error {
 	if err != nil || done {
 		return err
 	}
-	return fileops.Move(ctx, source, destination)
+	if err := rejectExistingDestination(destination); err != nil {
+		return err
+	}
+	return fileops.MoveNoReplace(ctx, source, destination)
+}
+
+func rejectExistingDestination(path string) error {
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("artifact conflict: destination already exists: %s", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func fileOperationDone(source, destination string) (bool, error) {
@@ -518,6 +573,55 @@ func atomicCopy(ctx context.Context, source, destination string) error {
 	return os.Rename(tempPath, destination)
 }
 
+// A crash may leave a completed move ahead of its database update. Check all
+// known locations, rejecting changed or conflicting files instead of guessing.
+func (s *Service) reconcileMedia(job *queue.Job) (string, error) {
+	var selected string
+	seen := make(map[string]bool)
+	for _, path := range []string{job.ProcessingPath, filepath.Join(s.folders.Process, job.FileName), filepath.Join(s.folders.Failed, job.FileName), filepath.Join(s.folders.Scraping, job.FileName)} {
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err := job.ValidateMedia(path); err != nil {
+			return "", err
+		}
+		if selected == "" {
+			selected = path
+			continue
+		}
+		same, err := fileOperationDone(selected, path)
+		if err != nil {
+			return "", err
+		}
+		if !same {
+			return "", fmt.Errorf("%w: inconsistent media locations", queue.ErrArtifactConflict)
+		}
+	}
+	if selected == "" {
+		return "", fmt.Errorf("%w: media missing from known locations", queue.ErrArtifactUnavailable)
+	}
+	return selected, nil
+}
+
+func validateArtifact(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", queue.ErrArtifactUnavailable, path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return fmt.Errorf("%w: artifact must be a nonempty regular file: %s", queue.ErrArtifactUnavailable, path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
 func subtitleOutputName(videoName, subtitleExt, languageSuffix string) string {
 	baseName := strings.TrimSuffix(videoName, filepath.Ext(videoName))
 	if languageSuffix == "" {
@@ -577,7 +681,10 @@ func (s *Service) moveToFailed(ctx context.Context, job *queue.Job, currentPath 
 	if fileops.Exists(failedPath) {
 		return fmt.Errorf("failed folder already has an unrelated file: %s", failedPath)
 	}
-	if err := fileops.Move(ctx, currentPath, failedPath); err != nil {
+	if err := job.ValidateMedia(currentPath); err != nil {
+		return err
+	}
+	if err := fileops.MoveNoReplace(ctx, currentPath, failedPath); err != nil {
 		return fmt.Errorf("move to failed folder: %w", err)
 	}
 	job.ProcessingPath = failedPath
@@ -621,4 +728,39 @@ func (s *Service) NotifyFailure(ctx context.Context, job *queue.Job, stage queue
 	if notifyErr := s.apprise.NotifyError(ctx, title, body); notifyErr != nil {
 		logger.FromContext(ctx).Warnf("⚠️ Failed to send error notification: %v", notifyErr)
 	}
+}
+
+// PlanOutputPaths lets a naming repair reserve exactly the paths used by processing.
+func (s *Service) PlanOutputPaths(job *queue.Job, settings, name string) ([]string, error) {
+	cfg, err := configForAttempt(*s.cfgMgr.Get(), settings)
+	if err != nil {
+		return nil, err
+	}
+	planned := *job
+	planned.FileName = name
+	paths := s.outputPaths(&planned, cfg)
+	for _, path := range paths {
+		if len(filepath.Base(path)) > 255 {
+			return nil, fmt.Errorf("%w: output file name is too long", queue.ErrInvalidTaskAction)
+		}
+	}
+	return paths, nil
+}
+
+func (s *Service) outputPaths(job *queue.Job, cfg config.Config) []string {
+	outputName := mediaintake.CleanVideoFilename(job.FileName)
+	paths := []string{
+		filepath.Join(s.folders.Staging, job.FileName),
+		filepath.Join(s.folders.Process, outputName),
+		filepath.Join(s.folders.Scraping, outputName),
+		filepath.Join(s.folders.Failed, outputName),
+	}
+	if !cfg.DryRun && !job.IsLight {
+		paths = append(paths,
+			filepath.Join(s.folders.Transcriptions, subtitleOutputName(outputName, ".srt", "")),
+			filepath.Join(s.folders.Subtitles, subtitleOutputName(outputName, ".srt", cfg.Subtitle.LanguageSuffix)))
+	} else if job.SidecarSubtitlePath != "" {
+		paths = append(paths, filepath.Join(s.folders.Subtitles, subtitleOutputName(outputName, filepath.Ext(job.SidecarSubtitlePath), cfg.Subtitle.LanguageSuffix)))
+	}
+	return paths
 }

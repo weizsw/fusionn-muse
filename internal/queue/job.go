@@ -82,6 +82,7 @@ type Attempt struct {
 	Error                   string        `json:"error,omitempty"`
 	TranslationCacheEnabled bool          `json:"translation_cache_enabled"`
 	SettingsSnapshot        string        `json:"settings_snapshot,omitempty"`
+	RecoveryTranslatedPath  string        `json:"-"`
 	CreatedAt               time.Time     `json:"created_at"`
 	StartedAt               time.Time     `json:"started_at,omitempty"`
 	CompletedAt             time.Time     `json:"completed_at,omitempty"`
@@ -99,6 +100,7 @@ type Job struct {
 	Category         string    `json:"category"`
 	Status           JobStatus `json:"status"`
 	Error            string    `json:"error,omitempty"`
+	PersistenceError string    `json:"persistence_error,omitempty"`
 	Retries          int       `json:"retries"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
@@ -126,9 +128,11 @@ type Job struct {
 	AttemptError            string        `json:"attempt_error,omitempty"`
 	TranslationCacheEnabled bool          `json:"translation_cache_enabled"`
 	SettingsSnapshot        string        `json:"settings_snapshot,omitempty"`
+	RecoveryTranslatedPath  string        `json:"-"`
 
-	progress func(context.Context, *Job, Stage, bool) error
-	settings func(context.Context, int64, string) error
+	progress  func(context.Context, *Job, Stage, bool) error
+	settings  func(context.Context, int64, string) error
+	artifacts func(context.Context, *Job, []string) error
 }
 
 // JobDetail combines a Job with its Attempt history.

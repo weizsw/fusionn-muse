@@ -9,65 +9,11 @@ server:
 # Skip transcription & translation for testing file workflow
 dry_run: false
 
-# Select subtitle pipeline:
-#   videocaptioner  - current Docker-local VideoCaptioner transcribe.py + translate.py
-#   mlx_qwen3_asr   - host mlx-qwen3-asr transcription + container PySubtrans translation
+# Host ASR + container PySubtrans Custom Server.
+# Configure the MLX host and path mapping below. VideoCaptioner/empty legacy
+# providers no longer execute; old snapshots require explicit current-settings recovery.
 pipeline:
-  provider: "videocaptioner"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# WHISPER (Transcription)
-# ─────────────────────────────────────────────────────────────────────────────
-# Transcribe video audio to subtitles using VideoCaptioner's FasterWhisperASR.
-#
-# Features:
-#   - Hallucination filtering (removes common ASR artifacts)
-#   - VAD filtering with configurable method/threshold
-#   - Auto CJK (30 chars) vs Latin (90 chars) line width
-#   - Timing optimization
-whisper:
-  # Model (downloaded automatically if not present):
-  #   "tiny", "base", "small", "medium", "large-v2", "large-v3", "large-v3-turbo"
-  # Note: First run with a new model will download it (~1-3GB depending on size)
-  model: "large-v2"
-
-  # Source language hint (optional, "" or "auto" for auto-detect)
-  # Examples: "en", "ja", "zh", "ko"
-  language: ""
-
-  # Initial prompt for context (optional)
-  # Helps improve accuracy by providing topic, proper nouns, or expected content
-  # Examples:
-  #   - "This is a Japanese anime about cooking."
-  #   - "Technical discussion about Kubernetes and Docker."
-  #   - "名前: 田中太郎, 山田花子" (for proper name recognition)
-  prompt: ""
-
-  # ─── FasterWhisper Settings ───
-
-  # Device for inference: "cuda" (GPU), "cpu", or "auto" (recommended)
-  # Auto will use CUDA if available, otherwise CPU
-  device: "auto"
-
-  # Voice Activity Detection (VAD) - filters out non-speech audio (uses Silero VAD)
-  vad_filter: true
-  vad_threshold: 0.4 # 0.0-1.0, lower = more sensitive (0.4 matches VideoCaptioner)
-
-  # ─── Post-processing (like VideoCaptioner) ───
-  # Uses the translate LLM settings below
-
-  # Use LLM to fix recognition errors, remove filler words (um, uh, ah)
-  optimize_subtitles: false
-
-  # Use LLM to split long subtitles into shorter sentences (断句)
-  split_sentences: true
-
-  # Max characters/words per line for sentence splitting
-  max_cjk_chars: 25 # Chinese/Japanese/Korean
-  max_english_words: 18 # English and other languages (VideoCaptioner default)
-
-  # Remove trailing punctuation (，。) from subtitles
-  remove_punctuation: true
+  provider: "mlx_qwen3_asr"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MLX QWEN3 ASR (Host Transcription)
@@ -83,14 +29,9 @@ mlx_qwen3_asr:
   timeout_minutes: 180
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TRANSLATE (VideoCaptioner LLM Translator)
+# TRANSLATE (Shared LLM endpoint and model settings)
 # ─────────────────────────────────────────────────────────────────────────────
-# Translate subtitles using LLM with batch processing and validation.
-# Based on VideoCaptioner's translation engine with:
-#   - Auto-retry on malformed responses
-#   - JSON validation and repair
-#   - Reflection mode for higher quality
-#   - Built-in caching (7-day TTL)
+# mlx_qwen3_asr uses PySubtrans Custom Server with endpoint/model/key/target/instruction.
 #
 # Providers (all OpenAI-compatible):
 #   - "openai"       : OpenAI API (gpt-4o, gpt-4o-mini, etc.)
@@ -127,20 +68,6 @@ translate:
   #   - "Technical terms: API=接口, server=服务器"
   #   - "Use formal language style"
   instruction: ""
-
-  # ─── Quality settings ───
-  # Enable reflection mode for higher quality translation (2-3x slower)
-  # LLM translates, then self-critiques and improves the translation
-  use_reflect: false
-
-  # Number of parallel translation threads (concurrent API calls)
-  # Lower this if you hit rate limits!
-  # Recommended: 1-2 for SiliconCloud/budget providers, 4 for OpenAI
-  threads: 2
-
-  # Number of subtitles per API call (larger = fewer total calls)
-  # Larger batches are more efficient but may hit token limits
-  batch_size: 10
 
 # PySubtrans wrapper settings.
 # Used only when pipeline.provider is "mlx_qwen3_asr"; LLM endpoint/model/key/target/instruction
@@ -179,7 +106,7 @@ hard_sub_ocr:
 # ─────────────────────────────────────────────────────────────────────────────
 queue:
   # Durable SQLite state. Keep this path on persistent storage.
-  db_path: "/data/meta/fusionn-muse.db"
+  db_path: "/data/automation/meta/fusionn-muse.db"
   # Maximum total translation attempts before marking the job as failed.
   # Transcription failures are not retried automatically.
   max_retries: 4

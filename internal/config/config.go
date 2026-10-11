@@ -35,7 +35,8 @@ type ServerConfig struct {
 }
 
 type PipelineConfig struct {
-	// Provider: "videocaptioner" (current Docker scripts) or "mlx_qwen3_asr" (host ASR + PySubtrans).
+	// Provider: "mlx_qwen3_asr" (host ASR + PySubtrans).
+	// Empty and "videocaptioner" preserve legacy identity but cannot execute.
 	Provider string `mapstructure:"provider"`
 }
 
@@ -77,6 +78,8 @@ type FoldersConfig struct {
 	Failed         string // Failed jobs
 }
 
+// WhisperConfig preserves readable legacy snapshot data, not runtime support.
+// VideoCaptioner execution is retired; these fields have no active consumer.
 type WhisperConfig struct {
 	// Model: "tiny", "base", "small", "medium", "large-v2", "large-v3", "large-v3-turbo"
 	Model string `mapstructure:"model"`
@@ -122,6 +125,7 @@ type TranslateConfig struct {
 	// Instruction: custom prompt/terminology for translation
 	Instruction string `mapstructure:"instruction"`
 
+	// Retired VideoCaptioner controls, retained only for snapshot decoding.
 	// UseReflect: enable reflection mode for higher quality translation (slower)
 	UseReflect bool `mapstructure:"use_reflect"`
 	// Threads: number of parallel translation threads (default 4)
@@ -338,7 +342,7 @@ func newParser(path string) *viper.Viper {
 	v.SetEnvPrefix("FUSIONN_MUSE")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
-	v.SetDefault("queue.db_path", "/data/meta/fusionn-muse.db")
+	v.SetDefault("queue.db_path", "/data/automation/meta/fusionn-muse.db")
 	v.SetDefault("queue.max_retries", 4)
 	v.SetDefault("queue.retry_delay_ms", 10000)
 	return v

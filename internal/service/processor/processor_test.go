@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -215,44 +216,30 @@ func TestProcessUsesOCRToSkipHardSubbedVideo(t *testing.T) {
 }
 
 func TestProcessContinuesHeavyProcessingWhenHardSubProbeFails(t *testing.T) {
-	root := t.TempDir()
-	runner := &processorCommandRunner{
-		onOutput: func(name string, _ ...string) ([]byte, error) {
-			if name != "python3" {
-				t.Fatalf("unexpected output command: %s", name)
-			}
-			return nil, errors.New("probe failed")
-		},
-		onStream: func(name string, args ...string) (string, string, error) {
-			if name != "python3" || len(args) < 3 {
-				t.Fatalf("unexpected stream command: %s %#v", name, args)
-			}
-			if err := os.WriteFile(args[2], []byte("subtitle\n"), 0644); err != nil {
-				t.Fatalf("write command output: %v", err)
-			}
-			return "", "", nil
-		},
+	svc, _, folders, job := newProcessFixture(t, "SSNI-083.mp4")
+	runner := &processorCommandRunner{onOutput: func(string, ...string) ([]byte, error) {
+		return nil, errors.New("probe failed")
+	}}
+	svc.detectHardSubtitle = func(ctx context.Context, videoPath string) (bool, error) {
+		return detectHardSubOCR(ctx, runner, videoPath)
 	}
-	cfgMgr := newTestConfigManager(t, root, "")
-	defer cfgMgr.Stop()
-	folders := config.FoldersConfig{
-		Staging:        filepath.Join(root, "staging"),
-		Process:        filepath.Join(root, "processing"),
-		Scraping:       filepath.Join(root, "scraping"),
-		Subtitles:      filepath.Join(root, "subtitles"),
-		Transcriptions: filepath.Join(root, "transcriptions"),
-		Failed:         filepath.Join(root, "failed"),
+	var calls []string
+	svc.resolveExecutors = func(config.Config) (transcriber, subtitleTranslator, error) {
+		return transcriberFunc(func(_ context.Context, videoPath string) (string, error) {
+				calls = append(calls, "transcribe")
+				path := strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".srt"
+				return path, os.WriteFile(path, []byte("source subtitle"), 0644)
+			}), subtitleTranslatorFunc(func(_ context.Context, subtitlePath string) (string, error) {
+				calls = append(calls, "translate")
+				path := strings.TrimSuffix(subtitlePath, filepath.Ext(subtitlePath)) + ".zh.srt"
+				return path, os.WriteFile(path, []byte("translated subtitle"), 0644)
+			}), nil
 	}
-	source := filepath.Join(root, "input", "SSNI-083.mp4")
-	mustWriteTestFile(t, source, "video")
-
-	svc := New(cfgMgr, nil, folders, runner)
-	job := queue.NewJob("job1", source, "SSNI-083.mp4", "SSNI-083", "")
 	if err := svc.Process(context.Background(), job); err != nil {
 		t.Fatalf("Process returned error: %v", err)
 	}
-	if len(runner.streamCalls) != 2 {
-		t.Fatalf("stream calls = %#v, want transcription and translation", runner.streamCalls)
+	if strings.Join(calls, ",") != "transcribe,translate" || len(runner.outputCalls) != 1 {
+		t.Fatalf("calls = %v, OCR calls = %v", calls, runner.outputCalls)
 	}
 	if !fileExists(filepath.Join(folders.Subtitles, "SSNI-083.srt")) {
 		t.Fatal("translated subtitle was not delivered")
@@ -329,8 +316,8 @@ func TestProcessRetranslatesPersistedSourceWithoutTranscribing(t *testing.T) {
 				t.Fatal("retranslation invoked transcriber")
 				return "", nil
 			}), subtitleTranslatorFunc(func(_ context.Context, source string) (string, error) {
-				if source != job.SubtitlePath {
-					t.Fatalf("translation source = %q, want %q", source, job.SubtitlePath)
+				if data, err := os.ReadFile(source); err != nil || string(data) != "source subtitle" {
+					t.Fatalf("translation input = %q, %v, want persisted source", data, err)
 				}
 				generated := filepath.Join(folders.Transcriptions, "movie.new.srt")
 				return generated, os.WriteFile(generated, []byte("new translation"), 0644)
@@ -833,7 +820,7 @@ func sameFile(t *testing.T, a, b string) bool {
 func newTestConfigManager(t *testing.T, root string, suffix string) *config.Manager {
 	t.Helper()
 	cfgPath := filepath.Join(root, "config.yaml")
-	mustWriteTestFile(t, cfgPath, "dry_run: false\nsubtitle:\n  language_suffix: "+suffix+"\n")
+	mustWriteTestFile(t, cfgPath, "pipeline:\n  provider: mlx_qwen3_asr\ndry_run: false\nsubtitle:\n  language_suffix: "+suffix+"\n")
 	cfgMgr, err := config.NewManager(cfgPath)
 	if err != nil {
 		t.Fatalf("new config manager: %v", err)
@@ -848,5 +835,37 @@ func mustWriteTestFile(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestRecordedPipelineSelectionAfterLegacyRetirement(t *testing.T) {
+	for _, provider := range []string{"videocaptioner", "", "VIDEOCAPTIONER", "mlx_qwen3_asr"} {
+		t.Run("snapshot="+provider, func(t *testing.T) {
+			current := config.Config{Pipeline: config.PipelineConfig{Provider: "mlx_qwen3_asr"}, Translate: config.TranslateConfig{APIKey: "current-key"}}
+			recorded := config.Config{Pipeline: config.PipelineConfig{Provider: provider}, Translate: config.TranslateConfig{Model: "recorded-model"}, Whisper: config.WhisperConfig{Model: "recorded-asr"}}
+			snapshot, err := snapshotSettings(recorded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := configForAttempt(current, snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Pipeline.Provider != provider || cfg.Whisper.Model != "recorded-asr" || cfg.Translate.Model != "recorded-model" || cfg.Translate.APIKey != "current-key" {
+				t.Fatal("recorded settings were changed")
+			}
+			runner := &processorCommandRunner{}
+			asr, translator, err := resolveExecutorPair(cfg, runner)
+			if provider == "mlx_qwen3_asr" {
+				if err != nil || fmt.Sprintf("%T", asr) != "*executor.HostASR" || fmt.Sprintf("%T", translator) != "*executor.LLMSubtrans" {
+					t.Fatalf("modern pipeline = %T / %T, error=%v", asr, translator, err)
+				}
+			} else if err == nil || asr != nil || translator != nil {
+				t.Fatalf("legacy snapshot must be rejected, got %T / %T, error=%v", asr, translator, err)
+			}
+			if len(runner.runCalls)+len(runner.outputCalls)+len(runner.streamCalls) != 0 {
+				t.Fatal("executor selection started external work")
+			}
+		})
 	}
 }

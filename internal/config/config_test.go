@@ -91,8 +91,41 @@ llm_subtrans:
 	if cfg.LLMSubtrans.TimeoutMinutes != 180 {
 		t.Fatalf("llm-subtrans timeout = %d", cfg.LLMSubtrans.TimeoutMinutes)
 	}
-	if cfg.Queue.DBPath != "/data/meta/fusionn-muse.db" || cfg.Queue.MaxRetries != 4 || cfg.Queue.RetryDelayMs != 10000 {
+	if cfg.Queue.DBPath != "/data/automation/meta/fusionn-muse.db" || cfg.Queue.MaxRetries != 4 || cfg.Queue.RetryDelayMs != 10000 {
 		t.Fatalf("queue defaults = %+v", cfg.Queue)
+	}
+}
+
+func TestQueueDBPathDefaultAndExplicitPathsSurviveReload(t *testing.T) {
+	for _, item := range []struct{ name, setting, want string }{
+		{"default", "", "/data/automation/meta/fusionn-muse.db"},
+		{"explicit legacy", "queue:\n  db_path: /data/meta/fusionn-muse.db\n", "/data/meta/fusionn-muse.db"},
+		{"explicit custom", "queue:\n  db_path: /custom/state.db\n", "/custom/state.db"},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(item.setting+"dry_run: false\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil || cfg.Queue.DBPath != item.want {
+				t.Fatalf("load=%+v error=%v", cfg, err)
+			}
+			manager, err := NewManager(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Stop()
+			if err := os.WriteFile(path, []byte(item.setting+"dry_run: true\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.Reload(); err != nil {
+				t.Fatal(err)
+			}
+			if manager.Get().Queue.DBPath != item.want || !manager.Get().DryRun {
+				t.Fatalf("reload=%+v", manager.Get())
+			}
+		})
 	}
 }
 
@@ -104,5 +137,24 @@ func writeConfig(t *testing.T, path string, dryRun bool) {
 	}
 	if err := os.WriteFile(path, []byte("dry_run: "+value+"\n"), 0644); err != nil {
 		t.Fatalf("write config %s: %v", path, err)
+	}
+}
+
+func TestExampleRecommendsMLXWithoutChangingLegacyOmittedProvider(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config", "config.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Pipeline.Provider != "mlx_qwen3_asr" {
+		t.Fatalf("example recommends deprecated pipeline %q", cfg.Pipeline.Provider)
+	}
+	path := filepath.Join(t.TempDir(), "legacy.yaml")
+	writeConfig(t, path, false)
+	legacy, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Pipeline.Provider != "" {
+		t.Fatalf("legacy omitted provider was silently changed to %q", legacy.Pipeline.Provider)
 	}
 }

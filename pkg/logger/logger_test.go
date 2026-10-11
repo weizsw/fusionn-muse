@@ -68,3 +68,13 @@ func TestJobContextsDoNotLeak(t *testing.T) {
 	close(start)
 	wg.Wait()
 }
+
+func TestSubmissionPrefixIsNotAJobID(t *testing.T) {
+	ctx := WithSubmission(context.Background(), "submission-a")
+	if Prefix(ctx) != "submission=submission-a " || JobID(ctx) != "" || Attempt(ctx) != 0 {
+		t.Fatalf("preparation correlation = %q, Job %q, Attempt %d", Prefix(ctx), JobID(ctx), Attempt(ctx))
+	}
+	if Prefix(WithJob(ctx, "job-a")) != "job-a " {
+		t.Fatal("Submission correlation leaked into Job")
+	}
+}
