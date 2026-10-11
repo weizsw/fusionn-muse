@@ -75,11 +75,12 @@ type Queue struct {
 	maxRetries int
 	retryDelay time.Duration
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	state     queueState
-	stoppedCh chan struct{}
+	ctx               context.Context
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
+	state             queueState
+	stoppedCh         chan struct{}
+	persistenceErrors sync.Map
 }
 
 var memoryQueueID atomic.Uint64
@@ -122,6 +123,10 @@ func (q *Queue) Start() {
 		return
 	}
 	q.state = queueRunning
+	if _, ok := q.processor.(submissionPreparer); ok {
+		q.wg.Add(1)
+		go q.submissionWorker()
+	}
 	if _, ok := q.processor.(stageProcessor); ok {
 		q.wg.Add(3)
 		q.mu.Unlock()
@@ -206,20 +211,41 @@ func (q *Queue) Accept(job *Job) error {
 	if err := q.store.reserveJob(&owned); err != nil {
 		return err
 	}
-	staged := owned.StagingPath != ""
-	if staged && owned.SourcePath != owned.StagingPath {
-		if signature := fileSignature(owned.StagingPath); signature != "" {
-			if signature != owned.ContentSignature {
-				return q.failAdmission(&owned, fmt.Errorf("staging destination already contains different media: %s", owned.StagingPath))
-			}
-		} else if err := fileops.HardlinkOrCopyNoReplace(q.ctx, owned.SourcePath, owned.StagingPath); err != nil {
-			return q.failAdmission(&owned, fmt.Errorf("stage media: %w", err))
-		}
-	}
-	if err := q.store.completeAdmission(&owned, staged); err != nil {
-		return q.failAdmission(&owned, fmt.Errorf("persist prepared admission: %w", err))
+	if err := q.prepareAdmission(&owned); err != nil {
+		return q.failAdmission(&owned, err)
 	}
 	q.wake(&owned)
+	return nil
+}
+
+func (q *Queue) prepareAdmission(job *Job) error {
+	if err := q.ctx.Err(); err != nil {
+		return err
+	}
+	staged := job.StagingPath != ""
+	if staged {
+		if err := q.store.claimArtifacts(q.ctx, job, []string{job.StagingPath}); err != nil {
+			return err
+		}
+		if signature := fileSignature(job.StagingPath); signature != "" {
+			if signature != job.ContentSignature {
+				return fmt.Errorf("staging destination already contains different media: %s", job.StagingPath)
+			}
+		} else {
+			if job.SourcePath == job.StagingPath {
+				return fmt.Errorf("prepared media is missing or unreadable: %s", job.StagingPath)
+			}
+			if job.ContentSignature != "" && fileSignature(job.SourcePath) != job.ContentSignature {
+				return fmt.Errorf("source media changed or became unreadable: %s", job.SourcePath)
+			}
+			if err := fileops.HardlinkOrCopyNoReplace(q.ctx, job.SourcePath, job.StagingPath); err != nil {
+				return fmt.Errorf("stage media: %w", err)
+			}
+		}
+	}
+	if err := q.store.completeAdmission(job, staged); err != nil {
+		return fmt.Errorf("persist prepared admission: %w", err)
+	}
 	return nil
 }
 
@@ -244,6 +270,7 @@ func (q *Queue) GetJob(id string) *Job {
 	if err != nil {
 		return nil
 	}
+	q.attachPersistenceError(job)
 	return job
 }
 
@@ -267,6 +294,7 @@ func (q *Queue) GetJobDetail(id string) *JobDetail {
 	if err != nil {
 		return nil
 	}
+	q.attachPersistenceError(job)
 	return &JobDetail{Job: *job, Attempts: attempts}
 }
 
@@ -277,6 +305,9 @@ func (q *Queue) GetAllJobs() []*Job {
 	if err != nil {
 		logger.Errorf("list jobs: %v", err)
 		return nil
+	}
+	for _, job := range jobs {
+		q.attachPersistenceError(job)
 	}
 	return jobs
 }
@@ -311,6 +342,9 @@ func (q *Queue) ListJobs(cursor string, limit int) ([]*Job, string, error) {
 	}
 	if jobs == nil {
 		jobs = []*Job{}
+	}
+	for _, job := range jobs {
+		q.attachPersistenceError(job)
 	}
 	if len(jobs) <= limit {
 		return jobs, "", nil
@@ -517,8 +551,13 @@ func (q *Queue) launchStaged(job *Job) {
 
 func (q *Queue) processStagedAttempt(job *Job) {
 	processor := q.processor.(stageProcessor)
-	job.progress = q.store.updateProgress
-	job.settings = q.store.saveSettings
+	job.progress = q.persistProgress
+	job.settings = func(ctx context.Context, id int64, snapshot string) error {
+		return q.persist(ctx, job.ID, "persist settings", func() error { return q.store.saveSettings(ctx, id, snapshot) })
+	}
+	job.artifacts = func(ctx context.Context, job *Job, paths []string) error {
+		return q.persist(ctx, job.ID, "claim artifacts", func() error { return q.store.claimArtifacts(ctx, job, paths) })
+	}
 	ctx := logger.WithAttempt(logger.WithJob(q.ctx, job.ID), job.Retries+1)
 	log := logger.FromContext(ctx)
 	log.Infof("🔄 Processing %s stage: %s", job.AttemptStage, job.FileName)
@@ -534,8 +573,7 @@ func (q *Queue) processStagedAttempt(job *Job) {
 	restoreLifecycle(job, lifecycle)
 
 	if processErr == nil && nextStage != StageDelivered {
-		if err := q.store.handoff(job, nextStage); err != nil {
-			log.Errorf("persist stage handoff: %v", err)
+		if err := q.persist(ctx, job.ID, "persist stage handoff", func() error { return q.store.handoff(job, nextStage) }); err != nil {
 			return
 		}
 		q.wake(job)
@@ -579,8 +617,13 @@ func restoreLifecycle(job *Job, lifecycle Job) {
 
 func (q *Queue) processAttempt(job *Job) {
 	for {
-		job.progress = q.store.updateProgress
-		job.settings = q.store.saveSettings
+		job.progress = q.persistProgress
+		job.settings = func(ctx context.Context, id int64, snapshot string) error {
+			return q.persist(ctx, job.ID, "persist settings", func() error { return q.store.saveSettings(ctx, id, snapshot) })
+		}
+		job.artifacts = func(ctx context.Context, job *Job, paths []string) error {
+			return q.persist(ctx, job.ID, "claim artifacts", func() error { return q.store.claimArtifacts(ctx, job, paths) })
+		}
 		ctx := logger.WithAttempt(logger.WithJob(q.ctx, job.ID), job.Retries+1)
 		log := logger.FromContext(ctx)
 		log.Infof("🔄 Processing job: %s", job.FileName)
@@ -656,10 +699,17 @@ func (q *Queue) finishAttempt(ctx context.Context, job *Job, processErr error) (
 			}
 		}
 	}
-	return q.store.finish(job, processErr, q.maxRetries)
+	var retry *Job
+	err := q.persist(ctx, job.ID, "persist attempt result", func() error {
+		var err error
+		stage, retry, err = q.store.finish(job, processErr, q.maxRetries)
+		return err
+	})
+	return stage, retry, err
 }
 
 func canAutomaticallyRetry(job *Job, stage Stage, processErr error, maxAttempts int) bool {
 	return processErr != nil && !errors.Is(processErr, context.Canceled) &&
+		!errors.Is(processErr, ErrArtifactConflict) && !errors.Is(processErr, ErrArtifactUnavailable) &&
 		stage == StageTranslating && !job.IsLight && job.Retries+1 < maxAttempts
 }

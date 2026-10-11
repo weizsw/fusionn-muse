@@ -1,0 +1,5 @@
+# Unify observation by latest execution, retaining Job outcome
+
+Operators need one failure/recovery view that includes preparation before a Job exists and failed retranslation after a Job completed. Project unresolved Submissions and Jobs into one paginated list/SQL statistics, replacing resolved receipts with their Job; expose latest execution status separately from the retained Job outcome, and bound detail history. This is an observation, not another task identity or stored queue.
+
+Remove the overlapping queue/jobs/submissions/file/folder-retry HTTP surfaces rather than maintaining incompatible count and recovery rules. The operator approved this breaking client migration; original Submission IDs and all history remain queryable. Explicit actions use the recovered execution's configuration by default, with current configuration opt-in, and allow audited output-name repair only before a complete Transcription exists. Names are not identities; repair retains Job/Media identity and conservative path claims without moving completed artifacts or releasing another Job's ownership.

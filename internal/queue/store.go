@@ -45,7 +45,7 @@ func openStore(path string) (*store, error) {
 	if strings.Contains(dsn, "?") {
 		separator = "&"
 	}
-	dsn += separator + "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	dsn += separator + "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)"
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -70,7 +70,7 @@ func openStore(path string) (*store, error) {
 }
 
 func (s *store) migrate() error {
-	const currentSchemaVersion = 2
+	const currentSchemaVersion = 5
 	var version int
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read state database version: %w", err)
@@ -120,13 +120,14 @@ CREATE TABLE IF NOT EXISTS attempts (
 	settings_snapshot TEXT NOT NULL DEFAULT '',
 	created_at INTEGER NOT NULL,
 	started_at INTEGER NOT NULL DEFAULT 0,
-	completed_at INTEGER NOT NULL DEFAULT 0
+	completed_at INTEGER NOT NULL DEFAULT 0,
+	request_meta TEXT NOT NULL DEFAULT '{}'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS attempts_one_active_per_job
 	ON attempts(job_id) WHERE status IN ('pending', 'processing');
 CREATE INDEX IF NOT EXISTS attempts_pending_order ON attempts(status, id);
 `
-	if _, err := s.db.Exec(schema); err != nil {
+	if _, err := s.db.Exec(schema + submissionSchema + artifactSchema); err != nil {
 		return fmt.Errorf("migrate state database: %w", err)
 	}
 	if version >= currentSchemaVersion {
@@ -141,6 +142,7 @@ CREATE INDEX IF NOT EXISTS attempts_pending_order ON attempts(status, id);
 	for _, statement := range []string{
 		`ALTER TABLE jobs ADD COLUMN content_signature TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE jobs ADD COLUMN source_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE attempts ADD COLUMN request_meta TEXT NOT NULL DEFAULT '{}'`,
 	} {
 		if _, err := tx.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 			return fmt.Errorf("migrate state database: %w", err)
@@ -155,7 +157,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_source_key_fallback_unique
 CREATE INDEX IF NOT EXISTS jobs_history_order ON jobs(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS attempts_job_history ON attempts(job_id, id);
-PRAGMA user_version = 2;`); err != nil {
+INSERT INTO artifact_claims(path, job_id)
+	SELECT path, id FROM (
+		SELECT staging_path AS path, id FROM jobs UNION ALL
+		SELECT processing_path, id FROM jobs UNION ALL
+		SELECT subtitle_path, id FROM jobs UNION ALL
+		SELECT translated_path, id FROM jobs
+	) WHERE path<>''
+	ON CONFLICT(path) DO UPDATE SET conflicted=CASE
+		WHEN artifact_claims.job_id<>excluded.job_id THEN 1 ELSE artifact_claims.conflicted END;
+CREATE INDEX IF NOT EXISTS submission_runs_job ON submission_runs(job_id,submission_id);
+PRAGMA user_version = 5;`); err != nil {
 		return fmt.Errorf("migrate state database: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -171,6 +183,10 @@ func (s *store) interruptAbandoned() error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`UPDATE submission_runs SET status=?, error=?, completed_at=? WHERE status=?`,
+		SubmissionInterrupted, "service stopped during preparation", now, SubmissionPreparing); err != nil {
+		return fmt.Errorf("interrupt submissions: %w", err)
+	}
 	if _, err := tx.Exec(`UPDATE attempts SET status=?, error=?, completed_at=? WHERE status=?`, AttemptInterrupted, "service stopped during processing", now, AttemptProcessing); err != nil {
 		return fmt.Errorf("interrupt attempts: %w", err)
 	}
@@ -189,7 +205,7 @@ func (s *store) reserveJob(job *Job) error {
 	return s.insertJobWithStatus(job, AttemptProcessing)
 }
 
-func (s *store) insertJobWithStatus(job *Job, attemptStatus AttemptStatus) error {
+func prepareStoredJob(job *Job) {
 	now := time.Now()
 	if job.SourceKey == "" {
 		job.SourceKey = MediaID(job.FileName)
@@ -208,12 +224,24 @@ func (s *store) insertJobWithStatus(job *Job, attemptStatus AttemptStatus) error
 	job.Status = StatusPending
 	job.Error = ""
 	job.Checkpoint = ""
-	start := StagePreparing
+}
+
+func (s *store) insertJobWithStatus(job *Job, attemptStatus AttemptStatus) error {
+	prepareStoredJob(job)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := s.insertJobTx(tx, job, attemptStatus); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *store) insertJobTx(tx *sql.Tx, job *Job, attemptStatus AttemptStatus) error {
+	now := time.Now()
+	start := StagePreparing
 	if existing, getErr := queryJobByIdentity(tx, job.ContentSignature, job.SourceKey); getErr == nil {
 		return &ConflictError{JobID: existing.ID, Status: existing.Status}
 	} else if !errors.Is(getErr, ErrNotFound) {
@@ -223,7 +251,7 @@ func (s *store) insertJobWithStatus(job *Job, attemptStatus AttemptStatus) error
 		job.Status = StatusProcessing
 		job.StartedAt = now
 	}
-	_, err = tx.Exec(`INSERT INTO jobs (`+jobColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := tx.Exec(`INSERT INTO jobs (`+jobColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		job.ID, job.MediaID, job.ContentSignature, job.SourceKey, job.SourcePath, job.FileName, job.TorrentName, job.Category,
 		job.Status, job.Error, 0, unixNano(job.CreatedAt), unixNano(job.UpdatedAt), unixNano(job.StartedAt), 0,
 		boolInt(job.IsLight), job.SubtitleDetectionReason, job.SidecarSubtitlePath, job.StagingPath,
@@ -249,9 +277,6 @@ func (s *store) insertJobWithStatus(job *Job, attemptStatus AttemptStatus) error
 		}
 	}
 	if _, err := tx.Exec(`UPDATE attempts SET settings_snapshot=? WHERE id=?`, job.SettingsSnapshot, attemptID); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
 		return err
 	}
 	setAttempt(job, Attempt{ID: attemptID, JobID: job.ID, Kind: AttemptInitial, Status: attemptStatus,
@@ -349,8 +374,8 @@ func (s *store) claimNextStage(lane workerLane, automaticReadyBefore time.Time) 
 	args := []any{AttemptPending, AttemptAutomatic, AttemptRetranslate, automaticReadyBefore.UnixNano()}
 	switch lane {
 	case laneOrchestration:
-		predicate = `AND (j.is_light=1 OR ` + effectiveStage + ` IN (?,?,?))`
-		args = append(args, StagePreparing, StageMoving, StageDelivering)
+		predicate = `AND (j.is_light=1 OR ` + effectiveStage + ` IN (?,?,?,?))`
+		args = append(args, StagePreparing, StageMoving, StageDelivering, StageDelivered)
 	case laneTranscription:
 		predicate = `AND j.is_light=0 AND ` + effectiveStage + `=?`
 		args = append(args, StageTranscribing)
@@ -440,6 +465,9 @@ func startAttemptTx(tx *sql.Tx, attempt Attempt) (*Job, error) {
 	attempt.CurrentStage = attempt.StartStage
 	attempt.StartedAt = now
 	setAttempt(job, attempt)
+	if err := loadAttemptWork(tx, job); err != nil {
+		return nil, err
+	}
 	return job, nil
 }
 
@@ -469,6 +497,9 @@ func startStagedAttemptTx(tx *sql.Tx, attempt Attempt) (*Job, error) {
 		attempt.StartedAt = now
 	}
 	setAttempt(job, attempt)
+	if err := loadAttemptWork(tx, job); err != nil {
+		return nil, err
+	}
 	return job, nil
 }
 
@@ -479,21 +510,23 @@ func (s *store) updateProgress(ctx context.Context, job *Job, stage Stage, check
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	result, err := tx.ExecContext(ctx, `UPDATE attempts SET current_stage=? WHERE id=? AND status=?`, stage, job.AttemptID, AttemptProcessing)
+	result, err := tx.ExecContext(ctx, `UPDATE attempts SET current_stage=?,request_meta=json_set(request_meta,'$.translated_path',?,'$.checkpoint',
+		CASE WHEN ?=1 THEN ? ELSE COALESCE(json_extract(request_meta,'$.checkpoint'),'') END,
+		'$.receipt_path',CASE WHEN ?='translating' THEN ? ELSE COALESCE(json_extract(request_meta,'$.receipt_path'),'') END)
+		WHERE id=? AND status=?`, stage, job.TranslatedPath, boolInt(checkpoint), stage, stage, job.TranslatedPath, job.AttemptID, AttemptProcessing)
 	if err != nil {
 		return fmt.Errorf("persist progress: %w", err)
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return fmt.Errorf("persist progress: attempt %d is not processing", job.AttemptID)
 	}
-	if checkpoint {
-		_, err = tx.ExecContext(ctx, `UPDATE jobs SET file_name=?, staging_path=?, processing_path=?, subtitle_path=?, translated_path=?,
-			checkpoint=CASE WHEN ?='retranslation' THEN checkpoint ELSE ? END, transcription_source=?, is_light=?, subtitle_detection_reason=?, sidecar_subtitle_path=?, updated_at=? WHERE id=?`,
-			job.FileName, job.StagingPath, job.ProcessingPath, job.SubtitlePath, job.TranslatedPath,
-			job.AttemptKind, stage, job.TranscriptionSource, boolInt(job.IsLight), job.SubtitleDetectionReason, job.SidecarSubtitlePath, now, job.ID)
-		if err != nil {
-			return fmt.Errorf("persist progress: %w", err)
-		}
+	_, err = tx.ExecContext(ctx, `UPDATE jobs SET file_name=?, staging_path=?, processing_path=?, subtitle_path=?,
+		translated_path=CASE WHEN ?='retranslation' AND status='completed' THEN translated_path ELSE ? END,
+		checkpoint=CASE WHEN ?='retranslation' OR ?=0 THEN checkpoint ELSE ? END, transcription_source=?, is_light=?, subtitle_detection_reason=?, sidecar_subtitle_path=?, updated_at=? WHERE id=?`,
+		job.FileName, job.StagingPath, job.ProcessingPath, job.SubtitlePath, job.AttemptKind, job.TranslatedPath,
+		job.AttemptKind, boolInt(checkpoint), stage, job.TranscriptionSource, boolInt(job.IsLight), job.SubtitleDetectionReason, job.SidecarSubtitlePath, now, job.ID)
+	if err != nil {
+		return fmt.Errorf("persist progress: %w", err)
 	}
 	return tx.Commit()
 }

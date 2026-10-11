@@ -82,3 +82,7 @@ Cerlancism/chatgpt-subtitle-translator 的 CLI、翻译历史上下文、自适�
 13. [llm-subtrans v1.6.0 TranslationClient](https://github.com/machinewrapped/llm-subtrans/blob/v1.6.0/PySubtrans/TranslationClient.py)
 14. [部署 commit 的 VideoCaptioner logging HTTPX client](https://github.com/WEIFENG2333/VideoCaptioner/blob/95842ecb5618c0b6a548a336bdfb0eb859bdb501/videocaptioner/core/llm/request_logger.py)
 15. [VideoCaptioner LICENSE](https://github.com/WEIFENG2333/VideoCaptioner/blob/master/LICENSE)
+
+## 后续退役状态
+
+VideoCaptioner 已在当前代码、配置与脚本中标记 deprecated，保留旧配置／快照兼容；新示例推荐 `mlx_qwen3_asr` + PySubtrans Custom Server。以上候选比较是研究时点的证据，不再代表新部署的推荐入口。镜像仍含兼容依赖，不因标记 deprecated 自动变小；旧 SDK 的超时／重试也未被本轮改写。切换链路须显式选择当前配置，不能偷偷修改历史快照。

@@ -82,7 +82,7 @@ func main() {
 	router.Use(requestLogger())
 
 	// Register routes
-	h := handler.New(jobQueue, folders, cfgMgr.Reload)
+	h := handler.New(jobQueue, cfgMgr.Reload)
 	h.RegisterRoutes(router)
 
 	srv := &http.Server{
@@ -102,17 +102,24 @@ func main() {
 	// Print startup info
 	logger.Info("")
 	logger.Infof("📂 Data folders (mount these in Docker):")
-	logger.Infof("   /data/input     → Torrent downloads (read)")
-	logger.Infof("   /data/finished  → Processed videos (write)")
-	logger.Infof("   /data/subtitles → Translated subtitles (write)")
+	logger.Infof("   %s → Torrent downloads (read)", folders.Input)
+	logger.Infof("   %s → Processed videos (write)", folders.Scraping)
+	logger.Infof("   %s → Translated subtitles (write)", folders.Subtitles)
+	logger.Infof("   %s → Durable task state", cfg.Queue.DBPath)
 	logger.Info("")
-	logger.Infof("🎤 Whisper: FasterWhisper (model: %s)", cfg.Whisper.Model)
+	provider := cfg.Pipeline.Provider
+	if provider == "" {
+		provider = "videocaptioner (unsupported; configure mlx_qwen3_asr)"
+	}
+	logger.Infof("🎤 Pipeline: %s", provider)
 	logger.Infof("🌐 Translate: %s → %s", cfg.Translate.Provider, cfg.Translate.TargetLang)
 	logger.Info("")
 	logger.Infof("🌐 API server: http://localhost:%d", cfg.Server.Port)
 	logger.Infof("   POST /api/v1/webhook/torrent  - qBittorrent callback")
-	logger.Infof("   POST /api/v1/retry/staging    - Re-queue staging files")
-	logger.Infof("   POST /api/v1/retry/failed     - Re-queue failed files")
+	logger.Infof("   GET  /api/v1/tasks            - Paginated task list")
+	logger.Infof("   GET  /api/v1/tasks/stats      - Latest execution statistics")
+	logger.Infof("   GET  /api/v1/tasks/:kind/:id  - Task detail and history")
+	logger.Infof("   POST /api/v1/tasks/:kind/:id/actions - Explicit recovery")
 	logger.Info("")
 	logger.Info("────────────────────────────────────────────────────────────────")
 	logger.Info("✅  Ready! Waiting for torrent completion webhooks...")

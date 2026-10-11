@@ -4,6 +4,14 @@ Fusionn-Muse turns completed media downloads into processed videos with translat
 
 ## Language
 
+**Submission**:
+A well-formed business request to accept source media into subtitle processing, with its own outcome before a Media item is resolved. It may be rejected, ignored, fail or be interrupted during preparation, or resolve to a new or existing Job.
+_Avoid_: Job, Attempt
+
+**Preparation run**:
+One execution that resolves a Submission's input into a Media item and hands it off to a Job. A later Preparation run preserves the submitted input and the outcomes of earlier runs.
+_Avoid_: Attempt, Job stage
+
 **Job**:
 One Media item accepted into the subtitle-processing pipeline, including all Attempts. A Job retains the same Job ID throughout its lifecycle.
 _Avoid_: Trace, request
@@ -12,12 +20,16 @@ _Avoid_: Trace, request
 The globally unique correlation identifier for all activity belonging to one Job.
 _Avoid_: Trace ID
 
+**Video code**:
+A human-readable catalogue identifier such as SNOS-411, used by operators to locate a Media item's Job. Different media versions may share a Video code, and changing an output name does not change the original media's Video code.
+_Avoid_: Job ID, Media item identity
+
 **Attempt**:
 One execution of a Job. Manual retries, Translation retries, Retranslations, and Resumes are later Attempts that retain the Job ID.
 _Avoid_: Retry as the name for the initial execution
 
 **Manual retry**:
-A manually requested Attempt for a terminally failed Job that starts at the first incomplete stage.
+A manually requested retry of a failed Job execution, starting at its first incomplete stage. Retrying failed Retranslation preserves both its purpose and any prior completed Job outcome.
 _Avoid_: Manual requeue, new Job, Retranslation
 
 **Media item**:
@@ -45,8 +57,12 @@ A Job whose Attempt was running when the service stopped without recording a fin
 _Avoid_: Queued Job, automatically resumed Job, successful Job
 
 **Resume**:
-A manually requested Attempt for an Interrupted Job that starts at its first incomplete stage while retaining the Job ID.
+A manually requested Attempt for an interrupted Job execution, starting at its first incomplete stage while retaining the Job ID. Resuming interrupted Retranslation preserves any prior completed Job outcome.
 _Avoid_: Manual retry, automatic retry
+
+**Artifact claim**:
+A Job's recorded ownership of an output path, retained across Attempts. It prevents another Media item's Job from reusing or replacing that output; it does not prove that a stage completed or that the output exists.
+_Avoid_: Stage checkpoint
 
 **Stage checkpoint**:
 Durable evidence that a Job stage completed successfully.
@@ -76,4 +92,3 @@ _Avoid_: Chinese text detected
 - Preparation, file movement, delivery, and light-media work run outside the heavy lanes and may run concurrently.
 - An automatic Translation retry is a later Attempt. Its delay is persisted outside the Translation lane, so other eligible Translation work may run while it waits.
 - Exhausted Transcription or Translation failures move unfinished media from `processing` to `failed`. Intermediate Translation failures do not move media. A failed Retranslation of a completed Job preserves its delivered media.
-- `POST /api/v1/retry/failed` and `POST /api/v1/retry/failed/:name` retry eligible failed Jobs. Accepted media moves directly from `failed` to `processing`, and the new Attempt starts at the first incomplete durable checkpoint. Orphans and Jobs with active Attempts are skipped.

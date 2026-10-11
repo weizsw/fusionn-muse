@@ -54,15 +54,42 @@ else
 fi
 log "  Category: $CATEGORY"
 
-# Send webhook to fusionn-muse
-RESPONSE=$(curl -s -X POST "$MUSE_URL/api/v1/webhook/torrent" \
-    -H "Content-Type: application/json" \
-    -d "{\"path\": \"$CONTENT_PATH\", \"name\": \"$TORRENT_NAME\", \"category\": \"$CATEGORY\"}" \
-    2>&1)
+# Encode JSON strings without requiring Python or jq in the qBittorrent container.
+json_string() {
+    local value="$1" encoded='"' char code i
+    local LC_ALL=C
+    for ((i=0; i<${#value}; i++)); do
+        char="${value:i:1}"
+        case "$char" in
+            '"') encoded+='\"' ;;
+            '\') encoded+='\\' ;;
+            *)
+                printf -v code '%d' "'$char"
+                if ((code >= 0 && code < 32)); then
+                    printf -v char '\\u%04x' "$code"
+                fi
+                encoded+="$char"
+                ;;
+        esac
+    done
+    printf '%s"' "$encoded"
+}
 
-if [ $? -eq 0 ]; then
-    log "  Webhook sent successfully: $RESPONSE"
+PAYLOAD="{\"path\":$(json_string "$CONTENT_PATH"),\"name\":$(json_string "$TORRENT_NAME"),\"category\":$(json_string "$CATEGORY")}"
+
+# One bounded attempt. Unsent notifications are resubmitted manually, not queued.
+RESPONSE=$(curl -sS --connect-timeout 5 --max-time 15 \
+    -X POST "${MUSE_URL%/}/api/v1/webhook/torrent" \
+    -H "Content-Type: application/json" \
+    --data "$PAYLOAD" --write-out $'\n%{http_code}' 2>&1)
+CURL_STATUS=$?
+HTTP_STATUS="${RESPONSE##*$'\n'}"
+RESPONSE="${RESPONSE%$'\n'*}"
+
+if [[ "$CURL_STATUS" -eq 0 && "$HTTP_STATUS" == "202" ]]; then
+    log "  Webhook sent successfully (HTTP 202): $RESPONSE"
 else
-    log "  Webhook failed: $RESPONSE"
+    log "  Webhook failed (curl=$CURL_STATUS, HTTP $HTTP_STATUS): $RESPONSE"
+    exit 1
 fi
 

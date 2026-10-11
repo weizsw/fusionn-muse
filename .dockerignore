@@ -1,0 +1,14 @@
+# Send only runtime scripts and Go sources; exclude secrets, data and local caches.
+**
+!go.mod
+!go.sum
+!requirements.txt
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!pkg/
+!pkg/**
+!scripts/
+!scripts/llm_subtrans_translate.py
+!scripts/detect_hard_sub.py

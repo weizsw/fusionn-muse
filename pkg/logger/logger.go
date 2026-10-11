@@ -14,8 +14,9 @@ import (
 var Log *zap.SugaredLogger
 
 type correlation struct {
-	jobID   string
-	attempt int
+	jobID        string
+	submissionID string
+	attempt      int
 }
 
 type correlationKey struct{}
@@ -23,6 +24,11 @@ type correlationKey struct{}
 // WithJob adds a Job ID to ctx for correlated logging.
 func WithJob(ctx context.Context, jobID string) context.Context {
 	return context.WithValue(ctx, correlationKey{}, correlation{jobID: jobID})
+}
+
+// WithSubmission correlates preparation logs before there is a Job ID.
+func WithSubmission(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, correlationKey{}, correlation{submissionID: id})
 }
 
 // WithAttempt adds an Attempt number while preserving the Job ID in ctx.
@@ -46,6 +52,10 @@ func Attempt(ctx context.Context) int {
 func Prefix(ctx context.Context) string {
 	jobID := JobID(ctx)
 	if jobID == "" {
+		value, _ := ctx.Value(correlationKey{}).(correlation)
+		if value.submissionID != "" {
+			return "submission=" + value.submissionID + " "
+		}
 		return ""
 	}
 	return jobID + " "

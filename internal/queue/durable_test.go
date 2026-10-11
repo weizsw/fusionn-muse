@@ -169,8 +169,8 @@ func TestStoreMigratesLegacyMediaIdentity(t *testing.T) {
 	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("schema version = %d, want 2", version)
+	if version != 5 {
+		t.Fatalf("schema version = %d, want 5", version)
 	}
 	if err := store.insertJob(NewJob("duplicate", "/missing/SONE-269.mp4", "SONE-269.mp4", "", "")); !errors.Is(err, ErrDuplicateMedia) {
 		t.Fatalf("legacy duplicate error = %v, want %v", err, ErrDuplicateMedia)

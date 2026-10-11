@@ -1,81 +1,38 @@
-# ════════════════════════════════════════════════════════════════════════════
-# STAGE 1: Build Go binary
-# ════════════════════════════════════════════════════════════════════════════
-FROM golang:1.23-alpine AS go-builder
+# syntax=docker/dockerfile:1
+FROM golang:1.26.0-alpine AS go-builder
 
-WORKDIR /app
-
+WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
-
-COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+COPY pkg ./pkg
 
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -ldflags="-s -w -X github.com/fusionn-muse/internal/version.Version=${VERSION}" \
-    -o fusionn-muse ./cmd/fusionn-muse
+    -o /fusionn-muse ./cmd/fusionn-muse
 
-# ════════════════════════════════════════════════════════════════════════════
-# STAGE 2: Final image
-# ════════════════════════════════════════════════════════════════════════════
-FROM python:3.11-slim
+FROM python:3.11-slim-trixie
 
 WORKDIR /app
+ENV ENV=production \
+    CONFIG_PATH=/app/config/config.yaml \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Install runtime dependencies (including fonts for subtitle rendering)
+# Media preparation and CPU OCR; ASR runs on the MLX host.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    curl \
-    ca-certificates \
-    tzdata \
-    libgomp1 \
-    fonts-noto-cjk \
-    libarchive-tools \
-    7zip \
-    nrg2iso \
+    ffmpeg ca-certificates tzdata libgomp1 libarchive-tools 7zip nrg2iso \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone VideoCaptioner and install Python dependencies
-# Based on VideoCaptioner pyproject.toml (excluding GUI packages like PyQt5)
-RUN apt-get update && apt-get install -y --no-install-recommends git && \
-    git clone https://github.com/WEIFENG2333/VideoCaptioner.git /app/videocaptioner --depth 1 && \
-    if [ ! -e /app/videocaptioner/app ] && [ -d /app/videocaptioner/videocaptioner ]; then \
-        ln -s /app/videocaptioner/videocaptioner /app/videocaptioner/app; \
-    fi && \
-    pip install --no-cache-dir \
-        faster-whisper \
-        requests \
-        openai \
-        json-repair \
-        diskcache \
-        langdetect \
-        tenacity \
-        pydub \
-        GPUtil \
-        Pillow \
-        rapidocr \
-        onnxruntime \
-        fonttools \
-        "pysubtrans[openai]" && \
-    apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --no-compile -r requirements.txt && python -m pip check
 
-# Add VideoCaptioner to Python path
-ENV PYTHONPATH="/app/videocaptioner"
-
-# Copy scripts
-COPY scripts/transcribe.py /app/scripts/transcribe.py
-COPY scripts/subtitle_processor.py /app/scripts/subtitle_processor.py
-COPY scripts/translate.py /app/scripts/translate.py
-COPY scripts/llm_subtrans_translate.py /app/scripts/llm_subtrans_translate.py
-COPY scripts/detect_hard_sub.py /app/scripts/detect_hard_sub.py
-
-# Copy Go binary
-COPY --from=go-builder /app/fusionn-muse .
-
-# Create data directories and models cache
-RUN mkdir -p /data/input /data/staging /data/processing /data/finished /data/subtitles /data/failed /app/models
-
-ENV ENV=production
-ENV CONFIG_PATH=/app/config/config.yaml
+COPY scripts/llm_subtrans_translate.py scripts/detect_hard_sub.py ./scripts/
+COPY --from=go-builder /fusionn-muse ./fusionn-muse
 
 CMD ["./fusionn-muse"]
