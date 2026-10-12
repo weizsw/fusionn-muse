@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,7 +53,8 @@ type MLXQwen3ASRConfig struct {
 
 type LLMSubtransConfig struct {
 	TimeoutMinutes int     `mapstructure:"timeout_minutes"`
-	RateLimit      float64 `mapstructure:"rate_limit"` // Translation requests/minute; 0 disables batch pacing.
+	RateLimit      float64 `mapstructure:"rate_limit"`  // Translation requests/minute; 0 disables batch pacing.
+	MaxRetries     int     `mapstructure:"max_retries"` // Retries after the initial batch request; minimum/default 1.
 }
 
 // Folders returns hardcoded folder paths (user mounts via Docker volumes).
@@ -187,7 +189,7 @@ func NewManager(path string) (*Manager, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, err
 	}
-	if err := validate(&cfg); err != nil {
+	if err := validate(&cfg, v); err != nil {
 		return nil, err
 	}
 
@@ -267,7 +269,7 @@ func (m *Manager) Reload() error {
 		m.mu.Unlock()
 		return err
 	}
-	if err := validate(&newCfg); err != nil {
+	if err := validate(&newCfg, m.v); err != nil {
 		m.mu.Unlock()
 		return err
 	}
@@ -340,14 +342,19 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, err
 	}
-	if err := validate(&cfg); err != nil {
+	if err := validate(&cfg, v); err != nil {
 		return nil, err
 	}
 
 	return &cfg, nil
 }
 
-func validate(cfg *Config) error {
+func validate(cfg *Config, v *viper.Viper) error {
+	// Unmarshal truncates fractional numbers when decoding integer fields.
+	retries, err := strconv.Atoi(v.GetString("llm_subtrans.max_retries"))
+	if err != nil || retries < 1 {
+		return fmt.Errorf("llm_subtrans.max_retries must be a positive integer")
+	}
 	rate := cfg.LLMSubtrans.RateLimit
 	if rate < 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
 		return fmt.Errorf("llm_subtrans.rate_limit must be a finite non-negative number")
@@ -366,5 +373,6 @@ func newParser(path string) *viper.Viper {
 	v.SetDefault("queue.max_retries", 4)
 	v.SetDefault("queue.retry_delay_ms", 10000)
 	v.SetDefault("llm_subtrans.rate_limit", 0.0)
+	v.SetDefault("llm_subtrans.max_retries", 1)
 	return v
 }
