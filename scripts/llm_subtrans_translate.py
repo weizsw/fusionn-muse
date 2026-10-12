@@ -45,6 +45,13 @@ def non_negative_rate(value: str) -> float:
     return rate
 
 
+def positive_retries(value: str) -> int:
+    retries = int(value)
+    if retries < 1:
+        raise argparse.ArgumentTypeError("Max retries must be at least 1")
+    return retries
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Translate subtitles with PySubtrans")
     parser.add_argument("--input", required=True, help="Input subtitle path")
@@ -55,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True, help="Model name")
     parser.add_argument("--instruction", default="", help="Additional translation instruction")
     parser.add_argument("--ratelimit", type=non_negative_rate, default=0.0, help="Translation requests per minute (0 disables pacing)")
+    parser.add_argument("--max-retries", type=positive_retries, default=1, help="Retries after the initial batch request (minimum/default 1)")
     return parser.parse_args()
 
 
@@ -74,7 +82,7 @@ def main() -> int:
         supports_system_messages=True,
         stream_responses=False,
         timeout=180,
-        max_retries=1,
+        max_retries=args.max_retries,
         api_key=args.api_key,
         model=args.model,
         target_language=args.target,

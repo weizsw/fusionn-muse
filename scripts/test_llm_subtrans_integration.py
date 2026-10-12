@@ -27,6 +27,7 @@ class CustomServerProtocolTest(unittest.TestCase):
         self.input.write_text("1\n00:00:01,000 --> 00:00:02,000\nこんにちは。\n", encoding="utf-8")
         self.requests = []
         self.status = 200
+        self.status_sequence = None
         self.response_line_numbers = None
         test = self
 
@@ -34,7 +35,8 @@ class CustomServerProtocolTest(unittest.TestCase):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 test.requests.append((self.path, self.headers.get("Authorization"), body))
-                if test.status == 200:
+                status = test.status_sequence[len(test.requests) - 1] if test.status_sequence else test.status
+                if status == 200:
                     line_number = test.response_line_numbers[len(test.requests) - 1] if test.response_line_numbers else 1
                     content = {
                         "model": "grok-4.5",
@@ -46,7 +48,7 @@ class CustomServerProtocolTest(unittest.TestCase):
                 else:
                     content = {"error": {"message": "service unavailable"}}
                 data = json.dumps(content).encode()
-                self.send_response(test.status)
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -124,16 +126,39 @@ class CustomServerProtocolTest(unittest.TestCase):
                 self.assertEqual([m["role"] for m in body["messages"]], ["system", "user"])
                 self.assertIn("Use natural spoken Chinese.", body["messages"][0]["content"])
 
-    def test_server_failure_stops_after_one_retry(self):
+    def test_server_failure_stops_after_configured_retries(self):
         from PySubtrans.SubtitleError import TranslationImpossibleError
 
         self.status = 503
-        with mock.patch("time.sleep"), self.assertRaises(TranslationImpossibleError):
-            self.run_translation(self.base_url + "/v1")
-        self.assertEqual(len(self.requests), 2)
-        self.assertFalse(self.output.exists())
+        for args, retries in [((), 1), (("--max-retries", "1"), 1), (("--max-retries", "5"), 5)]:
+            with self.subTest(args=args):
+                self.requests.clear()
+                with mock.patch("time.sleep") as sleep, self.assertRaises(TranslationImpossibleError):
+                    self.run_translation(self.base_url + "/v1", *args)
+                self.assertEqual(len(self.requests), retries + 1)
+                self.assertEqual(sleep.call_args_list, [mock.call(3.0 * 2 ** i) for i in range(retries)])
+                self.assertFalse(self.output.exists())
 
-    def test_read_timeout_uses_180_seconds_and_only_one_retry(self):
+    def test_retry_recovers_batch_without_repeating_completed_batch(self):
+        self.input.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nこんにちは。\n\n"
+            "2\n00:02:01,000 --> 00:02:02,000\nこんにちは。\n\n"
+            "3\n00:04:01,000 --> 00:04:02,000\nこんにちは。\n",
+            encoding="utf-8",
+        )
+        self.status_sequence = [200, 503, 503, 200, 200]
+        self.response_line_numbers = [1, 2, 2, 2, 3]
+        with mock.patch("time.sleep") as sleep:
+            self.assertEqual(self.run_translation(self.base_url + "/v1", "--max-retries", "5"), 0)
+        self.assertEqual(len(self.requests), 5)
+        self.assertEqual([self.requests[i][2] for i in (1, 2)], [self.requests[3][2]] * 2)
+        self.assertEqual(sleep.call_args_list, [mock.call(3.0), mock.call(6.0)])
+        translated = self.output.read_text(encoding="utf-8")
+        self.assertEqual(translated.count("你好。"), 3)
+        for timestamp in ("00:00:01,000", "00:02:01,000", "00:04:01,000"):
+            self.assertIn(timestamp, translated)
+
+    def test_read_timeout_uses_180_seconds_and_configured_retries(self):
         import httpx
         from PySubtrans.SubtitleError import TranslationImpossibleError
 
@@ -147,13 +172,15 @@ class CustomServerProtocolTest(unittest.TestCase):
         def create_client(**kwargs):
             return original_client(**kwargs, transport=httpx.MockTransport(timeout))
 
-        with mock.patch.object(httpx, "Client", side_effect=create_client), mock.patch("time.sleep"):
-            with self.assertRaises(TranslationImpossibleError):
-                self.run_translation(self.base_url + "/v1")
-        self.assertEqual(len(requests), 2)
-        self.assertEqual(requests[0].extensions["timeout"]["read"], 180)
-        self.assertEqual(requests[1].extensions["timeout"]["read"], 180)
-        self.assertFalse(self.output.exists())
+        for args, retries in [((), 1), (("--max-retries", "5"), 5)]:
+            with self.subTest(args=args):
+                requests.clear()
+                with mock.patch.object(httpx, "Client", side_effect=create_client), mock.patch("time.sleep"):
+                    with self.assertRaises(TranslationImpossibleError):
+                        self.run_translation(self.base_url + "/v1", *args)
+                self.assertEqual(len(requests), retries + 1)
+                self.assertTrue(all(request.extensions["timeout"]["read"] == 180 for request in requests))
+                self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":

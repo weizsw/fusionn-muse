@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/fusionn-muse/pkg/logger"
@@ -178,6 +179,82 @@ func TestLoadAndReloadTranslationRateLimit(t *testing.T) {
 	}
 	if err := manager.Reload(); err != nil || manager.Get().LLMSubtrans.RateLimit != 0.5 {
 		t.Fatalf("reload=%+v error=%v", manager.Get(), err)
+	}
+}
+
+func TestLoadAndReloadTranslationMaxRetries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeConfig(t, path, false)
+	cfg, err := Load(path)
+	if err != nil || cfg.LLMSubtrans.MaxRetries != 1 {
+		t.Fatalf("load default=%+v error=%v", cfg, err)
+	}
+	manager, err := NewManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Stop()
+	for _, setting := range []struct {
+		value string
+		want  int
+	}{{"5", 5}, {"1", 1}, {"", 1}} {
+		content := "dry_run: false\n"
+		if setting.value != "" {
+			content += "llm_subtrans:\n  max_retries: " + setting.value + "\n"
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil || cfg.LLMSubtrans.MaxRetries != setting.want {
+			t.Fatalf("load=%+v want=%d error=%v", cfg, setting.want, err)
+		}
+		if err := manager.Reload(); err != nil || manager.Get().LLMSubtrans.MaxRetries != setting.want {
+			t.Fatalf("reload=%+v want=%d error=%v", manager.Get(), setting.want, err)
+		}
+	}
+}
+
+func TestTranslationMaxRetriesRejectsInvalidValuesWithoutReplacingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("llm_subtrans:\n  max_retries: 5\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Stop()
+	for _, value := range []string{"0", "-1", "1.5", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte("llm_subtrans:\n  max_retries: "+value+"\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("invalid retry count accepted by Load")
+			}
+			if bad, err := NewManager(path); err == nil {
+				bad.Stop()
+				t.Fatal("invalid retry count accepted by NewManager")
+			}
+			if err := manager.Reload(); err == nil || manager.Get().LLMSubtrans.MaxRetries != 5 {
+				t.Fatalf("invalid reload replaced valid config: %+v error=%v", manager.Get(), err)
+			}
+		})
+	}
+	for _, value := range []uint16{1, 400, 0} {
+		t.Run("normalized "+strconv.Itoa(int(value)), func(t *testing.T) {
+			if err := os.WriteFile(path, []byte("llm_subtrans:\n  max_retries: "+strconv.Itoa(int(value))+"\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if value == 0 && err == nil {
+				t.Fatal("zero retries accepted by Load")
+			}
+			if value != 0 && err != nil {
+				t.Fatalf("integer retries rejected: %v", err)
+			}
+		})
 	}
 }
 

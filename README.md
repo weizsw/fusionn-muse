@@ -89,7 +89,17 @@ translate:
 
 Run `host_asr_server.py` on macOS with `mlx-qwen3-asr` installed. The container calls its `/transcribe` endpoint; the host process maps `/data/...` to `host_prefix` and runs the MLX CLI locally.
 
-This pipeline translates through PySubtrans's **Custom Server** client using the OpenAI-compatible `/chat/completions` endpoint. Keep `translate.custom_server` as the API base URL, including `/v1` or any reverse-proxy prefix. Requests are non-streaming, with a **180-second HTTP timeout and one retry**; there are no OpenAI SDK retries. The HTTP timeout measures inactivity, not total request duration. `llm_subtrans.timeout_minutes` remains the separate whole-file deadline. Python logs stream once at their original levels; translation failures report a short reason rather than replaying accumulated stderr, and deadlines/cancellation are distinguished from process failures.
+This pipeline translates through PySubtrans's **Custom Server** client using the OpenAI-compatible `/chat/completions` endpoint. Keep `translate.custom_server` as the API base URL, including `/v1` or any reverse-proxy prefix. Requests are non-streaming, with a **180-second HTTP timeout and one retry by default**; there are no OpenAI SDK retries. The HTTP timeout measures inactivity, not total request duration. `llm_subtrans.timeout_minutes` remains the separate whole-file deadline. Python logs stream once at their original levels; translation failures report a short reason rather than replaying accumulated stderr, and deadlines/cancellation are distinguished from process failures.
+
+`llm_subtrans.max_retries` controls retries after the initial request for a subtitle batch when it times out, cannot connect, or receives HTTP 5xx. It defaults to `1`; `5` allows up to six HTTP attempts per request, with PySubtrans's exponential backoff. Only positive integers are supported: PySubtrans 1.7.3 treats `0` as three retries, so Muse rejects it. Batch validation/retranslation can make additional requests; this setting is not a total request budget for a batch. `queue.max_retries` separately controls total whole-file Translation Attempts. The 180-second HTTP timeout and whole-file deadline remain in effect.
+
+```yaml
+llm_subtrans:
+  timeout_minutes: 180
+  max_retries: 5
+```
+
+Retry counts follow the Attempt's settings snapshot. Old snapshots without this option keep one retry. To apply a new value to a failed execution, use `{"action":"retry","use_current_settings":true}`; completed Jobs use `retranslate` instead.
 
 Optional `llm_subtrans.rate_limit` exposes PySubtrans's `--ratelimit` in **requests/minute (RPM)**. It accepts finite non-negative numbers; omitted or `0` preserves unpaced execution. For example:
 

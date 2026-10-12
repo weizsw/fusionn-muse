@@ -119,6 +119,8 @@ func configForAttempt(current config.Config, snapshot string) (config.Config, er
 	// Snapshots made before rate_limit existed used no pacing. Only explicit
 	// current-settings actions should adopt a newly configured limit.
 	current.LLMSubtrans.RateLimit = 0
+	// Snapshots made before max_retries existed always retried once.
+	current.LLMSubtrans.MaxRetries = 1
 	if err := json.Unmarshal([]byte(snapshot), &current); err != nil {
 		return config.Config{}, fmt.Errorf("load settings snapshot: %w", err)
 	}
