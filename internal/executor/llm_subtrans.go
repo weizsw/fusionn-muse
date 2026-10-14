@@ -73,8 +73,7 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 	}
 
 	log.Infof("🌐 Translating with PySubtrans: %s → %s", filepath.Base(subtitlePath), t.translateCfg.TargetLang)
-	log.Debugf("  Command: python3 %s --input %s --output %s --target %s --base-url %s --model %s",
-		llmSubtransScript, subtitlePath, translatedPath, t.translateCfg.TargetLang, baseURL, model)
+	log.Debugf("  Command: %s", formatCommandLog("python3", args))
 
 	_, stderrStr, err := t.runner.Stream(ctx, "python3", args...)
 	if err != nil {
@@ -100,6 +99,26 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 
 	log.Infof("✅ PySubtrans translation complete: %s", filepath.Base(translatedPath))
 	return translatedPath, nil
+}
+
+// formatCommandLog constructs a debug log string representing the executed command,
+// redacting sensitive credentials and quoting arguments that contain spaces or newlines.
+func formatCommandLog(command string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, command)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if i > 0 && args[i-1] == "--api-key" {
+			parts = append(parts, "***")
+			continue
+		}
+		if strings.ContainsAny(arg, " \t\n\"'") {
+			parts = append(parts, strconv.Quote(arg))
+		} else {
+			parts = append(parts, arg)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // getLangCode returns a short language code for filename.

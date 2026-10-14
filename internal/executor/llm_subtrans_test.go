@@ -278,3 +278,26 @@ func TestLLMSubtransPassesConfiguredRateLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatCommandLog(t *testing.T) {
+	args := []string{
+		"/app/scripts/llm_subtrans_translate.py",
+		"--input", "/data/sub.srt",
+		"--output", "/data/sub.zh.srt",
+		"--target", "Simplified Chinese",
+		"--api-key", "secret-key-12345",
+		"--base-url", "http://192.168.1.1:3425/v1",
+		"--model", "model-name",
+		"--instruction", "Translate faithfully.\nLine 2.",
+		"--max-retries", "10",
+		"--request-timeout", "300",
+		"--ratelimit", "60",
+	}
+
+	got := formatCommandLog("python3", args)
+	want := `python3 /app/scripts/llm_subtrans_translate.py --input /data/sub.srt --output /data/sub.zh.srt --target "Simplified Chinese" --api-key *** --base-url http://192.168.1.1:3425/v1 --model model-name --instruction "Translate faithfully.\nLine 2." --max-retries 10 --request-timeout 300 --ratelimit 60`
+
+	if got != want {
+		t.Fatalf("formatCommandLog() =\n%s\nwant:\n%s", got, want)
+	}
+}
