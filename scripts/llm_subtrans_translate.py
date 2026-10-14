@@ -52,6 +52,13 @@ def positive_retries(value: str) -> int:
     return retries
 
 
+def positive_timeout(value: str) -> int:
+    timeout = int(value)
+    if timeout < 1:
+        raise argparse.ArgumentTypeError("Request timeout must be at least 1 second")
+    return timeout
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Translate subtitles with PySubtrans")
     parser.add_argument("--input", required=True, help="Input subtitle path")
@@ -63,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--instruction", default="", help="Additional translation instruction")
     parser.add_argument("--ratelimit", type=non_negative_rate, default=0.0, help="Translation requests per minute (0 disables pacing)")
     parser.add_argument("--max-retries", type=positive_retries, default=1, help="Retries after the initial batch request (minimum/default 1)")
+    parser.add_argument("--request-timeout", type=positive_timeout, default=180, help="HTTP request timeout in seconds (minimum 1, default 180)")
     return parser.parse_args()
 
 
@@ -81,7 +89,7 @@ def main() -> int:
         supports_conversation=True,
         supports_system_messages=True,
         stream_responses=False,
-        timeout=180,
+        timeout=args.request_timeout,
         max_retries=args.max_retries,
         api_key=args.api_key,
         model=args.model,

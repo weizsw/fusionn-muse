@@ -52,9 +52,10 @@ type MLXQwen3ASRConfig struct {
 }
 
 type LLMSubtransConfig struct {
-	TimeoutMinutes int     `mapstructure:"timeout_minutes"`
-	RateLimit      float64 `mapstructure:"rate_limit"`  // Translation requests/minute; 0 disables batch pacing.
-	MaxRetries     int     `mapstructure:"max_retries"` // Retries after the initial batch request; minimum/default 1.
+	TimeoutMinutes        int     `mapstructure:"timeout_minutes"`
+	RateLimit             float64 `mapstructure:"rate_limit"`              // Translation requests/minute; 0 disables batch pacing.
+	MaxRetries            int     `mapstructure:"max_retries"`             // Retries after the initial batch request; minimum/default 1.
+	RequestTimeoutSeconds int     `mapstructure:"request_timeout_seconds"` // HTTP timeout in seconds per batch request; minimum 1, default 180.
 }
 
 // Folders returns hardcoded folder paths (user mounts via Docker volumes).
@@ -355,6 +356,10 @@ func validate(cfg *Config, v *viper.Viper) error {
 	if err != nil || retries < 1 {
 		return fmt.Errorf("llm_subtrans.max_retries must be a positive integer")
 	}
+	timeout, err := strconv.Atoi(v.GetString("llm_subtrans.request_timeout_seconds"))
+	if err != nil || timeout < 1 {
+		return fmt.Errorf("llm_subtrans.request_timeout_seconds must be a positive integer")
+	}
 	rate := cfg.LLMSubtrans.RateLimit
 	if rate < 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
 		return fmt.Errorf("llm_subtrans.rate_limit must be a finite non-negative number")
@@ -374,5 +379,6 @@ func newParser(path string) *viper.Viper {
 	v.SetDefault("queue.retry_delay_ms", 10000)
 	v.SetDefault("llm_subtrans.rate_limit", 0.0)
 	v.SetDefault("llm_subtrans.max_retries", 1)
+	v.SetDefault("llm_subtrans.request_timeout_seconds", 180)
 	return v
 }

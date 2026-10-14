@@ -64,6 +64,9 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 	if t.cfg.MaxRetries > 0 {
 		args = append(args, "--max-retries", strconv.Itoa(t.cfg.MaxRetries))
 	}
+	if t.cfg.RequestTimeoutSeconds > 0 {
+		args = append(args, "--request-timeout", strconv.Itoa(t.cfg.RequestTimeoutSeconds))
+	}
 	if t.cfg.RateLimit > 0 {
 		args = append(args, "--ratelimit", strconv.FormatFloat(t.cfg.RateLimit, 'f', -1, 64))
 		log.Infof("⏱️ PySubtrans batch pacing: %g requests/minute", t.cfg.RateLimit)
