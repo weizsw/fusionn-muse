@@ -41,11 +41,12 @@ class CustomServerTranslationTest(unittest.TestCase):
                     "--instruction", "Use natural spoken Chinese.",
                 ]
                 for config_args, expected_kwargs in [
-                    ((), {"timeout": 180, "max_retries": 1, "backoff": 3.0}),
-                    (("--max-retries", "5"), {"timeout": 180, "max_retries": 5, "backoff": 3.0}),
-                    (("--request-timeout", "300"), {"timeout": 300, "max_retries": 1, "backoff": 3.0}),
-                    (("--retry-backoff", "0"), {"timeout": 180, "max_retries": 1, "backoff": 0.0}),
-                    (("--retry-backoff", "1.5"), {"timeout": 180, "max_retries": 1, "backoff": 1.5}),
+                    ((), {"timeout": 180, "max_retries": 1, "backoff": 3.0, "min_batch": 10, "max_batch": 100}),
+                    (("--max-retries", "5"), {"timeout": 180, "max_retries": 5, "backoff": 3.0, "min_batch": 10, "max_batch": 100}),
+                    (("--request-timeout", "300"), {"timeout": 300, "max_retries": 1, "backoff": 3.0, "min_batch": 10, "max_batch": 100}),
+                    (("--retry-backoff", "0"), {"timeout": 180, "max_retries": 1, "backoff": 0.0, "min_batch": 10, "max_batch": 100}),
+                    (("--retry-backoff", "1.5"), {"timeout": 180, "max_retries": 1, "backoff": 1.5, "min_batch": 10, "max_batch": 100}),
+                    (("--min-batch-size", "20", "--max-batch-size", "50"), {"timeout": 180, "max_retries": 1, "backoff": 3.0, "min_batch": 20, "max_batch": 50}),
                 ]:
                     with mock.patch.dict(sys.modules, {"PySubtrans": fake_pysubtrans, "PySubtrans.Providers.Clients.CustomClient": mock.MagicMock()}), mock.patch.object(sys, "argv", argv + list(config_args)):
                         self.assertEqual(llm_subtrans_translate.main(), 0)
@@ -60,11 +61,45 @@ class CustomServerTranslationTest(unittest.TestCase):
                         "timeout": expected_kwargs["timeout"],
                         "max_retries": expected_kwargs["max_retries"],
                         "backoff_time": expected_kwargs["backoff"],
+                        "min_batch_size": expected_kwargs["min_batch"],
+                        "max_batch_size": expected_kwargs["max_batch"],
                         "api_key": "test-key",
                         "model": "grok-4.5",
                         "target_language": "Simplified Chinese",
                         "instruction_args": ["Use natural spoken Chinese."],
                     })
+
+
+class BatchSizeArgumentsTest(unittest.TestCase):
+    def test_batch_sizes_default_to_10_and_100_and_accept_positive_integers(self):
+        argv = [str(SCRIPT), "--input", "input.srt", "--output", "output.srt", "--target", "Chinese",
+                "--api-key", "offline-key", "--base-url", "http://example.test", "--model", "test-model"]
+        for extra, expected_min, expected_max in [
+            ([], 10, 100),
+            (["--min-batch-size=20", "--max-batch-size=50"], 20, 50),
+            (["--min-batch-size=1", "--max-batch-size=1"], 1, 1),
+        ]:
+            with self.subTest(extra=extra), mock.patch.object(sys, "argv", argv + extra):
+                args = llm_subtrans_translate.parse_args()
+                self.assertEqual(args.min_batch_size, expected_min)
+                self.assertEqual(args.max_batch_size, expected_max)
+
+    def test_rejects_invalid_batch_sizes_and_max_smaller_than_min(self):
+        argv = [str(SCRIPT), "--input", "input.srt", "--output", "output.srt", "--target", "Chinese",
+                "--api-key", "offline-key", "--base-url", "http://example.test", "--model", "test-model"]
+        for extra in [
+            ["--min-batch-size=0"],
+            ["--min-batch-size=-1"],
+            ["--min-batch-size=1.5"],
+            ["--max-batch-size=0"],
+            ["--max-batch-size=-5"],
+            ["--max-batch-size=10.5"],
+            ["--min-batch-size=50", "--max-batch-size=20"],
+        ]:
+            with self.subTest(extra=extra), mock.patch.object(sys, "argv", argv + extra), mock.patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    llm_subtrans_translate.parse_args()
+                self.assertEqual(raised.exception.code, 2)
 
 
 class RetryBackoffArgumentsTest(unittest.TestCase):

@@ -85,6 +85,11 @@ llm_subtrans:
   # Retries double this delay on each attempt (delay * 2^retry). Default: 3.0.
   # Set to 0 to disable waiting (immediate retry; ideal when upstream has fallback chains).
   retry_backoff_seconds: 3.0
+  # Subtitle line counts per translation batch. Increasing these reduces total API calls
+  # and speeds up translation when the model has sufficient context window.
+  # Defaults: min 10, max 100. max_batch_size must be >= min_batch_size.
+  min_batch_size: 10
+  max_batch_size: 100
   # Successful translation request pacing, in requests/minute (RPM).
   # 0 disables pacing. This is not an HTTP timeout or a global proxy limit;
   # internal HTTP retries are not individually paced by PySubtrans.

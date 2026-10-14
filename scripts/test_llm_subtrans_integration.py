@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -38,12 +39,19 @@ class CustomServerProtocolTest(unittest.TestCase):
                 test.requests.append((self.path, self.headers.get("Authorization"), body))
                 status = test.status_sequence[len(test.requests) - 1] if test.status_sequence else test.status
                 if status == 200:
-                    line_number = test.response_line_numbers[len(test.requests) - 1] if test.response_line_numbers else 1
+                    user_msg = body["messages"][-1]["content"] if body.get("messages") else ""
+                    matches = re.findall(r"#(\d+)", user_msg)
+                    if matches:
+                        translated_lines = "\n\n".join(f"#{num}\nOriginal>\nこんにちは。\nTranslation>\n你好。" for num in matches)
+                        message_content = f"{translated_lines}\n<summary>A greeting.</summary>\n<scene>A greeting.</scene>"
+                    else:
+                        line_number = test.response_line_numbers[len(test.requests) - 1] if test.response_line_numbers else 1
+                        message_content = f"#{line_number}\nOriginal>\nこんにちは。\nTranslation>\n你好。\n<summary>A greeting.</summary>\n<scene>A greeting.</scene>"
                     content = {
                         "model": "grok-4.5",
                         "choices": [{
                             "finish_reason": "stop",
-                            "message": {"content": f"#{line_number}\nOriginal>\nこんにちは。\nTranslation>\n你好。\n<summary>A greeting.</summary>\n<scene>A greeting.</scene>"},
+                            "message": {"content": message_content},
                         }],
                     }
                 else:
@@ -192,6 +200,20 @@ class CustomServerProtocolTest(unittest.TestCase):
         self.assertEqual(sleep.call_args_list, [mock.call(0.0), mock.call(0.0)])
         translated = self.output.read_text(encoding="utf-8")
         self.assertIn("你好。", translated)
+
+    def test_batch_sizes_control_subtitle_chunking(self):
+        # 10 lines with 1s gap within same scene (<60s gap).
+        # Default (10, 100) translates in 1 batch.
+        # With min=2, max=3, PySubtrans batches into 5 chunks of 2 lines.
+        lines = []
+        for i in range(1, 11):
+            lines.append(f"{i}\n00:00:{i:02d},000 --> 00:00:{i:02d},500\nLine {i}")
+        self.input.write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+        self.output.unlink(missing_ok=True)
+        self.assertEqual(self.run_translation(self.base_url + "/v1", "--min-batch-size", "2", "--max-batch-size", "3"), 0)
+        self.assertEqual(len(self.requests), 5)
+        translated = self.output.read_text(encoding="utf-8")
+        self.assertEqual(translated.count("你好。"), 10)
 
     def test_read_timeout_uses_configured_seconds_and_retries(self):
         import httpx

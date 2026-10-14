@@ -149,3 +149,48 @@ func TestTranslationRetryBackoffUsesAttemptSnapshotOrExplicitCurrentSettings(t *
 		})
 	}
 }
+
+func TestTranslationBatchSizesUseAttemptSnapshotOrExplicitCurrentSettings(t *testing.T) {
+	for _, item := range []struct {
+		name, snapshot   string
+		wantMin, wantMax int
+	}{
+		{"recorded batch sizes", `{"Pipeline":{"Provider":"mlx_qwen3_asr"},"LLMSubtrans":{"TimeoutMinutes":180,"MinBatchSize":20,"MaxBatchSize":50}}`, 20, 50},
+		{"legacy snapshot without batch sizes", `{"Pipeline":{"Provider":"mlx_qwen3_asr"},"LLMSubtrans":{"TimeoutMinutes":180}}`, 10, 100},
+		{"legacy snapshot without llm_subtrans", `{"Pipeline":{"Provider":"mlx_qwen3_asr"}}`, 10, 100},
+		{"current settings", "", 25, 75},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			svc, manager, folders, job := newProcessFixture(t, "SNOS-411.mp4")
+			mustWriteTestFile(t, filepath.Join(filepath.Dir(folders.Process), "config.yaml"), "pipeline:\n  provider: mlx_qwen3_asr\nllm_subtrans:\n  min_batch_size: 25\n  max_batch_size: 75\n")
+			if err := manager.Reload(); err != nil {
+				t.Fatal(err)
+			}
+			job.StartStage = queue.StageTranslating
+			job.SettingsSnapshot = item.snapshot
+			job.SubtitlePath = filepath.Join(folders.Transcriptions, "SNOS-411.srt")
+			mustWriteTestFile(t, job.SubtitlePath, "source subtitles")
+			var gotMin, gotMax int
+			svc.resolveExecutors = func(cfg config.Config) (transcriber, subtitleTranslator, error) {
+				gotMin = cfg.LLMSubtrans.MinBatchSize
+				gotMax = cfg.LLMSubtrans.MaxBatchSize
+				return nil, subtitleTranslatorFunc(func(_ context.Context, input string) (string, error) {
+					output := filepath.Join(filepath.Dir(input), "translated.srt")
+					mustWriteTestFile(t, output, "translated subtitles")
+					return output, nil
+				}), nil
+			}
+			next, err := svc.ProcessStage(context.Background(), job)
+			if err != nil || next != queue.StageDelivering || gotMin != item.wantMin || gotMax != item.wantMax {
+				t.Fatalf("next=%q min=%d wantMin=%d max=%d wantMax=%d error=%v", next, gotMin, item.wantMin, gotMax, item.wantMax, err)
+			}
+			if item.snapshot == "" {
+				return
+			}
+			cfg, err := configForAttempt(config.Config{LLMSubtrans: config.LLMSubtransConfig{MinBatchSize: 25, MaxBatchSize: 75}}, item.snapshot)
+			if err != nil || cfg.LLMSubtrans.MinBatchSize != item.wantMin || cfg.LLMSubtrans.MaxBatchSize != item.wantMax {
+				t.Fatalf("snapshot min=%d wantMin=%d max=%d wantMax=%d error=%v", cfg.LLMSubtrans.MinBatchSize, item.wantMin, cfg.LLMSubtrans.MaxBatchSize, item.wantMax, err)
+			}
+		})
+	}
+}
