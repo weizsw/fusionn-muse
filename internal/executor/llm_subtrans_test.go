@@ -173,6 +173,45 @@ func TestLLMSubtransEndpointAndLanguageCodesSurviveLegacyRemoval(t *testing.T) {
 	}
 }
 
+func TestLLMSubtransPassesConfiguredRetryBackoff(t *testing.T) {
+	val0 := 0.0
+	val15 := 1.5
+	val3 := 3.0
+	for _, item := range []struct {
+		name    string
+		backoff *float64
+		want    string
+	}{
+		{"omitted", nil, ""},
+		{"zero delay", &val0, "0"},
+		{"fractional delay", &val15, "1.5"},
+		{"standard delay", &val3, "3"},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			root := t.TempDir()
+			runner := &fakeRunner{onStream: func(_ string, args ...string) (string, string, error) {
+				got := ""
+				for i, arg := range args {
+					if arg == "--retry-backoff" {
+						got = args[i+1]
+					}
+				}
+				if got != item.want {
+					t.Fatalf("retry-backoff=%q want=%q", got, item.want)
+				}
+				if err := os.WriteFile(filepath.Join(root, "movie.zh.srt"), []byte("translation"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				return "", "", nil
+			}}
+			translator := NewLLMSubtrans(config.LLMSubtransConfig{RetryBackoffSeconds: item.backoff}, config.TranslateConfig{TargetLang: "Simplified Chinese"}, runner)
+			if _, err := translator.Translate(context.Background(), filepath.Join(root, "movie.srt")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestLLMSubtransPassesConfiguredRequestTimeout(t *testing.T) {
 	for _, item := range []struct {
 		name    string

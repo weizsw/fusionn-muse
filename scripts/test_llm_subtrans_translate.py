@@ -41,11 +41,13 @@ class CustomServerTranslationTest(unittest.TestCase):
                     "--instruction", "Use natural spoken Chinese.",
                 ]
                 for config_args, expected_kwargs in [
-                    ((), {"timeout": 180, "max_retries": 1}),
-                    (("--max-retries", "5"), {"timeout": 180, "max_retries": 5}),
-                    (("--request-timeout", "300"), {"timeout": 300, "max_retries": 1}),
+                    ((), {"timeout": 180, "max_retries": 1, "backoff": 3.0}),
+                    (("--max-retries", "5"), {"timeout": 180, "max_retries": 5, "backoff": 3.0}),
+                    (("--request-timeout", "300"), {"timeout": 300, "max_retries": 1, "backoff": 3.0}),
+                    (("--retry-backoff", "0"), {"timeout": 180, "max_retries": 1, "backoff": 0.0}),
+                    (("--retry-backoff", "1.5"), {"timeout": 180, "max_retries": 1, "backoff": 1.5}),
                 ]:
-                    with mock.patch.dict(sys.modules, {"PySubtrans": fake_pysubtrans}), mock.patch.object(sys, "argv", argv + list(config_args)):
+                    with mock.patch.dict(sys.modules, {"PySubtrans": fake_pysubtrans, "PySubtrans.Providers.Clients.CustomClient": mock.MagicMock()}), mock.patch.object(sys, "argv", argv + list(config_args)):
                         self.assertEqual(llm_subtrans_translate.main(), 0)
 
                     self.assertEqual(fake_pysubtrans.init_options.call_args.kwargs, {
@@ -57,11 +59,30 @@ class CustomServerTranslationTest(unittest.TestCase):
                         "stream_responses": False,
                         "timeout": expected_kwargs["timeout"],
                         "max_retries": expected_kwargs["max_retries"],
+                        "backoff_time": expected_kwargs["backoff"],
                         "api_key": "test-key",
                         "model": "grok-4.5",
                         "target_language": "Simplified Chinese",
                         "instruction_args": ["Use natural spoken Chinese."],
                     })
+
+
+class RetryBackoffArgumentsTest(unittest.TestCase):
+    def test_retry_backoff_defaults_to_3_and_accepts_non_negative_numbers(self):
+        argv = [str(SCRIPT), "--input", "input.srt", "--output", "output.srt", "--target", "Chinese",
+                "--api-key", "offline-key", "--base-url", "http://example.test", "--model", "test-model"]
+        for value, expected in [(None, 3.0), ("0", 0.0), ("1.5", 1.5), ("3", 3.0)]:
+            with self.subTest(value=value), mock.patch.object(sys, "argv", argv + (["--retry-backoff=" + value] if value else [])):
+                self.assertEqual(llm_subtrans_translate.parse_args().retry_backoff, expected)
+
+    def test_rejects_invalid_backoff_before_initializing_translation(self):
+        argv = [str(SCRIPT), "--input", "input.srt", "--output", "output.srt", "--target", "Chinese",
+                "--api-key", "offline-key", "--base-url", "http://example.test", "--model", "test-model"]
+        for value in ["-1", "-0.1", "NaN", "Inf", "invalid"]:
+            with self.subTest(value=value), mock.patch.object(sys, "argv", argv + ["--retry-backoff=" + value]), mock.patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    llm_subtrans_translate.parse_args()
+                self.assertEqual(raised.exception.code, 2)
 
 
 class RequestTimeoutArgumentsTest(unittest.TestCase):

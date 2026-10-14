@@ -158,6 +158,20 @@ class CustomServerProtocolTest(unittest.TestCase):
         for timestamp in ("00:00:01,000", "00:02:01,000", "00:04:01,000"):
             self.assertIn(timestamp, translated)
 
+    def test_zero_retry_backoff_disables_sleep_delay(self):
+        self.input.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nこんにちは。\n",
+            encoding="utf-8",
+        )
+        self.status_sequence = [503, 503, 200]
+        self.response_line_numbers = [1, 1, 1]
+        with mock.patch("time.sleep") as sleep:
+            self.assertEqual(self.run_translation(self.base_url + "/v1", "--max-retries", "5", "--retry-backoff", "0"), 0)
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(0.0), mock.call(0.0)])
+        translated = self.output.read_text(encoding="utf-8")
+        self.assertIn("你好。", translated)
+
     def test_read_timeout_uses_configured_seconds_and_retries(self):
         import httpx
         from PySubtrans.SubtitleError import TranslationImpossibleError

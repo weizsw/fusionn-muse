@@ -45,6 +45,13 @@ def non_negative_rate(value: str) -> float:
     return rate
 
 
+def non_negative_float(value: str) -> float:
+    val = float(value)
+    if not math.isfinite(val) or val < 0:
+        raise argparse.ArgumentTypeError("Value must be a finite non-negative number")
+    return val
+
+
 def positive_retries(value: str) -> int:
     retries = int(value)
     if retries < 1:
@@ -71,6 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ratelimit", type=non_negative_rate, default=0.0, help="Translation requests per minute (0 disables pacing)")
     parser.add_argument("--max-retries", type=positive_retries, default=1, help="Retries after the initial batch request (minimum/default 1)")
     parser.add_argument("--request-timeout", type=positive_timeout, default=180, help="HTTP request timeout in seconds (minimum 1, default 180)")
+    parser.add_argument("--retry-backoff", type=non_negative_float, default=3.0, help="Initial retry delay in seconds (0 disables waiting, default 3.0)")
     return parser.parse_args()
 
 
@@ -78,6 +86,20 @@ def main() -> int:
     args = parse_args()
 
     from PySubtrans import init_options, init_subtitles, init_translation_provider, init_translator
+
+    # CustomClient 1.7.3 uses `self.settings.get_float('backoff_time') or 5.0`.
+    # When backoff_time is 0.0, the `or 5.0` falsy fallback turns 0 into 5.0 seconds.
+    # Preserve explicit 0.0 so clients with external fallback chains can retry immediately.
+    try:
+        from PySubtrans.Providers.Clients.CustomClient import CustomClient
+
+        CustomClient.backoff_time = property(
+            lambda self: self.settings.get_float("backoff_time")
+            if self.settings.get("backoff_time") is not None
+            else 3.0
+        )
+    except (ImportError, AttributeError):
+        pass
 
     logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
 
@@ -91,6 +113,7 @@ def main() -> int:
         stream_responses=False,
         timeout=args.request_timeout,
         max_retries=args.max_retries,
+        backoff_time=args.retry_backoff,
         api_key=args.api_key,
         model=args.model,
         target_language=args.target,

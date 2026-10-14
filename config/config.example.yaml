@@ -81,6 +81,10 @@ llm_subtrans:
   # HTTP timeout in seconds per batch translation request (connect, read, write).
   # Minimum 1, default 180. Independent of timeout_minutes (whole-file wall clock).
   request_timeout_seconds: 180
+  # Initial retry delay in seconds for batch request retries (timeouts, 5xx).
+  # Retries double this delay on each attempt (delay * 2^retry). Default: 3.0.
+  # Set to 0 to disable waiting (immediate retry; ideal when upstream has fallback chains).
+  retry_backoff_seconds: 3.0
   # Successful translation request pacing, in requests/minute (RPM).
   # 0 disables pacing. This is not an HTTP timeout or a global proxy limit;
   # internal HTTP retries are not individually paced by PySubtrans.
