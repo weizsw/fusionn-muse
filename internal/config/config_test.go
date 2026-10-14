@@ -182,6 +182,68 @@ func TestLoadAndReloadTranslationRateLimit(t *testing.T) {
 	}
 }
 
+func TestLoadAndReloadTranslationRetryBackoff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeConfig(t, path, false)
+	cfg, err := Load(path)
+	if err != nil || cfg.LLMSubtrans.RetryBackoffSeconds == nil || *cfg.LLMSubtrans.RetryBackoffSeconds != 3.0 {
+		t.Fatalf("load default=%+v error=%v", cfg, err)
+	}
+	manager, err := NewManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Stop()
+	for _, setting := range []struct {
+		value string
+		want  float64
+	}{{"0", 0.0}, {"0.5", 0.5}, {"3", 3.0}, {"", 3.0}} {
+		content := "dry_run: false\n"
+		if setting.value != "" {
+			content += "llm_subtrans:\n  retry_backoff_seconds: " + setting.value + "\n"
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil || cfg.LLMSubtrans.RetryBackoffSeconds == nil || *cfg.LLMSubtrans.RetryBackoffSeconds != setting.want {
+			t.Fatalf("load=%+v want=%v error=%v", cfg, setting.want, err)
+		}
+		if err := manager.Reload(); err != nil || manager.Get().LLMSubtrans.RetryBackoffSeconds == nil || *manager.Get().LLMSubtrans.RetryBackoffSeconds != setting.want {
+			t.Fatalf("reload=%+v want=%v error=%v", manager.Get(), setting.want, err)
+		}
+	}
+}
+
+func TestTranslationRetryBackoffRejectsInvalidValuesWithoutReplacingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("llm_subtrans:\n  retry_backoff_seconds: 3.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Stop()
+	for _, value := range []string{"-1", "-0.1", "NaN", "Inf", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte("llm_subtrans:\n  retry_backoff_seconds: "+value+"\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("invalid retry backoff accepted by Load")
+			}
+			if bad, err := NewManager(path); err == nil {
+				bad.Stop()
+				t.Fatal("invalid retry backoff accepted by NewManager")
+			}
+			if err := manager.Reload(); err == nil || manager.Get().LLMSubtrans.RetryBackoffSeconds == nil || *manager.Get().LLMSubtrans.RetryBackoffSeconds != 3.0 {
+				t.Fatalf("invalid reload replaced valid config: %+v error=%v", manager.Get(), err)
+			}
+		})
+	}
+}
+
 func TestLoadAndReloadTranslationRequestTimeout(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeConfig(t, path, false)

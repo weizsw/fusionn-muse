@@ -123,6 +123,9 @@ func configForAttempt(current config.Config, snapshot string) (config.Config, er
 	current.LLMSubtrans.MaxRetries = 1
 	// Snapshots made before request_timeout_seconds existed used 180 seconds.
 	current.LLMSubtrans.RequestTimeoutSeconds = 180
+	// Snapshots made before retry_backoff_seconds existed used 3.0 seconds.
+	defaultBackoff := 3.0
+	current.LLMSubtrans.RetryBackoffSeconds = &defaultBackoff
 	if err := json.Unmarshal([]byte(snapshot), &current); err != nil {
 		return config.Config{}, fmt.Errorf("load settings snapshot: %w", err)
 	}

@@ -52,10 +52,11 @@ type MLXQwen3ASRConfig struct {
 }
 
 type LLMSubtransConfig struct {
-	TimeoutMinutes        int     `mapstructure:"timeout_minutes"`
-	RateLimit             float64 `mapstructure:"rate_limit"`              // Translation requests/minute; 0 disables batch pacing.
-	MaxRetries            int     `mapstructure:"max_retries"`             // Retries after the initial batch request; minimum/default 1.
-	RequestTimeoutSeconds int     `mapstructure:"request_timeout_seconds"` // HTTP timeout in seconds per batch request; minimum 1, default 180.
+	TimeoutMinutes        int      `mapstructure:"timeout_minutes"`
+	RateLimit             float64  `mapstructure:"rate_limit"`              // Translation requests/minute; 0 disables batch pacing.
+	MaxRetries            int      `mapstructure:"max_retries"`             // Retries after the initial batch request; minimum/default 1.
+	RequestTimeoutSeconds int      `mapstructure:"request_timeout_seconds"` // HTTP timeout in seconds per batch request; minimum 1, default 180.
+	RetryBackoffSeconds   *float64 `mapstructure:"retry_backoff_seconds"`   // Initial retry delay in seconds; 0 disables waiting. Default: 3.0.
 }
 
 // Folders returns hardcoded folder paths (user mounts via Docker volumes).
@@ -360,6 +361,12 @@ func validate(cfg *Config, v *viper.Viper) error {
 	if err != nil || timeout < 1 {
 		return fmt.Errorf("llm_subtrans.request_timeout_seconds must be a positive integer")
 	}
+	if cfg.LLMSubtrans.RetryBackoffSeconds != nil {
+		backoff := *cfg.LLMSubtrans.RetryBackoffSeconds
+		if backoff < 0 || math.IsNaN(backoff) || math.IsInf(backoff, 0) {
+			return fmt.Errorf("llm_subtrans.retry_backoff_seconds must be a finite non-negative number")
+		}
+	}
 	rate := cfg.LLMSubtrans.RateLimit
 	if rate < 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
 		return fmt.Errorf("llm_subtrans.rate_limit must be a finite non-negative number")
@@ -380,5 +387,6 @@ func newParser(path string) *viper.Viper {
 	v.SetDefault("llm_subtrans.rate_limit", 0.0)
 	v.SetDefault("llm_subtrans.max_retries", 1)
 	v.SetDefault("llm_subtrans.request_timeout_seconds", 180)
+	v.SetDefault("llm_subtrans.retry_backoff_seconds", 3.0)
 	return v
 }

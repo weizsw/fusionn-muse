@@ -95,14 +95,17 @@ This pipeline translates through PySubtrans's **Custom Server** client using the
 
 `llm_subtrans.max_retries` controls retries after the initial request for a subtitle batch when it times out, cannot connect, or receives HTTP 5xx. It defaults to `1`; `5` allows up to six HTTP attempts per request, with PySubtrans's exponential backoff. Only positive integers are supported: PySubtrans 1.7.3 treats `0` as three retries, so Muse rejects it. Batch validation/retranslation can make additional requests; this setting is not a total request budget for a batch. `queue.max_retries` separately controls total whole-file Translation Attempts. The whole-file deadline remains in effect.
 
+`llm_subtrans.retry_backoff_seconds` sets the base delay in seconds for batch retries. PySubtrans doubles this delay on each attempt (`delay * 2^retry`, starting at 3.0s, 6.0s, 12.0s...). Setting it to `0` disables waiting between retries (immediate retry), which is useful when the upstream LLM gateway or proxy manages its own fallback chain. It defaults to `3.0`; only finite non-negative numbers are allowed.
+
 ```yaml
 llm_subtrans:
   timeout_minutes: 180
   request_timeout_seconds: 300
   max_retries: 5
+  retry_backoff_seconds: 0
 ```
 
-Timeouts and retry counts follow the Attempt's settings snapshot. Old snapshots without these options keep 180 seconds and one retry. To apply a new value to a failed execution, use `{"action":"retry","use_current_settings":true}`; completed Jobs use `retranslate` instead.
+Timeouts, retry counts, and backoff settings follow the Attempt's settings snapshot. Old snapshots without these options keep 180 seconds, one retry, and 3.0 seconds backoff. To apply a new value to a failed execution, use `{"action":"retry","use_current_settings":true}`; completed Jobs use `retranslate` instead.
 
 Optional `llm_subtrans.rate_limit` exposes PySubtrans's `--ratelimit` in **requests/minute (RPM)**. It accepts finite non-negative numbers; omitted or `0` preserves unpaced execution. For example:
 
