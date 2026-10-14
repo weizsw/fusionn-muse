@@ -116,11 +116,8 @@ func TestAutomaticRetriesKeepJobIDAndIncrementAttempt(t *testing.T) {
 	if err := q.Accept(job); err != nil {
 		t.Fatalf("accept job: %v", err)
 	}
-	waitForCalls(t, proc, 3)
+	waitForStatus(t, q, job.ID, StatusFailed)
 	q.Stop()
-	if got := q.GetJob(job.ID).Status; got != StatusFailed {
-		t.Fatalf("job status = %q, want %q", got, StatusFailed)
-	}
 	if got := proc.failureCount(); got != 1 {
 		t.Fatalf("failure notifications = %d, want 1 after retries are exhausted", got)
 	}
@@ -845,7 +842,7 @@ func TestStopLeavesDelayedAutomaticRetryPending(t *testing.T) {
 	if err := q.Accept(job); err != nil {
 		t.Fatalf("accept job: %v", err)
 	}
-	waitForCalls(t, proc, 1)
+	waitForAttempts(t, q, job.ID, 2)
 
 	started := time.Now()
 	q.Stop()
@@ -958,6 +955,20 @@ func waitForCalls(t *testing.T, processor *countingProcessor, want int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("processor calls = %d, want %d", processor.callCount(), want)
+}
+
+func waitForAttempts(t *testing.T, q *Queue, jobID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		detail := q.GetJobDetail(jobID)
+		if detail != nil && len(detail.Attempts) == want && detail.Attempts[0].Status == AttemptFailed && detail.Attempts[want-1].Status == AttemptPending {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	detail := q.GetJobDetail(jobID)
+	t.Fatalf("attempts = %#v, want %d", detail, want)
 }
 
 func equalInts(a, b []int) bool {
