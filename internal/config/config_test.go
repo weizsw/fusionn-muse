@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -179,6 +180,29 @@ func TestLoadAndReloadTranslationRateLimit(t *testing.T) {
 	}
 	if err := manager.Reload(); err != nil || manager.Get().LLMSubtrans.RateLimit != 0.5 {
 		t.Fatalf("reload=%+v error=%v", manager.Get(), err)
+	}
+}
+
+func TestFormatValueDereferencesPointers(t *testing.T) {
+	val := 3.5
+	var nilPtr *float64
+	tests := []struct {
+		name string
+		v    any
+		want string
+	}{
+		{"float pointer", &val, "3.5"},
+		{"nil pointer", nilPtr, "<nil>"},
+		{"direct float", 42.0, "42"},
+		{"string", "hello", "hello"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatValue(reflect.ValueOf(tt.v))
+			if got != tt.want {
+				t.Fatalf("formatValue(%v) = %q, want %q", tt.v, got, tt.want)
+			}
+		})
 	}
 }
 

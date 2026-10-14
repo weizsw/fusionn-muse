@@ -330,6 +330,12 @@ func logChanges(old, cur any, prefix string) {
 }
 
 func formatValue(v reflect.Value) string {
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return "<nil>"
+		}
+		return fmt.Sprintf("%v", v.Elem().Interface())
+	}
 	return fmt.Sprintf("%v", v.Interface())
 }
 
