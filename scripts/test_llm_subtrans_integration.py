@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import threading
@@ -79,6 +80,26 @@ class CustomServerProtocolTest(unittest.TestCase):
         argv.extend(extra_args)
         with mock.patch.object(sys, "argv", argv):
             return llm_subtrans_translate.main()
+
+    def test_script_logs_info_and_retry_warnings_in_a_fresh_process(self):
+        self.status_sequence = [503, 200]
+        command = [
+            sys.executable, str(SCRIPT),
+            "--input", str(self.input), "--output", str(self.output),
+            "--target", "Simplified Chinese", "--api-key", "test-key",
+            "--base-url", self.base_url + "/v1", "--model", "grok-4.5",
+            "--retry-backoff", "0",
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("INFO: Translating with server", result.stderr)
+        self.assertIn("INFO: Translating 1 lines", result.stderr)
+        self.assertIn("INFO: Summary:", result.stderr)
+        self.assertIn("INFO: Successfully translated 1 lines!", result.stderr)
+        self.assertIn("ERROR: Server error: 503", result.stderr)
+        self.assertIn("WARNING: Retrying in 0.0 seconds...", result.stderr)
+        self.assertNotIn(":root:", result.stderr)
+        self.assertEqual(len(self.requests), 2)
 
     def test_rate_limit_spaces_successful_translation_requests(self):
         # Separate scenes force two real Custom Server requests. Only the

@@ -224,7 +224,7 @@ func (s *store) resolveSubmission(ctx context.Context, submission *Submission, j
 	return linked, nil
 }
 
-func (s *store) recoverSubmission(ctx context.Context, id string, currentSettings *string, action string) (*Submission, error) {
+func (s *store) recoverSubmission(ctx context.Context, id string, currentSettings *string, action string, expectedExecutionID int64) (*Submission, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -233,6 +233,9 @@ func (s *store) recoverSubmission(ctx context.Context, id string, currentSetting
 	submission, err := querySubmission(ctx, tx, id)
 	if err != nil {
 		return nil, err
+	}
+	if expectedExecutionID != 0 && submission.RunID != expectedExecutionID {
+		return nil, fmt.Errorf("%w: latest preparation run changed after bulk selection", ErrInvalidSubmissionAction)
 	}
 	if action != "" {
 		if err := checkSubmissionAction(ctx, tx, submission, action); err != nil {

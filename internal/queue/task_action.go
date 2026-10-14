@@ -57,24 +57,34 @@ func (q *Queue) ExecuteTaskAction(ctx context.Context, kind, id string, request 
 	q.mu.Unlock()
 	defer q.wg.Done()
 	var current *string
-	if request.UseCurrentSettings && kind == "job" {
+	if request.UseCurrentSettings {
 		settings, err := q.submissionSettings()
 		if err != nil {
 			return nil, err
 		}
 		current = &settings
 	}
+	return q.executeTaskAction(ctx, kind, id, request, current, 0)
+}
+
+func (q *Queue) executeTaskAction(ctx context.Context, kind, id string, request TaskAction, current *string, expectedExecutionID int64) (*TaskActionResult, error) {
 	result := &TaskActionResult{TaskReference: TaskReference{Kind: kind, ID: id}}
 	if kind == "submission" {
-		input, err := q.recoverSubmission(ctx, id, request.UseCurrentSettings, request.Action)
+		ctx, cancel, err := q.submissionOperation(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer cancel()
+		input, err := q.store.recoverSubmission(ctx, id, current, request.Action, expectedExecutionID)
 		if err != nil {
 			return nil, err
 		}
 		result.Submission = input
+		q.wake(nil)
 		return result, nil
 	}
 	planner, _ := q.processor.(outputPlanner)
-	attempt, err := q.store.createTaskAction(ctx, id, request, current, planner)
+	attempt, err := q.store.createTaskAction(ctx, id, request, current, planner, expectedExecutionID)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +111,7 @@ func checkSubmissionAction(ctx context.Context, tx *sql.Tx, input *Submission, a
 	return fmt.Errorf("%w: %s requires a terminal submission in the matching state", ErrInvalidSubmissionAction, action)
 }
 
-func (s *store) createTaskAction(ctx context.Context, id string, request TaskAction, current *string, planner outputPlanner) (Attempt, error) {
+func (s *store) createTaskAction(ctx context.Context, id string, request TaskAction, current *string, planner outputPlanner, expectedExecutionID int64) (Attempt, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Attempt{}, err
@@ -119,6 +129,9 @@ func (s *store) createTaskAction(ctx context.Context, id string, request TaskAct
 		translation_cache_enabled,settings_snapshot,created_at,started_at,completed_at FROM attempts WHERE job_id=? ORDER BY id DESC LIMIT 1`, id))
 	if err != nil {
 		return Attempt{}, err
+	}
+	if expectedExecutionID != 0 && latest.ID != expectedExecutionID {
+		return Attempt{}, fmt.Errorf("%w: latest attempt changed after bulk selection", ErrInvalidAction)
 	}
 	var encodedPrevious string
 	if err := tx.QueryRowContext(ctx, `SELECT request_meta FROM attempts WHERE id=?`, latest.ID).Scan(&encodedPrevious); err != nil {

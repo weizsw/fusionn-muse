@@ -66,7 +66,7 @@ func (q *Queue) recoverSubmission(ctx context.Context, id string, useCurrentSett
 		}
 		current = &settings
 	}
-	submission, err := q.store.recoverSubmission(ctx, id, current, action)
+	submission, err := q.store.recoverSubmission(ctx, id, current, action, 0)
 	if err != nil {
 		return nil, err
 	}
