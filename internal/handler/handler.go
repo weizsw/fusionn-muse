@@ -36,6 +36,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		api.POST("/webhook/torrent", h.TorrentComplete)
 		api.GET("/tasks", h.ListTasks)
 		api.GET("/tasks/stats", h.TaskStats)
+		api.POST("/tasks/actions", h.BulkTaskAction)
 		api.GET("/tasks/:kind/:id", h.TaskDetail)
 		api.POST("/tasks/:kind/:id/actions", h.TaskAction)
 	}

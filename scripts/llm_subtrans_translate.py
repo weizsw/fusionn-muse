@@ -85,6 +85,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
+    # Provider imports can log before translation starts. Configure the root
+    # logger first so those imports cannot install the default WARNING handler.
+    logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
+
     from PySubtrans import init_options, init_subtitles, init_translation_provider, init_translator
 
     # CustomClient 1.7.3 uses `self.settings.get_float('backoff_time') or 5.0`.
@@ -100,8 +104,6 @@ def main() -> int:
         )
     except (ImportError, AttributeError):
         pass
-
-    logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
 
     instruction_args = [args.instruction] if args.instruction else None
     options = init_options(

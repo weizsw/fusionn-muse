@@ -69,7 +69,7 @@ func TestSubmissionRestartRequiresExplicitRecoveryAndPreservesHistory(t *testing
 		t.Fatalf("interrupted submission auto-started: %+v, %v", pending, err)
 	}
 	current := "current"
-	recovered, err := s.recoverSubmission(context.Background(), "submission", &current, "")
+	recovered, err := s.recoverSubmission(context.Background(), "submission", &current, "", 0)
 	if err != nil || recovered.Status != SubmissionPending || recovered.RunID == claimed.RunID || recovered.SettingsSnapshot != current {
 		t.Fatalf("recovery = %+v, %v", recovered, err)
 	}
@@ -169,7 +169,7 @@ func TestSubmissionConcurrentRecoveryCreatesOnlyOneRun(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if got, err := s.recoverSubmission(context.Background(), "submission", nil, ""); err != nil || got.SettingsSnapshot != "original" {
+			if got, err := s.recoverSubmission(context.Background(), "submission", nil, "", 0); err != nil || got.SettingsSnapshot != "original" {
 				t.Errorf("recovery = %+v, %v", got, err)
 			}
 		}()
@@ -180,7 +180,7 @@ func TestSubmissionConcurrentRecoveryCreatesOnlyOneRun(t *testing.T) {
 		t.Fatalf("runs = %+v, %v", runs, err)
 	}
 	current := "different settings"
-	if _, err := s.recoverSubmission(context.Background(), "submission", &current, ""); !errors.Is(err, ErrInvalidSubmissionAction) {
+	if _, err := s.recoverSubmission(context.Background(), "submission", &current, "", 0); !errors.Is(err, ErrInvalidSubmissionAction) {
 		t.Fatalf("conflicting recovery error = %v", err)
 	}
 }

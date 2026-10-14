@@ -227,7 +227,7 @@ func TestOnlyUnifiedOperatorRoutesRemain(t *testing.T) {
 	allowed := map[string]bool{
 		"GET /api/v1/health": true, "GET /api/v1/version": true, "POST /api/v1/webhook/torrent": true,
 		"GET /api/v1/tasks": true, "GET /api/v1/tasks/stats": true, "GET /api/v1/tasks/:kind/:id": true,
-		"POST /api/v1/tasks/:kind/:id/actions": true,
+		"POST /api/v1/tasks/:kind/:id/actions": true, "POST /api/v1/tasks/actions": true,
 	}
 	for _, route := range router.Routes() {
 		key := route.Method + " " + route.Path
@@ -249,7 +249,7 @@ func TestOnlyUnifiedTaskRoutesAreRegistered(t *testing.T) {
 	wanted := map[string]bool{
 		"GET /api/v1/health": true, "GET /api/v1/version": true, "POST /api/v1/webhook/torrent": true,
 		"GET /api/v1/tasks": true, "GET /api/v1/tasks/stats": true, "GET /api/v1/tasks/:kind/:id": true,
-		"POST /api/v1/tasks/:kind/:id/actions": true,
+		"POST /api/v1/tasks/:kind/:id/actions": true, "POST /api/v1/tasks/actions": true,
 	}
 	for _, route := range router.Routes() {
 		key := route.Method + " " + route.Path

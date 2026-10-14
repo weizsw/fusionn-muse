@@ -179,6 +179,7 @@ When Muse is unavailable or cannot persist the request, the script logs failure 
 | GET | `/api/v1/tasks/stats` | SQL aggregation using the same observation/filter rules |
 | GET | `/api/v1/tasks/:kind/:id` | Current detail, available actions and a bounded history page |
 | POST | `/api/v1/tasks/:kind/:id/actions` | Explicit retry, resume or retranslation |
+| POST | `/api/v1/tasks/actions` | Retry all failed tasks or resume all interrupted tasks |
 | GET | `/api/v1/health` | Liveness check |
 | GET | `/api/v1/version` | Version info |
 
@@ -216,6 +217,45 @@ An unresolved Submission occupies one row. Once resolved, its Job replaces it: m
 | `failed` | Latest execution failed; inspect `error` |
 | `interrupted` | Running work stopped; explicit resume required |
 | `ignored` | No eligible Media item; preparation reason recorded |
+
+### Bulk retry and resume
+
+`POST /api/v1/tasks/actions` applies one recovery action to all tasks in its matching latest execution state, including Jobs and unresolved Submissions:
+
+```bash
+# Resume all interrupted tasks with the current configuration.
+curl -X POST 'http://localhost:4444/api/v1/tasks/actions' \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"resume","use_current_settings":true}'
+
+# Retry all failed tasks with the current configuration.
+curl -X POST 'http://localhost:4444/api/v1/tasks/actions' \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"retry","use_current_settings":true}'
+```
+
+Only `retry` and `resume` are supported. `retry` selects `failed`; `resume` selects `interrupted`. Failed/interrupted Retranslations are included while preserving the Job's completed result. `ignored`, completed, pending and processing tasks are excluded. Bulk actions do not support `output_name` or `retranslate`; use the individual action endpoint for those.
+
+Without `use_current_settings`, each recovery keeps its prior execution's settings. With it, Muse reloads and validates configuration once, then uses one current settings snapshot for the entire batch. Invalid configuration returns HTTP 400 before any recovery is admitted.
+
+Targets are captured before any recovery starts, without the list API's 200-row page limit. Each task is admitted independently using the single-task action rules. If another request has already replaced a selected execution, that item reports an error instead of recovering the newer execution. Tasks that become failed/interrupted after selection require another bulk call. A failure on one item does not roll back successful admissions or prevent the other items from being attempted.
+
+HTTP 202 reports admission results, not completed processing:
+
+```json
+{
+  "action": "resume",
+  "matched": 2,
+  "accepted": 1,
+  "failed": 1,
+  "results": [
+    {"kind": "job", "id": "job-id", "execution_id": 208},
+    {"kind": "submission", "id": "submission-id", "error": "recovery error"}
+  ]
+}
+```
+
+`failed` counts items that could not be admitted; inspect their `error`. No matching tasks returns HTTP 202 with zero counts and an empty `results` array. Queue/storage failure before admission returns HTTP 503. Query `/api/v1/tasks?status=pending`, `/api/v1/tasks?status=processing` or `/api/v1/tasks/stats` to follow execution after admission.
 
 `status` describes the **latest execution**. `job_status` describes the retained Job outcome: failed/interrupted retranslation can have `job_status: completed`, since the previous result remains valid. Failed and interrupted are counted separately. Statistics return `total` and `statuses` using exactly the same row/status rules; optional `kind`/`status` filters work in both. Separate HTTP calls can naturally differ while work changes.
 
