@@ -70,6 +70,12 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 	if t.cfg.RetryBackoffSeconds != nil {
 		args = append(args, "--retry-backoff", strconv.FormatFloat(*t.cfg.RetryBackoffSeconds, 'f', -1, 64))
 	}
+	if t.cfg.MinBatchSize > 0 {
+		args = append(args, "--min-batch-size", strconv.Itoa(t.cfg.MinBatchSize))
+	}
+	if t.cfg.MaxBatchSize > 0 {
+		args = append(args, "--max-batch-size", strconv.Itoa(t.cfg.MaxBatchSize))
+	}
 	if t.cfg.RateLimit > 0 {
 		args = append(args, "--ratelimit", strconv.FormatFloat(t.cfg.RateLimit, 'f', -1, 64))
 		log.Infof("⏱️ PySubtrans batch pacing: %g requests/minute", t.cfg.RateLimit)

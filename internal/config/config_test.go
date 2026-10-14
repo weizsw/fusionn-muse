@@ -206,6 +206,84 @@ func TestFormatValueDereferencesPointers(t *testing.T) {
 	}
 }
 
+func TestLoadAndReloadTranslationBatchSizes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeConfig(t, path, false)
+	cfg, err := Load(path)
+	if err != nil || cfg.LLMSubtrans.MinBatchSize != 10 || cfg.LLMSubtrans.MaxBatchSize != 100 {
+		t.Fatalf("load default=%+v error=%v", cfg, err)
+	}
+	manager, err := NewManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Stop()
+	for _, setting := range []struct {
+		minStr, maxStr string
+		wantMin        int
+		wantMax        int
+	}{
+		{"20", "50", 20, 50},
+		{"1", "1", 1, 1},
+		{"", "", 10, 100},
+	} {
+		content := "dry_run: false\n"
+		if setting.minStr != "" {
+			content += "llm_subtrans:\n  min_batch_size: " + setting.minStr + "\n  max_batch_size: " + setting.maxStr + "\n"
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil || cfg.LLMSubtrans.MinBatchSize != setting.wantMin || cfg.LLMSubtrans.MaxBatchSize != setting.wantMax {
+			t.Fatalf("load=%+v wantMin=%d wantMax=%d error=%v", cfg, setting.wantMin, setting.wantMax, err)
+		}
+		if err := manager.Reload(); err != nil || manager.Get().LLMSubtrans.MinBatchSize != setting.wantMin || manager.Get().LLMSubtrans.MaxBatchSize != setting.wantMax {
+			t.Fatalf("reload=%+v wantMin=%d wantMax=%d error=%v", manager.Get(), setting.wantMin, setting.wantMax, err)
+		}
+	}
+}
+
+func TestTranslationBatchSizesRejectInvalidValuesWithoutReplacingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("llm_subtrans:\n  min_batch_size: 10\n  max_batch_size: 100\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Stop()
+	for _, setting := range []struct {
+		name    string
+		content string
+	}{
+		{"zero min", "llm_subtrans:\n  min_batch_size: 0\n  max_batch_size: 100\n"},
+		{"negative min", "llm_subtrans:\n  min_batch_size: -1\n  max_batch_size: 100\n"},
+		{"float min", "llm_subtrans:\n  min_batch_size: 1.5\n  max_batch_size: 100\n"},
+		{"zero max", "llm_subtrans:\n  min_batch_size: 10\n  max_batch_size: 0\n"},
+		{"negative max", "llm_subtrans:\n  min_batch_size: 10\n  max_batch_size: -5\n"},
+		{"float max", "llm_subtrans:\n  min_batch_size: 10\n  max_batch_size: 50.5\n"},
+		{"max smaller than min", "llm_subtrans:\n  min_batch_size: 50\n  max_batch_size: 20\n"},
+	} {
+		t.Run(setting.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(setting.content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("invalid batch size accepted by Load")
+			}
+			if bad, err := NewManager(path); err == nil {
+				bad.Stop()
+				t.Fatal("invalid batch size accepted by NewManager")
+			}
+			if err := manager.Reload(); err == nil || manager.Get().LLMSubtrans.MinBatchSize != 10 || manager.Get().LLMSubtrans.MaxBatchSize != 100 {
+				t.Fatalf("invalid reload replaced valid config: %+v error=%v", manager.Get(), err)
+			}
+		})
+	}
+}
+
 func TestLoadAndReloadTranslationRetryBackoff(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeConfig(t, path, false)

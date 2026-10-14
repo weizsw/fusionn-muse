@@ -126,6 +126,9 @@ func configForAttempt(current config.Config, snapshot string) (config.Config, er
 	// Snapshots made before retry_backoff_seconds existed used 3.0 seconds.
 	defaultBackoff := 3.0
 	current.LLMSubtrans.RetryBackoffSeconds = &defaultBackoff
+	// Snapshots made before batch sizes existed used PySubtrans defaults (10, 100).
+	current.LLMSubtrans.MinBatchSize = 10
+	current.LLMSubtrans.MaxBatchSize = 100
 	if err := json.Unmarshal([]byte(snapshot), &current); err != nil {
 		return config.Config{}, fmt.Errorf("load settings snapshot: %w", err)
 	}

@@ -173,6 +173,45 @@ func TestLLMSubtransEndpointAndLanguageCodesSurviveLegacyRemoval(t *testing.T) {
 	}
 }
 
+func TestLLMSubtransPassesConfiguredBatchSizes(t *testing.T) {
+	for _, item := range []struct {
+		name    string
+		min     int
+		max     int
+		wantMin string
+		wantMax string
+	}{
+		{"wrapper default", 0, 0, "", ""},
+		{"custom bounds", 20, 50, "20", "50"},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			root := t.TempDir()
+			runner := &fakeRunner{onStream: func(_ string, args ...string) (string, string, error) {
+				gotMin, gotMax := "", ""
+				for i, arg := range args {
+					if arg == "--min-batch-size" {
+						gotMin = args[i+1]
+					}
+					if arg == "--max-batch-size" {
+						gotMax = args[i+1]
+					}
+				}
+				if gotMin != item.wantMin || gotMax != item.wantMax {
+					t.Fatalf("min=%q want=%q, max=%q want=%q", gotMin, item.wantMin, gotMax, item.wantMax)
+				}
+				if err := os.WriteFile(filepath.Join(root, "movie.zh.srt"), []byte("translation"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				return "", "", nil
+			}}
+			translator := NewLLMSubtrans(config.LLMSubtransConfig{MinBatchSize: item.min, MaxBatchSize: item.max}, config.TranslateConfig{TargetLang: "Simplified Chinese"}, runner)
+			if _, err := translator.Translate(context.Background(), filepath.Join(root, "movie.srt")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestLLMSubtransPassesConfiguredRetryBackoff(t *testing.T) {
 	val0 := 0.0
 	val15 := 1.5

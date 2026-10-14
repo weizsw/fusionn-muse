@@ -66,6 +66,13 @@ def positive_timeout(value: str) -> int:
     return timeout
 
 
+def positive_batch_size(value: str) -> int:
+    size = int(value)
+    if size < 1:
+        raise argparse.ArgumentTypeError("Batch size must be at least 1")
+    return size
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Translate subtitles with PySubtrans")
     parser.add_argument("--input", required=True, help="Input subtitle path")
@@ -79,7 +86,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-retries", type=positive_retries, default=1, help="Retries after the initial batch request (minimum/default 1)")
     parser.add_argument("--request-timeout", type=positive_timeout, default=180, help="HTTP request timeout in seconds (minimum 1, default 180)")
     parser.add_argument("--retry-backoff", type=non_negative_float, default=3.0, help="Initial retry delay in seconds (0 disables waiting, default 3.0)")
-    return parser.parse_args()
+    parser.add_argument("--min-batch-size", type=positive_batch_size, default=10, help="Minimum lines per translation batch (default 10)")
+    parser.add_argument("--max-batch-size", type=positive_batch_size, default=100, help="Maximum lines per translation batch (default 100)")
+    args = parser.parse_args()
+    if args.max_batch_size < args.min_batch_size:
+        parser.error("--max-batch-size must be greater than or equal to --min-batch-size")
+    return args
 
 
 def main() -> int:
@@ -116,6 +128,8 @@ def main() -> int:
         timeout=args.request_timeout,
         max_retries=args.max_retries,
         backoff_time=args.retry_backoff,
+        min_batch_size=args.min_batch_size,
+        max_batch_size=args.max_batch_size,
         api_key=args.api_key,
         model=args.model,
         target_language=args.target,
