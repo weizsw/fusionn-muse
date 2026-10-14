@@ -158,7 +158,7 @@ class CustomServerProtocolTest(unittest.TestCase):
         for timestamp in ("00:00:01,000", "00:02:01,000", "00:04:01,000"):
             self.assertIn(timestamp, translated)
 
-    def test_read_timeout_uses_180_seconds_and_configured_retries(self):
+    def test_read_timeout_uses_configured_seconds_and_retries(self):
         import httpx
         from PySubtrans.SubtitleError import TranslationImpossibleError
 
@@ -172,14 +172,19 @@ class CustomServerProtocolTest(unittest.TestCase):
         def create_client(**kwargs):
             return original_client(**kwargs, transport=httpx.MockTransport(timeout))
 
-        for args, retries in [((), 1), (("--max-retries", "5"), 5)]:
+        for args, retries, expected_timeout in [
+            ((), 1, 180),
+            (("--max-retries", "5"), 5, 180),
+            (("--request-timeout", "300"), 1, 300),
+            (("--max-retries", "2", "--request-timeout", "240"), 2, 240),
+        ]:
             with self.subTest(args=args):
                 requests.clear()
                 with mock.patch.object(httpx, "Client", side_effect=create_client), mock.patch("time.sleep"):
                     with self.assertRaises(TranslationImpossibleError):
                         self.run_translation(self.base_url + "/v1", *args)
                 self.assertEqual(len(requests), retries + 1)
-                self.assertTrue(all(request.extensions["timeout"]["read"] == 180 for request in requests))
+                self.assertTrue(all(request.extensions["timeout"]["read"] == expected_timeout for request in requests))
                 self.assertFalse(self.output.exists())
 
 

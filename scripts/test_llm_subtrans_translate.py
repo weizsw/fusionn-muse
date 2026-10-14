@@ -40,8 +40,12 @@ class CustomServerTranslationTest(unittest.TestCase):
                     "--model", "grok-4.5",
                     "--instruction", "Use natural spoken Chinese.",
                 ]
-                for retry_args, expected_retries in [((), 1), (("--max-retries", "5"), 5)]:
-                    with mock.patch.dict(sys.modules, {"PySubtrans": fake_pysubtrans}), mock.patch.object(sys, "argv", argv + list(retry_args)):
+                for config_args, expected_kwargs in [
+                    ((), {"timeout": 180, "max_retries": 1}),
+                    (("--max-retries", "5"), {"timeout": 180, "max_retries": 5}),
+                    (("--request-timeout", "300"), {"timeout": 300, "max_retries": 1}),
+                ]:
+                    with mock.patch.dict(sys.modules, {"PySubtrans": fake_pysubtrans}), mock.patch.object(sys, "argv", argv + list(config_args)):
                         self.assertEqual(llm_subtrans_translate.main(), 0)
 
                     self.assertEqual(fake_pysubtrans.init_options.call_args.kwargs, {
@@ -51,13 +55,31 @@ class CustomServerTranslationTest(unittest.TestCase):
                         "supports_conversation": True,
                         "supports_system_messages": True,
                         "stream_responses": False,
-                        "timeout": 180,
-                        "max_retries": expected_retries,
+                        "timeout": expected_kwargs["timeout"],
+                        "max_retries": expected_kwargs["max_retries"],
                         "api_key": "test-key",
                         "model": "grok-4.5",
                         "target_language": "Simplified Chinese",
                         "instruction_args": ["Use natural spoken Chinese."],
                     })
+
+
+class RequestTimeoutArgumentsTest(unittest.TestCase):
+    def test_request_timeout_defaults_to_180_and_accepts_positive_integers(self):
+        argv = [str(SCRIPT), "--input", "input.srt", "--output", "output.srt", "--target", "Chinese",
+                "--api-key", "offline-key", "--base-url", "http://example.test", "--model", "test-model"]
+        for value, expected in [(None, 180), ("300", 300), ("1", 1)]:
+            with self.subTest(value=value), mock.patch.object(sys, "argv", argv + (["--request-timeout=" + value] if value else [])):
+                self.assertEqual(llm_subtrans_translate.parse_args().request_timeout, expected)
+
+    def test_rejects_invalid_timeout_before_initializing_translation(self):
+        argv = [str(SCRIPT), "--input", "input.srt", "--output", "output.srt", "--target", "Chinese",
+                "--api-key", "offline-key", "--base-url", "http://example.test", "--model", "test-model"]
+        for value in ["0", "-1", "1.5", "invalid"]:
+            with self.subTest(value=value), mock.patch.object(sys, "argv", argv + ["--request-timeout=" + value]), mock.patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    llm_subtrans_translate.parse_args()
+                self.assertEqual(raised.exception.code, 2)
 
 
 class MaxRetriesArgumentsTest(unittest.TestCase):

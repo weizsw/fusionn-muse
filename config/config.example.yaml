@@ -78,6 +78,9 @@ llm_subtrans:
   # 1 means at most 2 HTTP attempts per request; independent of queue.max_retries.
   # Minimum/default 1: PySubtrans 1.7.3 treats 0 as 3 retries, so Muse rejects 0.
   max_retries: 1
+  # HTTP timeout in seconds per batch translation request (connect, read, write).
+  # Minimum 1, default 180. Independent of timeout_minutes (whole-file wall clock).
+  request_timeout_seconds: 180
   # Successful translation request pacing, in requests/minute (RPM).
   # 0 disables pacing. This is not an HTTP timeout or a global proxy limit;
   # internal HTTP retries are not individually paced by PySubtrans.

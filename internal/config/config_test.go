@@ -182,6 +182,82 @@ func TestLoadAndReloadTranslationRateLimit(t *testing.T) {
 	}
 }
 
+func TestLoadAndReloadTranslationRequestTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeConfig(t, path, false)
+	cfg, err := Load(path)
+	if err != nil || cfg.LLMSubtrans.RequestTimeoutSeconds != 180 {
+		t.Fatalf("load default=%+v error=%v", cfg, err)
+	}
+	manager, err := NewManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Stop()
+	for _, setting := range []struct {
+		value string
+		want  int
+	}{{"300", 300}, {"180", 180}, {"", 180}} {
+		content := "dry_run: false\n"
+		if setting.value != "" {
+			content += "llm_subtrans:\n  request_timeout_seconds: " + setting.value + "\n"
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil || cfg.LLMSubtrans.RequestTimeoutSeconds != setting.want {
+			t.Fatalf("load=%+v want=%d error=%v", cfg, setting.want, err)
+		}
+		if err := manager.Reload(); err != nil || manager.Get().LLMSubtrans.RequestTimeoutSeconds != setting.want {
+			t.Fatalf("reload=%+v want=%d error=%v", manager.Get(), setting.want, err)
+		}
+	}
+}
+
+func TestTranslationRequestTimeoutRejectsInvalidValuesWithoutReplacingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("llm_subtrans:\n  request_timeout_seconds: 300\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Stop()
+	for _, value := range []string{"0", "-1", "1.5", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte("llm_subtrans:\n  request_timeout_seconds: "+value+"\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("invalid request timeout accepted by Load")
+			}
+			if bad, err := NewManager(path); err == nil {
+				bad.Stop()
+				t.Fatal("invalid request timeout accepted by NewManager")
+			}
+			if err := manager.Reload(); err == nil || manager.Get().LLMSubtrans.RequestTimeoutSeconds != 300 {
+				t.Fatalf("invalid reload replaced valid config: %+v error=%v", manager.Get(), err)
+			}
+		})
+	}
+	for _, value := range []uint16{1, 600, 0} {
+		t.Run("normalized "+strconv.Itoa(int(value)), func(t *testing.T) {
+			if err := os.WriteFile(path, []byte("llm_subtrans:\n  request_timeout_seconds: "+strconv.Itoa(int(value))+"\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if value == 0 && err == nil {
+				t.Fatal("zero request timeout accepted by Load")
+			}
+			if value != 0 && err != nil {
+				t.Fatalf("integer request timeout rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadAndReloadTranslationMaxRetries(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeConfig(t, path, false)

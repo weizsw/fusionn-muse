@@ -121,6 +121,8 @@ func configForAttempt(current config.Config, snapshot string) (config.Config, er
 	current.LLMSubtrans.RateLimit = 0
 	// Snapshots made before max_retries existed always retried once.
 	current.LLMSubtrans.MaxRetries = 1
+	// Snapshots made before request_timeout_seconds existed used 180 seconds.
+	current.LLMSubtrans.RequestTimeoutSeconds = 180
 	if err := json.Unmarshal([]byte(snapshot), &current); err != nil {
 		return config.Config{}, fmt.Errorf("load settings snapshot: %w", err)
 	}

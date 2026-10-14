@@ -91,15 +91,18 @@ Run `host_asr_server.py` on macOS with `mlx-qwen3-asr` installed. The container 
 
 This pipeline translates through PySubtrans's **Custom Server** client using the OpenAI-compatible `/chat/completions` endpoint. Keep `translate.custom_server` as the API base URL, including `/v1` or any reverse-proxy prefix. Requests are non-streaming, with a **180-second HTTP timeout and one retry by default**; there are no OpenAI SDK retries. The HTTP timeout measures inactivity, not total request duration. `llm_subtrans.timeout_minutes` remains the separate whole-file deadline. Python logs stream once at their original levels; translation failures report a short reason rather than replaying accumulated stderr, and deadlines/cancellation are distinguished from process failures.
 
-`llm_subtrans.max_retries` controls retries after the initial request for a subtitle batch when it times out, cannot connect, or receives HTTP 5xx. It defaults to `1`; `5` allows up to six HTTP attempts per request, with PySubtrans's exponential backoff. Only positive integers are supported: PySubtrans 1.7.3 treats `0` as three retries, so Muse rejects it. Batch validation/retranslation can make additional requests; this setting is not a total request budget for a batch. `queue.max_retries` separately controls total whole-file Translation Attempts. The 180-second HTTP timeout and whole-file deadline remain in effect.
+`llm_subtrans.request_timeout_seconds` controls the HTTP timeout in seconds for each batch translation request (connect, read, write). It defaults to `180`; only positive integers are supported (PySubtrans 1.7.3 treats `0` as 300, so Muse rejects it). This is an HTTP socket/inactivity timeout per request; `llm_subtrans.timeout_minutes` remains the separate whole-file wall clock deadline.
+
+`llm_subtrans.max_retries` controls retries after the initial request for a subtitle batch when it times out, cannot connect, or receives HTTP 5xx. It defaults to `1`; `5` allows up to six HTTP attempts per request, with PySubtrans's exponential backoff. Only positive integers are supported: PySubtrans 1.7.3 treats `0` as three retries, so Muse rejects it. Batch validation/retranslation can make additional requests; this setting is not a total request budget for a batch. `queue.max_retries` separately controls total whole-file Translation Attempts. The whole-file deadline remains in effect.
 
 ```yaml
 llm_subtrans:
   timeout_minutes: 180
+  request_timeout_seconds: 300
   max_retries: 5
 ```
 
-Retry counts follow the Attempt's settings snapshot. Old snapshots without this option keep one retry. To apply a new value to a failed execution, use `{"action":"retry","use_current_settings":true}`; completed Jobs use `retranslate` instead.
+Timeouts and retry counts follow the Attempt's settings snapshot. Old snapshots without these options keep 180 seconds and one retry. To apply a new value to a failed execution, use `{"action":"retry","use_current_settings":true}`; completed Jobs use `retranslate` instead.
 
 Optional `llm_subtrans.rate_limit` exposes PySubtrans's `--ratelimit` in **requests/minute (RPM)**. It accepts finite non-negative numbers; omitted or `0` preserves unpaced execution. For example:
 
@@ -109,7 +112,7 @@ llm_subtrans:
   rate_limit: 80
 ```
 
-This uses the actual Custom Server client: at 80 RPM each successful translation request takes at least 0.75 seconds, including its response time; slower requests need no extra wait. It is batch pacing, **not a strict global API quota**: HTTP retries inside a request and other proxy clients are not separately limited. It does not extend the 180-second read timeout or resolve a stalled upstream response. The 1.7.3 Custom Server ignores a top-level `init_options(rate_limit=...)`; Muse passes it through the explicit provider/client settings instead.
+This uses the actual Custom Server client: at 80 RPM each successful translation request takes at least 0.75 seconds, including its response time; slower requests need no extra wait. It is batch pacing, **not a strict global API quota**: HTTP retries inside a request and other proxy clients are not separately limited. It does not change `llm_subtrans.request_timeout_seconds` or resolve a stalled upstream response. The 1.7.3 Custom Server ignores a top-level `init_options(rate_limit=...)`; Muse passes it through the explicit provider/client settings instead.
 
 Rate limits follow the Attempt's settings snapshot. Old snapshots without this option remain unpaced. To adopt a newly configured limit for a failed execution, explicitly select current settings with `{"action":"retry","use_current_settings":true}`; completed Jobs use `retranslate` instead.
 

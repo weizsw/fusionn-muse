@@ -173,6 +173,41 @@ func TestLLMSubtransEndpointAndLanguageCodesSurviveLegacyRemoval(t *testing.T) {
 	}
 }
 
+func TestLLMSubtransPassesConfiguredRequestTimeout(t *testing.T) {
+	for _, item := range []struct {
+		name    string
+		timeout int
+		want    string
+	}{
+		{"wrapper default", 0, ""},
+		{"explicit default", 180, "180"},
+		{"custom timeout", 300, "300"},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			root := t.TempDir()
+			runner := &fakeRunner{onStream: func(_ string, args ...string) (string, string, error) {
+				got := ""
+				for i, arg := range args {
+					if arg == "--request-timeout" {
+						got = args[i+1]
+					}
+				}
+				if got != item.want {
+					t.Fatalf("request-timeout=%q want=%q", got, item.want)
+				}
+				if err := os.WriteFile(filepath.Join(root, "movie.zh.srt"), []byte("translation"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				return "", "", nil
+			}}
+			translator := NewLLMSubtrans(config.LLMSubtransConfig{RequestTimeoutSeconds: item.timeout}, config.TranslateConfig{TargetLang: "Simplified Chinese"}, runner)
+			if _, err := translator.Translate(context.Background(), filepath.Join(root, "movie.srt")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestLLMSubtransPassesConfiguredMaxRetries(t *testing.T) {
 	for _, item := range []struct {
 		name    string
