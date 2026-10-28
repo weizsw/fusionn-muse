@@ -382,7 +382,6 @@ def format_line(level, event, msg, fields=None, component=None, service=None, mo
     parts = [
         format_timestamp(moment),
         _LEVEL_NAMES.get(level, "INFO"),
-        "service=" + format_value(service or _state["service"]),
         "component=" + format_value(component or _state["component"]),
         "event=" + format_value(event),
     ]

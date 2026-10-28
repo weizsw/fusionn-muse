@@ -125,11 +125,17 @@ func TestRenderInvariantsAndRoundTrip(t *testing.T) {
 		t.Errorf("level = %q, want DEBUG", level)
 	}
 
-	// Fixed prefix order.
-	wantPrefix := []string{"service", "component", "event", "job_id", "stage", "tool", "stream"}
+	// Fixed prefix order. service is never emitted: it stays a reserved key
+	// but the renderer no longer writes it.
+	wantPrefix := []string{"component", "event", "job_id", "stage", "tool", "stream"}
 	for i, key := range wantPrefix {
 		if parsedKeys[i] != key {
 			t.Fatalf("position %d = %q, want %q (line: %s)", i, parsedKeys[i], key, got)
+		}
+	}
+	for _, key := range parsedKeys {
+		if key == "service" {
+			t.Errorf("rendered line must not contain a service field: %s", got)
 		}
 	}
 	// msg is last.
@@ -190,7 +196,7 @@ func TestPreviewBoundaries(t *testing.T) {
 			t.Errorf("preview of %d runes: truncated=%v, want %v (%s)", tc.n, !tc.truncated, tc.truncated, got)
 		}
 		_, _, values := parseLine(t, got)
-		preview := values[3] // service, component, event, preview
+		preview := values[2] // component, event, preview
 		if gotLen, wantLen := len([]rune(preview)), min(tc.n, previewMaxRunes); gotLen != wantLen {
 			t.Errorf("preview of %d runes rendered %d runes, want %d", tc.n, gotLen, wantLen)
 		}

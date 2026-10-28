@@ -136,7 +136,7 @@ class HostASRLoggingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(returned.headers["X-Request-Id"], "req_boom")
         output = self.output()
         self.assertEqual(output.count("event=request_completed"), 1, output)
-        self.assertIn("ERROR service=host-asr component=host-asr event=request_completed", output)
+        self.assertIn("ERROR component=host-asr event=request_completed", output)
         self.assertIn("request_id=req_boom", output)
         self.assertIn("status=500", output)
         self.assertIn("stack=", output)
@@ -165,20 +165,20 @@ class HostASRLoggingTest(unittest.IsolatedAsyncioTestCase):
             service="host-asr", component="host-asr", stream=self.stream, level="DEBUG"
         )
         await self.call_middleware(Request("GET", "/health"), Response())
-        self.assertIn("DEBUG service=host-asr component=host-asr event=request_completed", self.output())
+        self.assertIn("DEBUG component=host-asr event=request_completed", self.output())
 
     async def test_server_error_summary_is_error_level(self):
         response = Response()
         response.status_code = 500
         await self.call_middleware(Request("POST", "/transcribe"), response)
-        self.assertIn("ERROR service=host-asr component=host-asr event=request_completed", self.output())
+        self.assertIn("ERROR component=host-asr event=request_completed", self.output())
         self.assertIn("status=500", self.output())
 
     async def test_client_error_summary_is_warn_level(self):
         response = Response()
         response.status_code = 404
         await self.call_middleware(Request("POST", "/transcribe"), response)
-        self.assertIn("WARN service=host-asr component=host-asr event=request_completed", self.output())
+        self.assertIn("WARN component=host-asr event=request_completed", self.output())
         self.assertIn("status=404", self.output())
 
     async def test_unknown_route_is_not_logged_as_a_raw_path(self):
@@ -212,7 +212,7 @@ class HostASRLoggingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertFalse(result.success)
         self.assertEqual(result.error, "ASR busy")
-        self.assertIn("WARN service=host-asr component=host-asr event=transcription_busy", self.output())
+        self.assertIn("WARN component=host-asr event=transcription_busy", self.output())
 
     async def test_missing_video_contract_is_unchanged(self):
         response = Response()
@@ -296,9 +296,9 @@ class HostASRLoggingTest(unittest.IsolatedAsyncioTestCase):
         output = self.output()
         self.assertEqual(output.count(" ERROR "), 1, output)
         self.assertEqual(output.count("event=request_completed"), 1, output)
-        self.assertIn("ERROR service=host-asr component=host-asr event=transcription_failed", output)
+        self.assertIn("ERROR component=host-asr event=transcription_failed", output)
         self.assertIn("exit_code=1", output)
-        self.assertIn("WARN service=host-asr component=host-asr event=request_completed", output)
+        self.assertIn("WARN component=host-asr event=request_completed", output)
         self.assertIn("request_id=req_asr_fail", output)
         self.assertNotIn(canary, output, "INFO never carries the tool's own output")
 

@@ -113,7 +113,7 @@ class HostDuoSubsLoggingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(returned.headers["X-Request-Id"], "req_boom")
         output = self.output()
         self.assertEqual(output.count("event=request_completed"), 1, output)
-        self.assertIn("ERROR service=duosubs component=duosubs event=request_completed", output)
+        self.assertIn("ERROR component=duosubs event=request_completed", output)
         self.assertIn("status=500", output)
         self.assertIn("stack=", output)
         self.assertNotIn("REVIEW_ONLY_EXCEPTION_TEXT", output)
@@ -144,7 +144,7 @@ class HostDuoSubsLoggingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(returned.status_code, 200)
         self.assertEqual(output.count("event=request_completed"), 1, output)
         self.assertEqual(output.count(" ERROR "), 0, output)
-        self.assertIn("INFO service=duosubs component=duosubs event=request_completed", output)
+        self.assertIn("INFO component=duosubs event=request_completed", output)
         self.assertIn("event=input_missing", output)
         self.assertIn("request_id=req_merge", output)
 
@@ -152,7 +152,7 @@ class HostDuoSubsLoggingTest(unittest.IsolatedAsyncioTestCase):
         request = Request("POST", "/merge", {"x-request-id": "req_1"})
         returned = await self.call_middleware(request, Response())
         self.assertEqual(returned.headers["X-Request-Id"], "req_1")
-        self.assertIn("INFO service=duosubs component=duosubs event=request_completed", self.output())
+        self.assertIn("INFO component=duosubs event=request_completed", self.output())
         self.assertIn("request_id=req_1", self.output())
         self.assertIn('route="/merge"', self.output())
 
@@ -165,7 +165,7 @@ class HostDuoSubsLoggingTest(unittest.IsolatedAsyncioTestCase):
         result = await service.merge_subtitles(self.merge_request())
         self.assertFalse(result.success)
         self.assertTrue(result.error.startswith("Primary subtitle not found: "))
-        self.assertIn("WARN service=duosubs component=duosubs event=input_missing", self.output())
+        self.assertIn("WARN component=duosubs event=input_missing", self.output())
 
     async def test_missing_secondary_keeps_the_response_contract(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -205,7 +205,7 @@ class HostDuoSubsLoggingTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertIn("REVIEW_ONLY_REASON", result.error, "the caller keeps the real reason")
         output = self.output()
-        self.assertIn("ERROR service=duosubs component=duosubs event=merge_failed", output)
+        self.assertIn("ERROR component=duosubs event=merge_failed", output)
         self.assertEqual(output.count("event=merge_failed"), 1)
         for line in output.strip().splitlines():
             self.assertEqual(line.count("msg="), 1, line)

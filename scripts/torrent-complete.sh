@@ -30,7 +30,6 @@ LOG_FILE="${LOG_FILE:-/tmp/torrent-complete.log}"
 
 # Log timestamps are fixed UTC+8 and never change the host TZ. "Etc/GMT-8" is
 # POSIX-inverted: it is UTC+8.
-LOG_SERVICE="fusionn-muse"
 LOG_COMPONENT="torrent-complete"
 LOG_TZ="Etc/GMT-8"
 
@@ -217,7 +216,7 @@ log_line() {
         rendered+=("time_precision=second")
     fi
     local line
-    line="$(log_timestamp) $level service=$LOG_SERVICE component=$LOG_COMPONENT event=$event"
+    line="$(log_timestamp) $level component=$LOG_COMPONENT event=$event"
     if ((${#rendered[@]} > 0)); then
         while IFS= read -r pair; do
             line+=" $pair"

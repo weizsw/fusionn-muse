@@ -23,21 +23,25 @@ const (
 	scriptLogEvent       = "log"
 )
 
-// The script's own identity. Only a line that carries exactly this service and
-// component is read as the script's display output; every other line, including
-// another service's unified line, keeps the raw verdict and is only counted.
+// The script's own identity. Only a line that carries exactly this component is
+// read as the script's display output; every other line, including another
+// service's unified line, keeps the raw verdict and is only counted. The service
+// name is kept for the optional legacy prefix: a header written before the
+// service field was removed is still the script's own, but only with this name.
 const (
 	scriptServiceName   = "fusionn-muse"
 	scriptComponentName = "llm-subtrans"
 )
 
 // unifiedLine is the header every line of the script's own display output
-// starts with: timestamp, level, its service, its component and the event name.
-// Only the header is matched, never a quoted value, so text inside a preview or
-// a message can never be read as an event.
+// starts with: timestamp, level, its component and the event name. The service
+// field was removed from the format, so the legacy prefix is optional and
+// accepted only with this service's name; a foreign service never matches. Only
+// the header is matched, never a quoted value, so text inside a preview or a
+// message can never be read as an event.
 var unifiedLine = regexp.MustCompile(
-	`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2} (DEBUG|INFO|WARN|ERROR) service=` +
-		regexp.QuoteMeta(scriptServiceName) + ` component=` + regexp.QuoteMeta(scriptComponentName) +
+	`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2} (DEBUG|INFO|WARN|ERROR) (?:service=` +
+		regexp.QuoteMeta(scriptServiceName) + ` )?component=` + regexp.QuoteMeta(scriptComponentName) +
 		` event=(\S+)(?: |$)`,
 )
 

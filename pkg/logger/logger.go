@@ -25,8 +25,9 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// serviceName is the per-repo constant for the service= field. Sibling repos
-// (fusionn-muse, fusionn-subs) change this one line when syncing this package.
+// serviceName is the per-repo identity constant. Sibling repos (fusionn-muse,
+// fusionn-subs) change this one line when syncing this package. It feeds the
+// retained Config.Service API; the renderer no longer emits a service= field.
 const serviceName = "fusionn-muse"
 
 // Log is the process-wide sugared logger and the single write path for all
@@ -37,7 +38,8 @@ var Log *zap.SugaredLogger
 
 // Config configures the process-wide logger via Configure.
 type Config struct {
-	// Service overrides serviceName; normally left empty.
+	// Service overrides serviceName; normally left empty. Kept for API
+	// compatibility; the renderer no longer emits a service= field.
 	Service string
 	// Output defaults to os.Stdout. Buffers need no Sync.
 	Output zapcore.WriteSyncer

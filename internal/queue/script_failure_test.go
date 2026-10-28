@@ -22,8 +22,8 @@ import (
 // stubFailureScript writes the translation script's real failure stream from a
 // real child process, followed by raw lines a reader must never see. The
 // sentinel text stands in for a credential and for subtitle content.
-const stubFailureScript = `printf '%s\n' '2026-07-01T14:20:09.456+08:00 ERROR service=fusionn-muse component=llm-subtrans event=translation_failed error="ModuleNotFoundError" errno=2 module=PySubtrans stack="  File \"a b.py\", line 7, in f\n  File \"c\\d.py\", line 8, in g\n" msg="Subtitle translation failed"' >&2
-printf '%s\n' '2026-07-01T14:20:09.456+08:00 ERROR service=fusionn-muse component=llm-subtrans event=script_failure_detected msg="matched"' >&2
+const stubFailureScript = `printf '%s\n' '2026-07-01T14:20:09.456+08:00 ERROR component=llm-subtrans event=translation_failed error="ModuleNotFoundError" errno=2 module=PySubtrans stack="  File \"a b.py\", line 7, in f\n  File \"c\\d.py\", line 8, in g\n" msg="Subtitle translation failed"' >&2
+printf '%s\n' '2026-07-01T14:20:09.456+08:00 ERROR component=llm-subtrans event=script_failure_detected msg="matched"' >&2
 printf '%s\n' 'Authorization: Bearer STREAM_SENTINEL_TOKEN' >&2
 printf '%s\n' 'STREAM_SENTINEL_SUBTITLE_BODY' >&2
 exit 1

@@ -146,10 +146,10 @@ See [config.example.yaml](config/config.example.yaml) for full documentation.
 Every application event is one physical line of plain text on the program's standard output stream — the Go service writes to stdout, the Python and script programs to stderr:
 
 ```text
-2026-07-01T14:20:03.456+08:00 WARN service=fusionn-muse component=processor event=translation_retry job_id=abc retry=1 retry_after_ms=2000 error="provider timeout" msg="Translation will retry"
+2026-07-01T14:20:03.456+08:00 WARN component=processor event=translation_retry job_id=abc retry=1 retry_after_ms=2000 error="provider timeout" msg="Translation will retry"
 ```
 
-Fields appear in this order: `service component event`, then `job_id submission_id attempt_id request_id parent_job_id stage tool stream` when they apply, then the remaining fields sorted by name, and `msg` last. Timestamps are always UTC+8 with milliseconds. The complete rules are in [docs/design/unified-logging.md](docs/design/unified-logging.md).
+Fields appear in this order: `component event`, then `job_id submission_id attempt_id request_id parent_job_id stage tool stream` when they apply, then the remaining fields sorted by name, and `msg` last. Timestamps are always UTC+8 with milliseconds. The complete rules are in [docs/design/unified-logging.md](docs/design/unified-logging.md).
 
 `LOG_LEVEL` selects the level and defaults to `INFO`. The Go service reads `LOG_LEVEL` only. `ALIGN_LOG_LEVEL` is a Python and script compatibility alias, read by those programs only when `LOG_LEVEL` is unset. An unknown value logs a visible `config_invalid` warning and falls back to `INFO`. Credentials are redacted at every level, and content excerpts appear only at `DEBUG`, in a `preview` field of at most 512 characters.
 
