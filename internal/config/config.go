@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 
 	"github.com/fusionn-muse/pkg/logger"
 )
@@ -212,7 +214,8 @@ func NewManager(path string) (*Manager, error) {
 
 	go m.pollForChanges(10 * time.Second)
 
-	logger.Infof("📋 Config loaded (polling every 10s for changes)")
+	logger.Component("config").Info(context.Background(), "config_loaded",
+		"Configuration loaded; watching for changes")
 
 	return m, nil
 }
@@ -252,9 +255,11 @@ func (m *Manager) pollForChanges(interval time.Duration) {
 			m.mu.RUnlock()
 
 			if stat.ModTime().After(lastMod) {
-				logger.Infof("🔄 Config file changed, reloading...")
+				logger.Component("config").Info(context.Background(), "config_reloading",
+					"Configuration file changed; reloading")
 				if err := m.Reload(); err != nil {
-					logger.Errorf("❌ Failed to reload config: %v", err)
+					logger.Component("config").Error(context.Background(), "config_reload_failed",
+						"Configuration reload failed", zap.Error(err))
 				}
 			}
 		}
@@ -324,11 +329,30 @@ func logChanges(old, cur any, prefix string) {
 		}
 
 		if !reflect.DeepEqual(oldField.Interface(), newField.Interface()) {
-			oldStr := formatValue(oldField)
-			newStr := formatValue(newField)
-			logger.Infof("  📝 %s: %s → %s", fieldName, oldStr, newStr)
+			// INFO names the changed field only: the configuration values may
+			// hold an instruction, a path or a credential.
+			logger.Component("config").Info(context.Background(), "config_changed",
+				"Configuration value changed", zap.String("field", fieldName))
+			if !credentialField(fieldName) {
+				logger.Component("config").Debug(context.Background(), "config_changed_detail",
+					"Configuration value detail",
+					zap.String("field", fieldName),
+					logger.Preview(formatValue(oldField)+" -> "+formatValue(newField)))
+			}
 		}
 	}
+}
+
+// credentialField reports whether a configuration field name denotes a
+// credential, so its value never reaches even a DEBUG preview.
+func credentialField(name string) bool {
+	lower := strings.ToLower(name)
+	for _, part := range []string{"key", "token", "secret", "password", "passwd", "credential", "authorization"} {
+		if strings.Contains(lower, part) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatValue(v reflect.Value) string {

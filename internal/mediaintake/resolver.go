@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/fusionn-muse/pkg/logger"
 )
 
@@ -319,13 +321,15 @@ func hasEmbeddedChineseSubtitle(ctx context.Context, runner CommandRunner, path 
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return false, err
 		}
-		logger.FromContext(ctx).Debugf("ffprobe subtitle detection failed for %s: %v", path, err)
+		logger.Component("mediaintake").Debug(ctx, "subtitle_probe_failed",
+			"Embedded subtitle probe failed", zap.String("path", path), zap.Error(err))
 		return false, nil
 	}
 
 	var probed ffprobeOutput
 	if err := json.Unmarshal(out, &probed); err != nil {
-		logger.FromContext(ctx).Debugf("ffprobe subtitle detection returned invalid JSON for %s: %v", path, err)
+		logger.Component("mediaintake").Debug(ctx, "subtitle_probe_invalid",
+			"Embedded subtitle probe returned invalid JSON", zap.String("path", path), zap.Error(err))
 		return false, nil
 	}
 	for _, stream := range probed.Streams {

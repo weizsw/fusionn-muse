@@ -26,3 +26,10 @@ services:
     environment:
       - ENV=production
       - TZ=Asia/Singapore
+    # Bounded container logs: 20 MiB per file, current file plus five backups.
+    # This takes effect when the container is recreated, not on the running one.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "6"

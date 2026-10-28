@@ -27,8 +27,11 @@ func Banner() string {
 	return strings.Trim(banner, "\n")
 }
 
-// PrintBanner writes the decorated banner and version info to w (stdout if nil).
-func PrintBanner(w io.Writer) {
+// PrintBanner writes the decorated banner, version info and the effective log
+// level to w (stdout if nil). It is the one startup exception to the single-line
+// event rule; the caller passes the level, so this package stays independent of
+// the logger.
+func PrintBanner(w io.Writer, logLevel string) {
 	if w == nil {
 		w = os.Stdout
 	}
@@ -37,6 +40,7 @@ func PrintBanner(w io.Writer) {
 	fmt.Fprintln(w, Banner())
 	fmt.Fprintf(w, "\n  fusionn-muse %s\n", Version)
 	fmt.Fprintf(w, "  Media Library Intelligence Service\n")
+	fmt.Fprintf(w, "  Log level: %s\n", logLevel)
 	fmt.Fprintln(w, separator)
 	fmt.Fprintln(w)
 }

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/fusionn-muse/internal/client/apprise"
 	"github.com/fusionn-muse/internal/config"
 	"github.com/fusionn-muse/internal/executor"
@@ -89,7 +91,8 @@ func startStep(ctx context.Context, name string) *stepTimer {
 
 func (s *stepTimer) done() time.Duration {
 	elapsed := time.Since(s.start)
-	logger.FromContext(s.ctx).Infof("   ⏱️  %s: %v", s.name, formatDuration(elapsed))
+	logger.Component("pipeline").Info(s.ctx, "step_completed", "Pipeline step completed",
+		zap.String("step", s.name), logger.DurMs(elapsed))
 	return elapsed
 }
 
@@ -176,7 +179,6 @@ func (s *Service) HandleTerminalFailure(ctx context.Context, job *queue.Job, sta
 
 func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool) (queue.Stage, error) {
 	totalStart := time.Now()
-	log := logger.FromContext(ctx)
 	cfg, err := configForAttempt(*s.cfgMgr.Get(), job.SettingsSnapshot)
 	if err != nil {
 		return "", err
@@ -190,9 +192,8 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 		return "", err
 	}
 
-	log.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	log.Infof("🎬 Starting job: %s", job.FileName)
-	log.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	pipelineLog := logger.Component("pipeline")
+	pipelineLog.Info(ctx, "job_started", "Job processing started", zap.String("file", job.FileName))
 
 	durations := make(map[string]time.Duration)
 	start := job.StartStage
@@ -232,7 +233,7 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 			return "", err
 		}
 		stagingPath = filepath.Join(s.folders.Staging, job.FileName)
-		log.Infof("📥 Step 1: Staging file...")
+		pipelineLog.Info(ctx, "stage_started", "Staging file", zap.String("stage", string(queue.StagePreparing)))
 		t := startStep(ctx, "Staging")
 		if err := hardlinkOrCopyOnce(ctx, job.SourcePath, stagingPath); err != nil {
 			return "", s.handleError(ctx, "staging", err)
@@ -259,11 +260,12 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 			job.SubtitleDetectionReason = mediaintake.SubtitleDetectionFilename
 		}
 		if cleaned := mediaintake.CleanVideoFilename(job.FileName); cleaned != job.FileName {
-			log.Infof("📝 Cleaned filename: %s → %s", job.FileName, cleaned)
+			pipelineLog.Info(ctx, "filename_cleaned", "Filename cleaned",
+				zap.String("from", job.FileName), zap.String("to", cleaned))
 			job.FileName = cleaned
 		}
 		processingPath = filepath.Join(s.folders.Process, job.FileName)
-		log.Infof("📦 Step 2: Moving to processing...")
+		pipelineLog.Info(ctx, "stage_started", "Moving to processing", zap.String("stage", string(queue.StageMoving)))
 		t := startStep(ctx, "Move to processing")
 		preserveStaging, err = moveToProcessing(ctx, job, stagingPath, processingPath)
 		if err != nil {
@@ -281,7 +283,8 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 		if !cfg.DryRun && !hasChineseSub && hardSubOCREnabled(&cfg) {
 			detected, detectErr := s.detectHardSubtitle(ctx, processingPath)
 			if detectErr != nil {
-				log.Warnf("⚠️ Hard-sub OCR detection failed for %s: %v", job.FileName, detectErr)
+				pipelineLog.Warn(ctx, "hard_sub_detection_failed", "Hard-sub detection failed; continuing without it",
+					zap.String("file", job.FileName), zap.Error(detectErr))
 			} else if detected {
 				hasChineseSub = true
 				job.IsLight = true
@@ -311,7 +314,8 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 			if err := job.BeginStage(ctx, queue.StageTranscribing); err != nil {
 				return "", err
 			}
-			log.Infof("🎤 Step 3: Transcribing with %s...", provider)
+			pipelineLog.Info(ctx, "stage_started", "Transcribing",
+				zap.String("stage", string(queue.StageTranscribing)), zap.String("provider", provider))
 			t := startStep(ctx, "Transcription")
 			if _, statErr := os.Stat(job.SubtitlePath); errors.Is(statErr, os.ErrNotExist) {
 				if err := job.ValidateMedia(processingPath); err != nil {
@@ -353,7 +357,8 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 			if err := validateArtifact(job.SubtitlePath); err != nil {
 				return "", s.handleError(ctx, "read persisted transcription", err)
 			}
-			log.Infof("🌐 Step 4: Translating subtitle → %s...", cfg.Translate.TargetLang)
+			pipelineLog.Info(ctx, "stage_started", "Translating subtitle",
+				zap.String("stage", string(queue.StageTranslating)), zap.String("target_language", cfg.Translate.TargetLang))
 			t := startStep(ctx, "Translation")
 			job.TranslatedPath, err = s.translateWithReceipt(ctx, job, translator)
 			if err != nil {
@@ -419,7 +424,7 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 			if err := os.MkdirAll(s.folders.Scraping, 0755); err != nil {
 				return "", s.handleError(ctx, "prepare scraping folder", err)
 			}
-			log.Infof("📦 Step 6: Moving video to scraping...")
+			pipelineLog.Info(ctx, "stage_started", "Moving video to scraping", zap.String("stage", string(queue.StageDelivering)))
 			t := startStep(ctx, "Move to scraping")
 			if err := moveOnce(ctx, processingPath, scrapingPath); err != nil {
 				return "", s.handleError(ctx, "move video to scraping", err)
@@ -427,7 +432,7 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 			job.ProcessingPath = scrapingPath
 			if preserveStaging {
 				if err := fileops.Remove(stagingPath); err != nil {
-					log.Warnf("⚠️ Failed to remove preserved staging file: %v", err)
+					pipelineLog.Warn(ctx, "staging_remove_failed", "Preserved staging file could not be removed", zap.Error(err))
 				}
 				job.StagingPath = ""
 			}
@@ -439,7 +444,8 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 	}
 
 	s.notifySuccess(ctx, job, durations)
-	log.Infof("✅ Job completed: %s (%s)", job.FileName, formatDuration(time.Since(totalStart)))
+	pipelineLog.Info(ctx, "job_completed", "Job completed",
+		zap.String("file", job.FileName), logger.DurMs(time.Since(totalStart)))
 	return queue.StageDelivered, nil
 }
 
@@ -678,7 +684,6 @@ func (s *Service) moveToFailed(ctx context.Context, job *queue.Job, currentPath 
 		return nil
 	}
 
-	log := logger.FromContext(ctx)
 	failedPath := filepath.Join(s.folders.Failed, job.FileName)
 	if err := os.MkdirAll(s.folders.Failed, 0755); err != nil {
 		return fmt.Errorf("prepare failed folder: %w", err)
@@ -701,14 +706,16 @@ func (s *Service) moveToFailed(ctx context.Context, job *queue.Job, currentPath 
 		return fmt.Errorf("move to failed folder: %w", err)
 	}
 	job.ProcessingPath = failedPath
-	log.Infof("📁 Moved to failed folder: %s", failedPath)
+	logger.Component("pipeline").Info(ctx, "job_moved_to_failed", "Job media moved to the failed folder",
+		zap.String("path", failedPath))
 	return nil
 }
 
-func (s *Service) handleError(ctx context.Context, step string, err error) error {
-	fullErr := fmt.Errorf("%s failed: %w", step, err)
-	logger.FromContext(ctx).Errorf("❌ %v", fullErr)
-	return fullErr
+// handleError wraps a step failure with the step that failed. It does not log:
+// the queue owns the failure boundary, where a failure that will be retried is
+// a WARN, and only an exhausted attempt is an ERROR.
+func (s *Service) handleError(_ context.Context, step string, err error) error {
+	return fmt.Errorf("%s failed: %w", step, err)
 }
 
 func (s *Service) notifySuccess(ctx context.Context, job *queue.Job, durations map[string]time.Duration) {
@@ -725,7 +732,7 @@ func (s *Service) notifySuccess(ctx context.Context, job *queue.Job, durations m
 	)
 
 	if err := s.apprise.NotifySuccess(ctx, title, body); err != nil {
-		logger.FromContext(ctx).Warnf("⚠️ Failed to send notification: %v", err)
+		logger.Component("pipeline").Warn(ctx, "notification_failed", "Success notification could not be sent", zap.Error(err))
 	}
 }
 
@@ -739,7 +746,7 @@ func (s *Service) NotifyFailure(ctx context.Context, job *queue.Job, stage queue
 	body := fmt.Sprintf("**%s**\nJob ID: %s\nFailed at: %s\nError: %v", job.FileName, job.ID, stage, err)
 
 	if notifyErr := s.apprise.NotifyError(ctx, title, body); notifyErr != nil {
-		logger.FromContext(ctx).Warnf("⚠️ Failed to send error notification: %v", notifyErr)
+		logger.Component("pipeline").Warn(ctx, "notification_failed", "Failure notification could not be sent", zap.Error(notifyErr))
 	}
 }
 

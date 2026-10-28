@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 import sys
 
+# Configure logging before third-party imports so a library cannot install its own
+# handler first. Logs go to stderr; stdout stays the boolean result.
+import logfmt
+
+log = logfmt.configure(service="fusionn-muse", component="hard-sub-ocr")
+
 import cv2
 from rapidocr import RapidOCR
 
@@ -68,4 +74,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # One escaped line instead of a raw multi-line traceback.
+        log.exception(
+            "ocr_failed",
+            "Hard-sub OCR failed",
+            path=sys.argv[1] if len(sys.argv) > 1 else None,
+        )
+        sys.exit(1)

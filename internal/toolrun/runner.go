@@ -1,95 +1,56 @@
+// Package toolrun executes external tools. It knows process execution and
+// stream draining only: which events matter, what is safe to show and what
+// counts as a business failure belong to the caller.
 package toolrun
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
-	"strings"
-	"sync"
-
-	"github.com/fusionn-muse/pkg/logger"
-)
-
-const (
-	dimStart = "\033[2m"
-	dimEnd   = "\033[0m"
 )
 
 // Runner executes external tools.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) error
 	Output(ctx context.Context, name string, args ...string) ([]byte, error)
-	Stream(ctx context.Context, name string, args ...string) (string, string, error)
+	// Stream runs the tool with writers the caller owns. Both pipes are copied
+	// while the process runs, so no line length, carriage return or missing
+	// final newline can stop the drain or block the child.
+	Stream(ctx context.Context, name string, stdout, stderr io.Writer, args ...string) error
 }
 
 type ExecRunner struct{}
 
+// Run executes the tool and discards its streams, which are third-party text.
+// The error keeps the real exit status and a safe command name; it never
+// carries the command line or the tool's output.
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) error {
-	output, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
 	}
 	return nil
 }
 
+// Output returns the tool's standard output, which is the machine result the
+// caller asked for, and does not truncate it. A failed run returns the exit
+// status in the error; the tool's standard error stays out of the error text.
 func (ExecRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
 	output, err := exec.CommandContext(ctx, name, args...).Output()
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+	if err != nil {
+		return output, fmt.Errorf("%s: %w", name, err)
 	}
-	return output, err
+	return output, nil
 }
 
-func (ExecRunner) Stream(ctx context.Context, name string, args ...string) (string, string, error) {
+// Stream runs the tool with the caller's writers. The caller decides what a
+// reader sees and bounds what it retains; a nil writer discards that stream.
+func (ExecRunner) Stream(ctx context.Context, name string, stdout, stderr io.Writer, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", "", fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return "", "", fmt.Errorf("stderr pipe: %w", err)
-	}
-
-	var stdoutBuf, stderrBuf bytes.Buffer
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go StreamDimmed(ctx, &wg, stdoutPipe, &stdoutBuf)
-	go StreamDimmed(ctx, &wg, stderrPipe, &stderrBuf)
-
-	if err := cmd.Start(); err != nil {
-		return "", "", fmt.Errorf("start %s: %w", name, err)
-	}
-
-	wg.Wait()
-
-	if err := cmd.Wait(); err != nil {
-		return stdoutBuf.String(), stderrBuf.String(), err
-	}
-	return stdoutBuf.String(), stderrBuf.String(), nil
-}
-
-// StreamDimmed reads from r, writes to buf, and prints dimmed to stderr.
-func StreamDimmed(ctx context.Context, wg *sync.WaitGroup, r io.Reader, buf *bytes.Buffer) {
-	defer wg.Done()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		buf.WriteString(line)
-		buf.WriteByte('\n')
-		fmt.Fprintf(os.Stderr, "%s%s  │ %s%s\n", logger.Prefix(ctx), dimStart, line, dimEnd)
-	}
-
-	if err := scanner.Err(); err != nil {
-		logger.FromContext(ctx).Debugf("Scanner error (may be normal): %v", err)
-	}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
 }

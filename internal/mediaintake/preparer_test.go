@@ -3,6 +3,7 @@ package mediaintake
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -44,8 +45,8 @@ func (r *fakeRunner) Output(_ context.Context, name string, args ...string) ([]b
 	return r.output, r.outputErr
 }
 
-func (r *fakeRunner) Stream(_ context.Context, _ string, _ ...string) (string, string, error) {
-	return "", "", nil
+func (r *fakeRunner) Stream(_ context.Context, _ string, _, _ io.Writer, _ ...string) error {
+	return nil
 }
 
 func TestConcatVideosUsesFFmpegCopyFirst(t *testing.T) {

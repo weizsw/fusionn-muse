@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -54,12 +55,19 @@ func (r *processorCommandRunner) Output(_ context.Context, name string, args ...
 	return nil, nil
 }
 
-func (r *processorCommandRunner) Stream(_ context.Context, name string, args ...string) (string, string, error) {
+func (r *processorCommandRunner) Stream(_ context.Context, name string, stdout, stderr io.Writer, args ...string) error {
 	r.streamCalls = append(r.streamCalls, processorCommandCall{name: name, args: append([]string(nil), args...)})
-	if r.onStream != nil {
-		return r.onStream(name, args...)
+	if r.onStream == nil {
+		return nil
 	}
-	return "", "", nil
+	capturedStdout, capturedStderr, err := r.onStream(name, args...)
+	if stdout != nil && capturedStdout != "" {
+		_, _ = io.WriteString(stdout, capturedStdout)
+	}
+	if stderr != nil && capturedStderr != "" {
+		_, _ = io.WriteString(stderr, capturedStderr)
+	}
+	return err
 }
 
 type transcriberFunc func(context.Context, string) (string, error)
@@ -750,7 +758,7 @@ func TestNotificationsIncludeJobID(t *testing.T) {
 	client := apprise.NewClient(config.AppriseConfig{Enabled: true, BaseURL: server.URL, Key: "test"})
 	svc := Service{apprise: client}
 	job := queue.NewJob("d4e79fec-d17d-48bd-82e0-c064c6bc80e1", "/tmp/movie.mp4", "movie.mp4", "", "")
-	ctx := logger.WithAttempt(logger.WithJob(context.Background(), job.ID), 1)
+	ctx := logger.WithAttempt(logger.WithJobID(context.Background(), job.ID), 1)
 
 	svc.notifySuccess(ctx, job, map[string]time.Duration{})
 	svc.NotifyFailure(ctx, job, queue.StageTranscribing, errors.New("boom"))

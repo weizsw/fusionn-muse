@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap/zapcore"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
@@ -72,6 +74,56 @@ func TestTorrentCompleteAcknowledgesAfterSubmissionPersistence(t *testing.T) {
 	jobs := waitForAcceptedJobs(t, handler.queue, 1)
 	if _, err := uuid.Parse(jobs[0].ID); err != nil {
 		t.Fatalf("accepted Job ID = %q, want full UUID: %v", jobs[0].ID, err)
+	}
+}
+
+func TestTorrentCompleteLogsTheRequestAndSubmissionIDs(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "downloads", "SSNI-083-C.mp4")
+	mustWriteSizedHandlerFile(t, source, mediaintake.MinVideoSize+1)
+
+	handler := newTestHandler(root)
+	handler.queue.Start()
+	defer handler.queue.Stop()
+
+	router := newMiddlewareRouter(func(r *gin.Engine) { handler.RegisterRoutes(r) })
+
+	var buf bytes.Buffer
+	t.Setenv("LOG_LEVEL", "INFO")
+	logger.Configure(logger.Config{Output: zapcore.AddSync(&buf)})
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/webhook/torrent",
+		bytes.NewBufferString(`{"path":"`+source+`","name":"SSNI-083"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(RequestIDHeader, "webhook-request-1")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		SubmissionID string `json:"submission_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.SubmissionID == "" {
+		t.Fatalf("response carries no submission_id: %s", response.Body.String())
+	}
+
+	// The queue worker still writes, so it must be stopped before the capture is
+	// read; the record under test was written before the response.
+	handler.queue.Stop()
+	lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+	records := linesContaining(lines, "event=submission_received")
+	if len(records) != 1 {
+		t.Fatalf("submission_received lines = %d, want one: %q", len(records), lines)
+	}
+	for _, want := range []string{" INFO ", "submission_id=" + body.SubmissionID, "request_id=webhook-request-1"} {
+		if !strings.Contains(records[0], want) {
+			t.Fatalf("record = %q, want %q", records[0], want)
+		}
 	}
 }
 

@@ -9,6 +9,74 @@ import re
 import sys
 import tempfile
 
+# Configure logging before third-party imports so a library cannot install its own
+# handler first. Logs go to stderr; stdout stays the machine-readable result.
+import logfmt
+
+log = logfmt.configure(service="fusionn-muse", component="llm-subtrans")
+
+# The previous release configured basicConfig(level=INFO) with
+# "%(levelname)s: %(message)s" on stderr, and the caller reports a failed
+# translation by searching that stream for "Error:" or "Traceback". The unified
+# format, the configured level and the content limits all change what reaches
+# stderr, so the previous verdict is computed here, from the records that setup
+# would have written, before redaction or truncation. The caller learns the
+# verdict from one constant event instead of the original text.
+_LEGACY_MARKERS = ("Error:", "Traceback")
+_SCRIPT_FAILURE_EVENT = "script_failure_detected"
+_legacy = {"matched": False}
+_exception_formatter = logging.Formatter()
+
+
+class _LegacyFailureProbe(logging.Handler):
+    """Recomputes the previous stream's failure check at the previous visibility."""
+
+    def emit(self, record):
+        if record.levelno < logging.INFO:
+            # The previous root level was INFO, so a lower record never reached
+            # stderr and must not change the verdict either.
+            return
+        if getattr(record, "event", None) is not None and not record.exc_info:
+            # Our own event text is written deliberately; the previous release did
+            # not write it at all, so it cannot change the verdict.
+            return
+        try:
+            text = "%s: %s" % (record.levelname, record.getMessage())
+            if record.exc_info:
+                text += "\n" + _exception_formatter.formatException(record.exc_info)
+        except Exception:
+            self.handleError(record)
+            return
+        if any(marker in text for marker in _LEGACY_MARKERS):
+            _legacy["matched"] = True
+
+
+# The root logger stays open, so this sees every record the previous setup would
+# have rendered, whatever LOG_LEVEL displays now.
+logging.getLogger().addHandler(_LegacyFailureProbe())
+
+
+def ensure_line_boundary():
+    """Write one separator before a final record.
+
+    A library can leave a partial line on stderr, for example a progress counter
+    written without a newline. The caller reads a record's header at the start of
+    a line, and a blank separator is not an event, so the final records below
+    always start on a fresh line.
+    """
+    sys.stderr.write("\n")
+    sys.stderr.flush()
+
+
+def report_legacy_failure():
+    """Tell the caller what the previous failure check would have concluded."""
+    if _legacy["matched"]:
+        ensure_line_boundary()
+        log.error(
+            _SCRIPT_FAILURE_EVENT,
+            "Script output matched the previous failure check",
+        )
+
 
 AGE_SENSITIVE_RE = re.compile(
     r"(未成年|児童|子供|子ども|小学生|中学生|高校生|女子高生|JK|JC|JS|ロリ|ロリータ|少女|幼い|1[0-7]歳)",
@@ -97,10 +165,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    # Provider imports can log before translation starts. Configure the root
-    # logger first so those imports cannot install the default WARNING handler.
-    logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
-
+    # Provider imports log before translation starts, so they find the handlers
+    # configured at import time rather than the default root handler.
     from PySubtrans import init_options, init_subtitles, init_translation_provider, init_translator
 
     # CustomClient 1.7.3 uses `self.settings.get_float('backoff_time') or 5.0`.
@@ -147,7 +213,10 @@ def main() -> int:
                 f.write(sanitized_srt)
                 temp_input = f.name
             subtitle_input = temp_input
-            logging.info("Replaced age-sensitive subtitle terms before translation")
+            log.info(
+                "subtitle_sanitized",
+                "Replaced age-sensitive subtitle terms before translation",
+            )
 
         subtitles = init_subtitles(subtitle_input, options=options)
         translation_provider = None
@@ -171,4 +240,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        code = main()
+    except Exception:
+        # One escaped line instead of a raw multi-line traceback.
+        ensure_line_boundary()
+        log.exception("translation_failed", "Subtitle translation failed")
+        code = 1
+    finally:
+        report_legacy_failure()
+    sys.exit(code)

@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 
+	"go.uber.org/zap"
+
 	"github.com/fusionn-muse/pkg/logger"
 )
 
 // HardlinkOrCopy tries to hardlink src to dst, falls back to copy if hardlink fails.
 func HardlinkOrCopy(ctx context.Context, src, dst string) error {
-	log := logger.FromContext(ctx)
+	log := logger.Component("fileops")
 	// Ensure destination directory exists
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("create dir: %w", err)
@@ -30,18 +32,18 @@ func HardlinkOrCopy(ctx context.Context, src, dst string) error {
 	// Try hardlink first
 	err := os.Link(src, dst)
 	if err == nil {
-		log.Debugf("🔗 Hard-linked: %s → %s", src, dst)
+		log.Debug(ctx, "file_linked", "File hard-linked", zap.String("src", src), zap.String("dst", dst))
 		return nil
 	}
 
-	log.Debugf("⚠️ Hardlink failed (%v), falling back to copy", err)
+	log.Debug(ctx, "link_fallback", "Hardlink failed; copying instead", zap.Error(err))
 
 	// Fallback to copy
 	if err := copyFile(ctx, src, dst); err != nil {
 		return fmt.Errorf("copy: %w", err)
 	}
 
-	log.Debugf("📋 Copied: %s → %s", src, dst)
+	log.Debug(ctx, "file_copied", "File copied", zap.String("src", src), zap.String("dst", dst))
 	return nil
 }
 
@@ -50,7 +52,7 @@ func HardlinkOrCopyNoReplace(ctx context.Context, src, dst string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	log := logger.FromContext(ctx)
+	log := logger.Component("fileops")
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("create dir: %w", err)
 	}
@@ -70,7 +72,7 @@ func HardlinkOrCopyNoReplace(ctx context.Context, src, dst string) error {
 		if err != nil {
 			return err
 		}
-		log.Debugf("🔗 Hard-linked: %s → %s", src, dst)
+		log.Debug(ctx, "file_linked", "File hard-linked", zap.String("src", src), zap.String("dst", dst))
 		return SyncDir(filepath.Dir(dst))
 	} else if os.IsExist(err) {
 		return fmt.Errorf("destination exists: %w", err)
@@ -78,13 +80,13 @@ func HardlinkOrCopyNoReplace(ctx context.Context, src, dst string) error {
 	if err := copyFileNoReplace(ctx, src, dst); err != nil {
 		return fmt.Errorf("copy: %w", err)
 	}
-	log.Debugf("📋 Copied: %s → %s", src, dst)
+	log.Debug(ctx, "file_copied", "File copied", zap.String("src", src), zap.String("dst", dst))
 	return SyncDir(filepath.Dir(dst))
 }
 
 // Move moves a file from src to dst.
 func Move(ctx context.Context, src, dst string) error {
-	log := logger.FromContext(ctx)
+	log := logger.Component("fileops")
 	// Ensure destination directory exists
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("create dir: %w", err)
@@ -98,14 +100,14 @@ func Move(ctx context.Context, src, dst string) error {
 		if err := os.Remove(src); err != nil {
 			return fmt.Errorf("remove source after same-inode move: %w", err)
 		}
-		log.Debugf("📦 Moved: %s → %s", src, dst)
+		log.Debug(ctx, "file_moved", "File moved", zap.String("src", src), zap.String("dst", dst))
 		return nil
 	}
 
 	// Try rename first (works if same filesystem)
 	err := os.Rename(src, dst)
 	if err == nil {
-		log.Debugf("📦 Moved: %s → %s", src, dst)
+		log.Debug(ctx, "file_moved", "File moved", zap.String("src", src), zap.String("dst", dst))
 		return nil
 	}
 
@@ -115,10 +117,10 @@ func Move(ctx context.Context, src, dst string) error {
 	}
 
 	if err := os.Remove(src); err != nil {
-		log.Warnf("⚠️ Failed to remove source after copy: %v", err)
+		log.Warn(ctx, "source_remove_failed", "Source could not be removed after copy", zap.Error(err))
 	}
 
-	log.Debugf("📦 Moved (copy+delete): %s → %s", src, dst)
+	log.Debug(ctx, "file_moved", "File moved by copy", zap.String("src", src), zap.String("dst", dst))
 	return nil
 }
 
@@ -154,7 +156,7 @@ func Copy(ctx context.Context, src, dst string) error {
 	if err := copyFile(ctx, src, dst); err != nil {
 		return fmt.Errorf("copy: %w", err)
 	}
-	logger.FromContext(ctx).Debugf("📋 Copied: %s → %s", src, dst)
+	logger.Component("fileops").Debug(ctx, "file_copied", "File copied", zap.String("src", src), zap.String("dst", dst))
 	return nil
 }
 

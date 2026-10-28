@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/fusionn-muse/pkg/logger"
 )
 
@@ -30,7 +32,9 @@ func (q *Queue) persist(ctx context.Context, jobID, operation string, write func
 		if last == nil || last.message != message {
 			last = &persistenceFailure{message: message}
 			q.persistenceErrors.Store(jobID, last)
-			logger.FromContext(ctx).Errorf("%s; retaining result", message)
+			logger.Component("queue").Error(ctx, "persistence_failed",
+				"Job state could not be persisted; retaining result",
+				zap.String("operation", operation), zap.Error(err))
 		}
 		if !waitPersistence(ctx) {
 			return ctx.Err()

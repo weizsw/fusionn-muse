@@ -33,8 +33,10 @@ func newCountingProcessor(err error) *countingProcessor {
 func (p *countingProcessor) Process(ctx context.Context, job *Job) error {
 	p.mu.Lock()
 	p.calls++
-	p.attempts = append(p.attempts, logger.Attempt(ctx))
-	p.jobIDs = append(p.jobIDs, logger.JobID(ctx))
+	// The retry ordinal and the Job ID are read from the attempt itself, the way
+	// the worker writes them into its events.
+	p.attempts = append(p.attempts, job.Retries+1)
+	p.jobIDs = append(p.jobIDs, job.ID)
 	p.mu.Unlock()
 	if p.err != nil && !job.IsLight {
 		job.BeginStage(ctx, StageTranslating)
