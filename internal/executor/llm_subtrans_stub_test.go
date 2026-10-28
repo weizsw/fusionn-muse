@@ -49,9 +49,10 @@ mode = os.environ.get("MUSE_STUB_MODE", "fail")
 
 def line(level, event, fields=""):
     stamp = "2026-07-01T14:20:09.456+08:00"
+    service = "service=fusionn-muse " if os.environ.get("MUSE_STUB_LEGACY") == "1" else ""
     suffix = " " + fields if fields else ""
-    return "%s %s service=fusionn-muse component=llm-subtrans event=%s%s msg=\"failed\"" % (
-        stamp, level, event, suffix)
+    return "%s %s %scomponent=llm-subtrans event=%s%s msg=\"failed\"" % (
+        stamp, level, service, event, suffix)
 
 
 if mode == "succeed":
@@ -96,34 +97,47 @@ func newStubTranslator(t *testing.T) *LLMSubtrans {
 }
 
 func TestLLMSubtransStubFailureReachesTheWorkerFacts(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("MUSE_STUB_MODE", "fail")
-	translator := newStubTranslator(t)
-
-	var translateErr error
-	lines := captureLogOutput(t, func() {
-		_, translateErr = translator.Translate(context.Background(), filepath.Join(root, "movie.srt"))
-	})
-
-	var diagnostics ScriptDiagnostics
-	if !errors.As(translateErr, &diagnostics) {
-		t.Fatalf("error = %v, want the script's safe diagnostics", translateErr)
-	}
-	if diagnostics.ErrorType != "ModuleNotFoundError" || diagnostics.Module != "PySubtrans" || diagnostics.Errno != 2 {
-		t.Fatalf("diagnostics = %#v, want the script's structural facts", diagnostics)
-	}
-	if diagnostics.Frames != stubFrames {
-		t.Fatalf("frames = %q, want %q", diagnostics.Frames, stubFrames)
-	}
-	if !strings.Contains(translateErr.Error(), "exit status 1") {
-		t.Fatalf("error = %v, want the real exit status", translateErr)
-	}
-	for _, line := range lines {
-		for _, consumed := range []string{"event=translation_failed", "event=script_failure_detected"} {
-			if strings.Contains(line, consumed) {
-				t.Fatalf("line %q displays the script's consumed record", line)
+	for _, test := range []struct {
+		name   string
+		legacy bool
+	}{
+		{"current header", false},
+		{"legacy header", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("MUSE_STUB_MODE", "fail")
+			if test.legacy {
+				t.Setenv("MUSE_STUB_LEGACY", "1")
 			}
-		}
+			translator := newStubTranslator(t)
+
+			var translateErr error
+			lines := captureLogOutput(t, func() {
+				_, translateErr = translator.Translate(context.Background(), filepath.Join(root, "movie.srt"))
+			})
+
+			var diagnostics ScriptDiagnostics
+			if !errors.As(translateErr, &diagnostics) {
+				t.Fatalf("error = %v, want the script's safe diagnostics", translateErr)
+			}
+			if diagnostics.ErrorType != "ModuleNotFoundError" || diagnostics.Module != "PySubtrans" || diagnostics.Errno != 2 {
+				t.Fatalf("diagnostics = %#v, want the script's structural facts", diagnostics)
+			}
+			if diagnostics.Frames != stubFrames {
+				t.Fatalf("frames = %q, want %q", diagnostics.Frames, stubFrames)
+			}
+			if !strings.Contains(translateErr.Error(), "exit status 1") {
+				t.Fatalf("error = %v, want the real exit status", translateErr)
+			}
+			for _, line := range lines {
+				for _, consumed := range []string{"event=translation_failed", "event=script_failure_detected"} {
+					if strings.Contains(line, consumed) {
+						t.Fatalf("line %q displays the script's consumed record", line)
+					}
+				}
+			}
+		})
 	}
 }
 

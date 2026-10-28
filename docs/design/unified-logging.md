@@ -23,7 +23,7 @@
 ## 3. 单行文本格式
 
 ```text
-2026-07-01T14:20:03.456+08:00 WARN service=fusionn-subs component=translator event=translation_retry job_id=abc error="provider timeout" retry=1 retry_after_ms=2000 msg="Translation will retry"
+2026-07-01T14:20:03.456+08:00 WARN component=translator event=translation_retry job_id=abc error="provider timeout" retry=1 retry_after_ms=2000 msg="Translation will retry"
 ```
 
 ### 基础规则
@@ -34,17 +34,17 @@
 4. 不含 emoji、树形缩进、ANSI 清屏、进度条或纯装饰分隔行。首版不输出颜色，保证终端与收集结果一致。启动时的项目 ASCII banner 例外：每次启动打印一次，并显示版本与实际生效的日志等级；其余业务事件仍遵守单行规则。
 5. 消息使用简短英文。文件名、媒体标题、上游错误等值不翻译。事件和字段用 `snake_case`，耗时统一为数值 `duration_ms`，不混用格式化的秒字符串。
 6. 文本值统一用双引号及反斜杠转义；数字和布尔值不用引号。只有匹配 `[A-Za-z0-9][A-Za-z0-9_.-]*` 的标识字符串可以裸写；路径、中文、空串和其他字符串均加双引号。`msg`、`error`、`stack`、`preview` 始终带双引号。转义采用 Go 标准库 `strconv.Quote` 语义，Python 以相同黄金向量复核；保留可打印中文，不使用 `QuoteToASCII`。Go 与 Python 对同一黄金输入必须逐字节一致。shell 必须通过共同黄金向量，至少处理 ASCII/C1 控制符、U+2028/U+2029 和矩阵内已知非打印字符；无法按类别识别的其他罕见 Unicode 字符可保留为明确记录的受限范围，不引入新运行时或 Unicode 数据库。不允许一端尾部 JSON、一端 key=value。
-7. 必填字段：`service`、`component`、`event`、`msg`。服务分别为 `fusionn`、`fusionn-muse`、`fusionn-subs`；独立 Python 服务保留明确的服务名，例如 `word-align`、`host-asr`、`duosubs`。`component` 指实际模块，不能用调用文件名替代稳定模块名。
-8. 固定字段顺序：`service component event`，随后为存在的 `job_id submission_id attempt_id request_id parent_job_id stage tool stream`；其余字段按键名排序；`msg` 最后。未知或不适用的关联字段省略，不填空串、null、0 或虚构 ID。
+7. 必填字段：`component`、`event`、`msg`。输出不包含 `service` 字段：应用/容器/服务身份已由收集入口（容器名、宿主服务单元、进程）提供，行内不再重复；`service` 仍是保留键，调用方不能作为自由字段注入或伪造。独立服务（`word-align`、`host-asr`、`duosubs`）的身份同样由收集入口区分。`component` 指实际模块，不能用调用文件名替代稳定模块名。
+8. 固定字段顺序：`component event`，随后为存在的 `job_id submission_id attempt_id request_id parent_job_id stage tool stream`；其余字段按键名排序；`msg` 最后。未知或不适用的关联字段省略，不填空串、null、0 或虚构 ID。
 9. 字段名必须匹配 `[a-z][a-z0-9_]*`，不从用户输入生成。拒绝非法键；用户输入不能覆盖 `level`、`service`、`event` 或关联 ID，也不能通过重复保留字段制造歧义。所有不可信文本转义后作为值输出。
 
 ### 样例事件
 
 ```text
-2026-07-01T14:20:01.123+08:00 INFO service=fusionn-subs component=worker event=job_started job_id=abc msg="Job started"
-2026-07-01T14:20:02.123+08:00 INFO service=fusionn-subs component=translator event=tool_started job_id=abc tool=llm-subtrans msg="Translation tool started"
-2026-07-01T14:20:03.456+08:00 WARN service=fusionn-subs component=translator event=translation_retry job_id=abc error="provider timeout" retry=1 retry_after_ms=2000 msg="Translation will retry"
-2026-07-01T14:21:00.789+08:00 ERROR service=fusionn-subs component=worker event=job_failed job_id=abc stage=translation error="retries exhausted" msg="Job failed"
+2026-07-01T14:20:01.123+08:00 INFO component=worker event=job_started job_id=abc msg="Job started"
+2026-07-01T14:20:02.123+08:00 INFO component=translator event=tool_started job_id=abc tool=llm-subtrans msg="Translation tool started"
+2026-07-01T14:20:03.456+08:00 WARN component=translator event=translation_retry job_id=abc error="provider timeout" retry=1 retry_after_ms=2000 msg="Translation will retry"
+2026-07-01T14:21:00.789+08:00 ERROR component=worker event=job_failed job_id=abc stage=translation error="retries exhausted" msg="Job failed"
 ```
 
 事件名应表达已经发生的事实，例如 `service_started`、`config_reloaded`、`job_received`、`job_started`、`stage_completed`、`job_completed`、`job_failed`、`job_linked`、`translation_retry`、`tool_started`、`tool_completed`、`request_completed`。不要求为所有普通诊断消息建大枚举，但关键生命周期事件必须可按 event 检索。

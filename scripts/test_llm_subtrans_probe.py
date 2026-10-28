@@ -37,7 +37,7 @@ PREVIOUS_SCRIPT_SHA256 = "f2f06c983d7861075acc65787f95623b1df97500023ccc1cdadd3d
 
 UNIFIED_LINE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2} "
-    r"(DEBUG|INFO|WARN|ERROR) service=fusionn-muse component=llm-subtrans event=(\S+)(?: |$)"
+    r"(DEBUG|INFO|WARN|ERROR) (?:service=fusionn-muse )?component=llm-subtrans event=(\S+)(?: |$)"
 )
 
 SCRIPT_FAILURE_EVENT = "script_failure_detected"
@@ -51,9 +51,10 @@ def legacy_verdict(stderr):
 def current_verdict(stderr):
     """Mirror of the scriptCapture verdict in internal/executor/scriptcapture.go.
 
-    A line boundary is an LF or a CR, only the script's own service and
-    component are read as its display output, and the control event counts only
-    in the header of such a line.
+    A line boundary is an LF or a CR, only the script's own component is read as
+    its display output (a header written before the service field was removed is
+    still accepted, from this service only), and the control event counts only in
+    the header of such a line.
     """
     for line in re.split(r"[\r\n]", stderr):
         match = UNIFIED_LINE.match(line)
@@ -225,7 +226,7 @@ class VerdictDifferentialTest(unittest.TestCase):
 
     def test_a_normalized_debug_preview_never_fails_a_successful_run(self):
         line = (
-            "2026-07-01T14:20:03.456+08:00 DEBUG service=fusionn-muse component=llm-subtrans "
+            "2026-07-01T14:20:03.456+08:00 DEBUG component=llm-subtrans "
             'event=llm_response_preview preview="Error: Traceback inside a kept excerpt" '
             'msg="LLM response preview"'
         )
@@ -239,14 +240,23 @@ class VerdictDifferentialTest(unittest.TestCase):
 
     def test_the_control_event_is_read_from_our_own_header(self):
         record = (
-            "2026-07-01T14:20:03.456+08:00 ERROR service=fusionn-muse component=llm-subtrans "
+            "2026-07-01T14:20:03.456+08:00 ERROR component=llm-subtrans "
             "event=" + SCRIPT_FAILURE_EVENT + ' msg="Script output matched"'
         )
         self.assertTrue(current_verdict(record), "our own control record must fail the run")
+        # A header written before the service field was removed still counts.
+        self.assertTrue(
+            current_verdict(record.replace("ERROR component=", "ERROR service=fusionn-muse component=")),
+            "the optional legacy service prefix is accepted",
+        )
         # A bare token, another service, or a quoted value never forges the event.
         self.assertFalse(current_verdict("x\n" + SCRIPT_FAILURE_EVENT + ' msg="matched"'))
         self.assertFalse(
             current_verdict(record.replace("component=llm-subtrans", "component=translator"))
+        )
+        self.assertFalse(
+            current_verdict(record.replace("ERROR component=", "ERROR service=fusionn-subs component=")),
+            "another service's prefix is not trusted",
         )
         self.assertFalse(
             current_verdict(record.replace("event=" + SCRIPT_FAILURE_EVENT, "event=log"))

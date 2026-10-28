@@ -61,10 +61,15 @@ type kv struct {
 
 // renderLine renders one event as exactly one physical line:
 //
-//	TS LEVEL service=S component=C event=E [job_id..parent_job_id] [stage tool stream] [extras sorted] msg=M
+//	TS LEVEL component=C event=E [job_id..parent_job_id] [stage tool stream] [extras sorted] msg=M
+//
+// The service parameter is kept for API compatibility with the three-repo
+// shared core but is no longer rendered: the application or container
+// identity comes from the collection entry. It is still a reserved key, so
+// caller input can never re-render it.
 //
 // It is the single render path for all output; golden tests call it directly.
-func renderLine(now time.Time, lvl Level, service string, with, call []zapcore.Field, msg string) string {
+func renderLine(now time.Time, lvl Level, _ string, with, call []zapcore.Field, msg string) string {
 	component := "app"
 	event := "log_message"
 	compSet, eventSet := false, false
@@ -189,8 +194,6 @@ func renderLine(now time.Time, lvl Level, service string, with, call []zapcore.F
 	b.WriteString(now.In(fixedZone).Format(timeLayout))
 	b.WriteByte(' ')
 	b.WriteString(displayLevel(lvl))
-	b.WriteString(" service=")
-	b.WriteString(renderString(Redact(service)))
 	b.WriteString(" component=")
 	b.WriteString(renderString(Redact(component)))
 	b.WriteString(" event=")

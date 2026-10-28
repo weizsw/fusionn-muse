@@ -14,7 +14,7 @@ import unittest
 SCRIPTS = pathlib.Path(__file__).parent
 UNIFIED = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00 "
-    r"(DEBUG|INFO|WARN|ERROR) service=fusionn-muse component=\S+ event=\S+ "
+    r"(DEBUG|INFO|WARN|ERROR) component=\S+ event=\S+ "
     r'.*msg=".*"$'
 )
 

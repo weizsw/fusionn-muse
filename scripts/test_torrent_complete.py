@@ -13,10 +13,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCRIPT = Path(__file__).with_name("torrent-complete.sh")
 
-# service component event are fixed; msg is last; the line is one physical line.
+# component and event are fixed in that order; msg is last; the line is one physical line.
 LINE_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00 "
-    r"(DEBUG|INFO|WARN|ERROR) service=fusionn-muse component=torrent-complete event=\S+ "
+    r"(DEBUG|INFO|WARN|ERROR) component=torrent-complete event=\S+ "
     r'.*msg=".*"$'
 )
 
@@ -108,7 +108,7 @@ class TorrentCompleteTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(len(requests), 1, "must not silently retry")
                 self.assert_unified_lines(log)
-                self.assertIn("ERROR service=fusionn-muse component=torrent-complete event=webhook_failed", log)
+                self.assertIn("ERROR component=torrent-complete event=webhook_failed", log)
                 self.assertIn(f"http_status={status}", log)
                 self.assertNotIn("event=webhook_sent", log)
 
@@ -131,9 +131,9 @@ class TorrentCompleteTests(unittest.TestCase):
             _, log = self.invoke(url, directory, ["/movie.mp4", "movie", "video"])
         line = log.strip().split("\n")[0]
         keys = re.findall(r"(?:^| )([a-z_]+)=", line)
-        self.assertEqual(keys[:3], ["service", "component", "event"])
+        self.assertEqual(keys[:2], ["component", "event"])
         self.assertEqual(keys[-1], "msg")
-        self.assertEqual(keys[3:-1], sorted(keys[3:-1]))
+        self.assertEqual(keys[2:-1], sorted(keys[2:-1]))
 
     @unittest.skipUnless(Path("/bin/bash").exists(), "/bin/bash unavailable")
     def test_runs_on_the_system_bash(self):

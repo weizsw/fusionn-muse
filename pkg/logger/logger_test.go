@@ -35,7 +35,7 @@ func TestComponentEventFormat(t *testing.T) {
 	log.Info(ctx, "job_started", "Job started")
 
 	got := strings.TrimRight(buf.String(), "\n")
-	want := ` INFO service=fusionn-muse component=worker event=job_started job_id=j1 msg="Job started"`
+	want := ` INFO component=worker event=job_started job_id=j1 msg="Job started"`
 	if !lineRe.MatchString(got) || !strings.HasSuffix(got, want) {
 		t.Errorf("\n got: %s\nwant suffix: %s", got, want)
 	}

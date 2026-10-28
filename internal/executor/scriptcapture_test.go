@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,14 +13,16 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"github.com/fusionn-muse/internal/toolrun"
 	"github.com/fusionn-muse/pkg/logger"
 )
 
 // scriptLine renders one line of the unified format, the way the translation
-// script writes it.
+// script writes it today: the service field is gone, so the component follows
+// the level directly.
 func scriptLine(level, event, fields string) string {
 	line := "2026-07-01T14:20:09.456+08:00 " + level +
-		" service=fusionn-muse component=llm-subtrans event=" + event
+		" component=llm-subtrans event=" + event
 	if fields != "" {
 		line += " " + fields
 	}
@@ -66,6 +70,14 @@ func TestScriptCaptureVerdict(t *testing.T) {
 		{"the script's constant failure event", []string{scriptLine("ERROR", "script_failure_detected", "") + "\n"}, true},
 		{"the control event is read from the header, not from a quoted value",
 			[]string{scriptLine("INFO", "translation_started", `preview="event=script_failure_detected"`) + "\n"}, false},
+		{"a header from before the service field was removed is still ours",
+			[]string{"2026-07-01T14:20:09.456+08:00 ERROR service=fusionn-muse component=llm-subtrans event=script_failure_detected msg=\"failed\"\n"}, true},
+		{"a quoted control event in a legacy header is not the real record",
+			[]string{"2026-07-01T14:20:09.456+08:00 INFO service=fusionn-muse component=llm-subtrans event=translation_started preview=\"event=script_failure_detected\" msg=\"failed\"\n"}, false},
+		{"a foreign service with our component is not ours",
+			[]string{"2026-07-01T14:20:09.456+08:00 ERROR service=fusionn-subs component=llm-subtrans event=script_failure_detected msg=\"theirs\"\n"}, false},
+		{"a foreign component without the legacy prefix keeps the raw verdict",
+			[]string{"2026-07-01T14:20:09.456+08:00 ERROR component=other event=translation_failed Traceback: body\n"}, true},
 		{"the control event in a message is not a failure",
 			[]string{scriptLine("INFO", "translation_started", "") + "\n"}, false},
 		{"a foreign service keeps the raw verdict",
@@ -106,6 +118,51 @@ func TestScriptCaptureVerdict(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if got := capturePieces(test.pieces...).verdict(); got != test.want {
+				t.Fatalf("verdict = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+// realRendererProgram prints one line with the repository's own renderer. The
+// capture is then linked to the format the script actually writes, so a change
+// the hand-written test lines miss cannot stay green on both sides.
+const realRendererProgram = `import sys
+sys.path.insert(0, sys.argv[2])
+import logfmt
+
+log = logfmt.configure(service="fusionn-muse", component="llm-subtrans", level="DEBUG")
+if sys.argv[1] == "control":
+    log.error("script_failure_detected", "Script output matched")
+else:
+    log.debug("llm_response_preview", "LLM response preview", preview="event=script_failure_detected")
+`
+
+func TestScriptCaptureReadsTheRealRendererHeader(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not installed")
+	}
+	scripts, err := filepath.Abs(filepath.Join("..", "..", "scripts"))
+	if err != nil {
+		t.Fatalf("resolve the scripts directory: %v", err)
+	}
+	for _, test := range []struct {
+		mode string
+		want bool
+	}{
+		{"control", true},
+		{"preview", false},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			capture := &scriptCapture{}
+			err := toolrun.ExecRunner{}.Stream(context.Background(), python, io.Discard, capture,
+				"-B", "-c", realRendererProgram, test.mode, scripts)
+			capture.close()
+			if err != nil {
+				t.Fatalf("run the renderer: %v", err)
+			}
+			if got := capture.verdict(); got != test.want {
 				t.Fatalf("verdict = %v, want %v", got, test.want)
 			}
 		})
