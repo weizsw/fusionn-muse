@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/fusionn-muse/internal/config"
 	"github.com/fusionn-muse/pkg/logger"
@@ -38,7 +41,17 @@ type hostASRRequest struct {
 	Model           string `json:"model,omitempty"`
 	Language        string `json:"language,omitempty"`
 	JobID           string `json:"job_id,omitempty"`
-	Attempt         int    `json:"attempt,omitempty"`
+	// Attempt is the retry ordinal; AttemptID is the durable Attempt id.
+	Attempt   int   `json:"attempt,omitempty"`
+	AttemptID int64 `json:"attempt_id,omitempty"`
+}
+
+// hostASRDetail reports the host's own failure text once, as one bounded DEBUG
+// excerpt. The render layer keeps preview fields to DEBUG and caps them, so the
+// text cannot reach a line a reader sees.
+func hostASRDetail(ctx context.Context, status int, text string) {
+	logger.Component("host-asr").Debug(ctx, "asr_response_detail", "Host ASR reported a failure",
+		zap.Int("status", status), logger.Preview(text))
 }
 
 type hostASRResponse struct {
@@ -65,6 +78,7 @@ func (h *HostASR) Transcribe(ctx context.Context, videoPath string) (string, err
 		Language:        h.cfg.Language,
 		JobID:           logger.JobID(ctx),
 		Attempt:         logger.Attempt(ctx),
+		AttemptID:       logger.AttemptID(ctx),
 	})
 	if err != nil {
 		return "", err
@@ -86,11 +100,16 @@ func (h *HostASR) Transcribe(ctx context.Context, videoPath string) (string, err
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("decode host ASR response: %w", err)
 	}
+	// The host fills this field with free-form remote content: the transcriber's
+	// own output and exception text. It never reaches an error, a WARN or a
+	// notification, only the one bounded DEBUG excerpt below.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("host ASR failed: %s", result.Error)
+		hostASRDetail(ctx, resp.StatusCode, result.Error)
+		return "", fmt.Errorf("host ASR failed: status %d", resp.StatusCode)
 	}
 	if !result.Success {
-		return "", fmt.Errorf("host ASR failed: %s", result.Error)
+		hostASRDetail(ctx, resp.StatusCode, result.Error)
+		return "", errors.New("host ASR reported a failure")
 	}
 	if result.OutputPath == "" {
 		return "", fmt.Errorf("host ASR returned empty output path")

@@ -1,59 +1,173 @@
 package toolrun
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/fusionn-muse/pkg/logger"
+	"time"
 )
 
-func TestExecRunnerStreamCapturesOutput(t *testing.T) {
-	runner := ExecRunner{}
+// countingWriter counts the bytes a stream produced without retaining them, so
+// a multi-megabyte line can be asserted with bounded test memory.
+type countingWriter struct{ bytes int64 }
 
-	stdout, stderr, err := runner.Stream(context.Background(), "sh", "-c", "printf out; printf err >&2")
-	if err != nil {
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.bytes += int64(len(p))
+	return len(p), nil
+}
+
+func TestExecRunnerStreamWritesToTheCallersWriters(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := (ExecRunner{}).Stream(context.Background(), "sh",
+		&stdout, &stderr, "-c", "printf out; printf err >&2"); err != nil {
 		t.Fatalf("Stream returned error: %v", err)
 	}
-	if strings.TrimSpace(stdout) != "out" {
-		t.Fatalf("stdout = %q, want out", stdout)
+	if stdout.String() != "out" {
+		t.Fatalf("stdout = %q, want out", stdout.String())
 	}
-	if strings.TrimSpace(stderr) != "err" {
-		t.Fatalf("stderr = %q, want err", stderr)
-	}
-}
-
-func TestExecRunnerOutputPreservesStderrOnFailure(t *testing.T) {
-	_, err := (ExecRunner{}).Output(context.Background(), "sh", "-c", "printf 'err-1\\nerr-2\\n' >&2; exit 1")
-	if err == nil {
-		t.Fatal("Output returned nil error")
-	}
-	for _, line := range []string{"err-1", "err-2"} {
-		if !strings.Contains(err.Error(), line) {
-			t.Fatalf("error = %q, want %q", err, line)
-		}
+	if stderr.String() != "err" {
+		t.Fatalf("stderr = %q, want err", stderr.String())
 	}
 }
 
-func TestExecRunnerStreamPrefixesEveryOutputLine(t *testing.T) {
-	ctx := logger.WithAttempt(logger.WithJob(context.Background(), "job-a"), 2)
+func TestExecRunnerStreamDoesNotDecideWhatToPrint(t *testing.T) {
 	output := captureStderr(t, func() {
-		_, _, err := (ExecRunner{}).Stream(ctx, "sh", "-c", "printf 'out-1\\nout-2\\n'; printf 'err-1\\nerr-2\\n' >&2")
-		if err != nil {
+		var stdout, stderr bytes.Buffer
+		if err := (ExecRunner{}).Stream(context.Background(), "sh", &stdout, &stderr,
+			"-c", "printf 'out-1\\nout-2\\n'; printf 'err-1\\nerr-2\\n' >&2"); err != nil {
 			t.Fatalf("Stream returned error: %v", err)
 		}
 	})
-
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	if len(lines) != 4 {
-		t.Fatalf("output lines = %d, want 4; output = %q", len(lines), output)
+	if output != "" {
+		t.Fatalf("Stream printed %q; the caller decides what to display", output)
 	}
-	for _, line := range lines {
-		if !strings.HasPrefix(line, "job-a ") {
-			t.Fatalf("line lacks exact correlation prefix: %q", line)
+}
+
+func TestExecRunnerStreamDrainsWithoutLineLimits(t *testing.T) {
+	// One line far beyond any line-buffer limit, then more bytes with no
+	// trailing newline: the drain must not stop and must not drop a byte.
+	const longBytes = 2 << 20
+	var stdout countingWriter
+	if err := (ExecRunner{}).Stream(context.Background(), "sh", &stdout, io.Discard,
+		"-c", "head -c "+strconv.Itoa(longBytes)+" /dev/zero | tr '\\0' a; printf tail"); err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	if stdout.bytes != int64(longBytes+len("tail")) {
+		t.Fatalf("stdout bytes = %d, want %d", stdout.bytes, longBytes+len("tail"))
+	}
+}
+
+func TestExecRunnerStreamKeepsCarriageReturnsAndUnsplitUTF8(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := (ExecRunner{}).Stream(context.Background(), "sh", &stdout, io.Discard, "-c",
+		`printf 'progress 1\rprogress 2\r'; printf '\344'; printf '\270'; printf '\255'`); err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	want := "progress 1\rprogress 2\r中"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestExecRunnerStreamStopsOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- (ExecRunner{}).Stream(ctx, "sh", io.Discard, io.Discard, "-c", "sleep 30")
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Stream returned nil error after the context deadline")
 		}
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("ctx error = %v, want deadline exceeded", ctx.Err())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stream did not return after the context deadline")
+	}
+}
+
+func TestExecRunnerStreamKeepsTheRealExitStatus(t *testing.T) {
+	var stdout bytes.Buffer
+	err := (ExecRunner{}).Stream(context.Background(), "sh", &stdout, io.Discard, "-c", "printf out; exit 3")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("error = %v, want an *exec.ExitError", err)
+	}
+	if code := exitErr.ExitCode(); code != 3 {
+		t.Fatalf("exit code = %d, want 3", code)
+	}
+	if stdout.String() != "out" {
+		t.Fatalf("stdout = %q, want the bytes written before the exit", stdout.String())
+	}
+}
+
+func TestExecRunnerRunKeepsExitStatusWithoutReplayingOutput(t *testing.T) {
+	err := (ExecRunner{}).Run(context.Background(), "sh", "-c",
+		`printf '{{SECRET_pf2gjx3a}}'; printf 'subtitle body text' >&2; exit 4`)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("error = %v, want an *exec.ExitError", err)
+	}
+	if code := exitErr.ExitCode(); code != 4 {
+		t.Fatalf("exit code = %d, want 4", code)
+	}
+	for _, leaked := range []string{"super-secret-api-key", "subtitle body text", "-c"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("error %q replays %q", err, leaked)
+		}
+	}
+}
+
+func TestExecRunnerRunNamesTheCommandThatCouldNotStart(t *testing.T) {
+	err := (ExecRunner{}).Run(context.Background(), "fusionn-muse-no-such-tool")
+	if err == nil {
+		t.Fatal("Run returned nil error for a missing tool")
+	}
+	if !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("error = %v, want exec.ErrNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "fusionn-muse-no-such-tool") {
+		t.Fatalf("error = %q, want the safe command name", err)
+	}
+}
+
+func TestExecRunnerOutputKeepsStdoutAndHidesStderr(t *testing.T) {
+	out, err := (ExecRunner{}).Output(context.Background(), "sh", "-c",
+		`printf out; printf '{{SECRET_pf2gjx3a}}' >&2; exit 5`)
+	if string(out) != "out" {
+		t.Fatalf("output = %q, want out", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 5 {
+		t.Fatalf("error = %v, want exit status 5", err)
+	}
+	for _, leaked := range []string{"super-secret-api-key"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("error %q replays %q", err, leaked)
+		}
+	}
+}
+
+func TestExecRunnerOutputDoesNotTruncateTheMachineResult(t *testing.T) {
+	const resultBytes = 2 << 20
+	out, err := (ExecRunner{}).Output(context.Background(), "sh", "-c",
+		"head -c "+strconv.Itoa(resultBytes)+" /dev/zero | tr '\\0' a")
+	if err != nil {
+		t.Fatalf("Output returned error: %v", err)
+	}
+	if len(out) != resultBytes {
+		t.Fatalf("output bytes = %d, want %d", len(out), resultBytes)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
 	"github.com/fusionn-muse/internal/queue"
 	"github.com/fusionn-muse/internal/version"
@@ -67,18 +68,28 @@ func (h *Handler) TorrentComplete(c *gin.Context) {
 		writeSubmissionInputError(c, err)
 		return
 	}
-	log := logger.FromContext(c.Request.Context())
-	log.Infof("📥 Webhook received: %s", req.Path)
-	submission, err := h.queue.Submit(c.Request.Context(), req.Path, req.Name, req.Category)
+	ctx := c.Request.Context()
+	logger.Component("http").Info(ctx, "webhook_received", "Torrent completion received",
+		zap.String("path", req.Path))
+	submission, err := h.queue.Submit(ctx, req.Path, req.Name, req.Category)
 	if err != nil {
 		status := http.StatusServiceUnavailable
 		if errors.Is(err, queue.ErrInvalidSubmission) {
 			status = http.StatusBadRequest
+			logger.Component("http").Warn(ctx, "submission_rejected", "Submission was rejected",
+				zap.Error(err), zap.Int("status", status))
+		} else {
+			logger.Component("http").Error(ctx, "submission_rejected", "Submission admission failed",
+				zap.Error(err), zap.Int("status", status))
+			markErrorReported(c)
 		}
-		log.Errorf("Submission admission failed: %v", err)
 		c.JSON(status, gin.H{"error": "submission admission failed"})
 		return
 	}
+	// The request that carried the webhook and the Submission it created are one
+	// chain: keep the request id and attach the Submission id to it.
+	logger.Component("http").Info(logger.WithSubmissionID(ctx, submission.ID), "submission_received",
+		"Submission accepted", zap.String("path", req.Path))
 	c.Header("Location", "/api/v1/tasks/submission/"+submission.ID)
 	c.JSON(http.StatusAccepted, gin.H{"message": "webhook accepted", "submission_id": submission.ID, "status": submission.Status})
 }

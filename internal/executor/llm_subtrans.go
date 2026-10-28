@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/fusionn-muse/internal/config"
 	"github.com/fusionn-muse/internal/toolrun"
@@ -16,6 +19,74 @@ import (
 )
 
 const llmSubtransScript = "/app/scripts/llm_subtrans_translate.py"
+
+// scriptComponent is the stable module name of the translation script's events.
+var scriptComponent = logger.Component("llm-subtrans")
+
+// ScriptDiagnostics is the safe part of the translation script's failure report:
+// what kind of failure it was, any structural fact about it, and where it
+// happened. It carries no message, so the caller can attach it to the one error
+// a reader sees without bringing content back.
+type ScriptDiagnostics struct {
+	ErrorType string
+	Module    string
+	Errno     int
+	Strerror  string
+	Frames    string
+	Truncated bool
+
+	// cause is the process error the script's own report belongs to, so a reader
+	// sees the script's facts and the real exit status together.
+	cause error
+}
+
+// withCause attaches the process error that ended the script.
+func (d ScriptDiagnostics) withCause(err error) ScriptDiagnostics {
+	d.cause = err
+	return d
+}
+
+// Unwrap exposes the process error, so errors.Is and a real exit status keep
+// working next to the script's own facts.
+func (d ScriptDiagnostics) Unwrap() error { return d.cause }
+
+func (d ScriptDiagnostics) Error() string {
+	reason := d.ErrorType
+	if reason == "" {
+		reason = "script failure"
+	}
+	if d.Module != "" {
+		reason += " (module " + d.Module + ")"
+	}
+	if d.cause != nil {
+		return "llm-subtrans failed: " + reason + ": " + d.cause.Error()
+	}
+	return "llm-subtrans failed: " + reason
+}
+
+// Fields renders the diagnostics as fields for the failure report.
+func (d ScriptDiagnostics) Fields() []zap.Field {
+	fields := make([]zap.Field, 0, 6)
+	if d.ErrorType != "" {
+		fields = append(fields, zap.String("error_type", d.ErrorType))
+	}
+	if d.Module != "" {
+		fields = append(fields, zap.String("module", d.Module))
+	}
+	if d.Errno != 0 {
+		fields = append(fields, zap.Int("errno", d.Errno))
+	}
+	if d.Strerror != "" {
+		fields = append(fields, zap.String("strerror", d.Strerror))
+	}
+	if d.Frames != "" {
+		fields = append(fields, zap.String("stack", d.Frames))
+	}
+	if d.Truncated {
+		fields = append(fields, zap.Bool("truncated", true))
+	}
+	return fields
+}
 
 type LLMSubtrans struct {
 	cfg          config.LLMSubtransConfig
@@ -34,7 +105,7 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 		defer cancel()
 	}
 
-	log := logger.FromContext(ctx)
+	log := scriptComponent
 	dir := filepath.Dir(subtitlePath)
 	ext := filepath.Ext(subtitlePath)
 	nameWithoutExt := strings.TrimSuffix(filepath.Base(subtitlePath), ext)
@@ -78,24 +149,46 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 	}
 	if t.cfg.RateLimit > 0 {
 		args = append(args, "--ratelimit", strconv.FormatFloat(t.cfg.RateLimit, 'f', -1, 64))
-		log.Infof("⏱️ PySubtrans batch pacing: %g requests/minute", t.cfg.RateLimit)
+		log.Info(ctx, "translation_pacing", "Translation request pacing configured",
+			zap.Float64("requests_per_minute", t.cfg.RateLimit))
 	}
 
-	log.Infof("🌐 Translating with PySubtrans: %s → %s", filepath.Base(subtitlePath), t.translateCfg.TargetLang)
-	log.Debugf("  Command: %s", formatCommandLog("python3", args))
+	log.Info(ctx, "tool_started", "Translation tool started",
+		zap.String("tool", "llm-subtrans"), zap.String("file", filepath.Base(subtitlePath)),
+		zap.String("target_language", t.translateCfg.TargetLang))
+	// The command line carries the instruction, so it is only ever a bounded
+	// DEBUG excerpt.
+	log.Debug(ctx, "tool_invocation", "Translation tool invocation",
+		zap.String("tool", "llm-subtrans"), logger.Preview(formatCommandLog("python3", args)))
 
-	_, stderrStr, err := t.runner.Stream(ctx, "python3", args...)
-	if err != nil {
+	capture := &scriptCapture{}
+
+	// The script writes the unified format itself, so this process never reads
+	// its standard output, and it consumes the script's standard error instead of
+	// replaying it: the verdict, the safe failure facts and bounded counters are
+	// taken here, and a reader sees the summary events re-emitted below.
+	streamErr := t.runner.Stream(ctx, "python3", io.Discard, capture, args...)
+	capture.close()
+	capture.report(ctx, scriptComponent)
+
+	if streamErr != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("llm-subtrans timed out: %w", ctx.Err())
 		}
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("llm-subtrans canceled: %w", ctx.Err())
 		}
-		return "", fmt.Errorf("llm-subtrans failed: %w (see preceding process logs)", err)
+		if diagnostics := capture.safeDiagnostics(); diagnostics.ErrorType != "" {
+			return "", diagnostics.withCause(streamErr)
+		}
+		return "", fmt.Errorf("llm-subtrans failed: %w", streamErr)
 	}
-	if strings.Contains(stderrStr, "Error:") || strings.Contains(stderrStr, "Traceback") {
-		return "", errors.New("llm-subtrans reported errors; see preceding process logs")
+	if capture.verdict() {
+		diagnostics := capture.safeDiagnostics()
+		if diagnostics.ErrorType == "" {
+			return "", errors.New("llm-subtrans reported errors; see the logged summary")
+		}
+		return "", diagnostics
 	}
 
 	info, err := os.Stat(translatedPath)
@@ -106,7 +199,8 @@ func (t *LLMSubtrans) Translate(ctx context.Context, subtitlePath string) (strin
 		return "", errors.New("translated file is empty; see preceding process logs")
 	}
 
-	log.Infof("✅ PySubtrans translation complete: %s", filepath.Base(translatedPath))
+	log.Info(ctx, "tool_completed", "Translation completed",
+		zap.String("tool", "llm-subtrans"), zap.String("file", filepath.Base(translatedPath)))
 	return translatedPath, nil
 }
 

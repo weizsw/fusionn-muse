@@ -32,7 +32,7 @@ COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --no-compile -r requirements.txt && python -m pip check
 
-COPY scripts/llm_subtrans_translate.py scripts/detect_hard_sub.py ./scripts/
+COPY scripts/logfmt.py scripts/llm_subtrans_translate.py scripts/detect_hard_sub.py ./scripts/
 COPY --from=go-builder /fusionn-muse ./fusionn-muse
 
 CMD ["./fusionn-muse"]

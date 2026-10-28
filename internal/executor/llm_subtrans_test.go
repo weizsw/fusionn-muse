@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -377,5 +378,66 @@ func TestFormatCommandLog(t *testing.T) {
 
 	if got != want {
 		t.Fatalf("formatCommandLog() =\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// The old TestDetectScriptFailure cases moved into TestScriptCaptureVerdict,
+// which exercises the same predicate through the stream consumer.
+
+func TestLLMSubtransKeepsTheScriptsFailureFacts(t *testing.T) {
+	logger.Init(true)
+	processErr := errors.New("exit status 1")
+	runner := &fakeRunner{onStream: func(_ string, _ ...string) (string, string, error) {
+		return "", scriptLine("ERROR", "translation_failed",
+			"error="+strconv.Quote("ModuleNotFoundError")+" module="+strconv.Quote("PySubtrans")) + "\n", processErr
+	}}
+	translator := NewLLMSubtrans(config.LLMSubtransConfig{}, config.TranslateConfig{TargetLang: "Simplified Chinese"}, runner)
+	_, err := translator.Translate(context.Background(), filepath.Join(t.TempDir(), "movie.srt"))
+
+	var diagnostics ScriptDiagnostics
+	if !errors.As(err, &diagnostics) {
+		t.Fatalf("error = %v, want the script's safe diagnostics", err)
+	}
+	if diagnostics.ErrorType != "ModuleNotFoundError" || diagnostics.Module != "PySubtrans" {
+		t.Fatalf("diagnostics = %#v, want the script's failure facts", diagnostics)
+	}
+	if !errors.Is(err, processErr) {
+		t.Fatalf("error = %v, want the real exit status preserved", err)
+	}
+}
+
+func TestLLMSubtransReportsTheScriptsSummaryWithoutReplayingIt(t *testing.T) {
+	logger.Init(true)
+	root := t.TempDir()
+	childOutput := scriptLine("INFO", "subtitle_sanitized", "") + "\n" +
+		scriptLine("INFO", "log", "logger=PySubtrans") + "\n" +
+		"raw legacy subtitle body: 你好，世界\n"
+	runner := &fakeRunner{onStream: func(_ string, _ ...string) (string, string, error) {
+		if err := os.WriteFile(filepath.Join(root, "movie.zh.srt"), []byte("translated\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return "", childOutput, nil
+	}}
+	translator := NewLLMSubtrans(config.LLMSubtransConfig{}, config.TranslateConfig{TargetLang: "Simplified Chinese"}, runner)
+
+	lines := captureLogOutput(t, func() {
+		if _, err := translator.Translate(context.Background(), filepath.Join(root, "movie.srt")); err != nil {
+			t.Fatalf("Translate: %v", err)
+		}
+	})
+
+	sanitized := 0
+	for _, line := range lines {
+		if strings.Contains(line, "event=subtitle_sanitized") {
+			sanitized++
+		}
+		for _, replayed := range []string{"logger=PySubtrans", "你好，世界"} {
+			if strings.Contains(line, replayed) {
+				t.Fatalf("line %q replays the script's own output", line)
+			}
+		}
+	}
+	if sanitized != 1 {
+		t.Fatalf("subtitle_sanitized lines = %d, want exactly one re-emitted summary; lines = %q", sanitized, lines)
 	}
 }

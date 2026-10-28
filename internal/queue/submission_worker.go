@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/fusionn-muse/internal/mediaintake"
 	"github.com/fusionn-muse/pkg/logger"
 	"github.com/google/uuid"
@@ -121,7 +123,8 @@ func (q *Queue) submissionWorker() {
 		submission, err := q.store.claimSubmission(q.ctx)
 		q.mu.RUnlock()
 		if err != nil && q.ctx.Err() == nil {
-			logger.Errorf("claim preparation: %v", err)
+			logger.Component("submission").Error(q.ctx, "claim_failed",
+				"Submission preparation could not be claimed", zap.Error(err))
 		} else if submission != nil {
 			q.prepareSubmission(submission)
 			continue
@@ -136,9 +139,10 @@ func (q *Queue) submissionWorker() {
 }
 
 func (q *Queue) prepareSubmission(submission *Submission) {
-	ctx, cancel := context.WithTimeout(logger.WithSubmission(q.ctx, submission.ID), submissionPreparationTimeout)
-	log := logger.FromContext(ctx)
-	log.Infof("Preparing run %d: %s", submission.RunID, submission.SourcePath)
+	ctx, cancel := context.WithTimeout(logger.WithSubmissionID(q.ctx, submission.ID), submissionPreparationTimeout)
+	log := logger.Component("submission")
+	log.Info(ctx, "submission_preparing", "Preparing submission",
+		zap.Int64("run_id", submission.RunID), zap.String("path", submission.SourcePath))
 	media, cleanup, prepareErr := q.processor.(submissionPreparer).PrepareSubmission(ctx, submission)
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		prepareErr = fmt.Errorf("media preparation timed out after %s: %w", submissionPreparationTimeout, ctx.Err())
@@ -150,7 +154,7 @@ func (q *Queue) prepareSubmission(submission *Submission) {
 	defer func() {
 		if cleanup != nil && !retained {
 			if err := cleanup(); err != nil {
-				log.Errorf("release preparation artifacts: %v", err)
+				log.Error(ctx, "submission_cleanup_failed", "Prepared artifacts could not be released", zap.Error(err))
 			}
 		}
 	}()
@@ -171,27 +175,28 @@ func (q *Queue) prepareSubmission(submission *Submission) {
 		// A failed commit can have an uncertain outcome. Preserve media until
 		// its durable ownership can be established after storage recovers.
 		retained = true
-		log.Errorf("persist preparation result: %v", err)
+		log.Error(ctx, "submission_persist_failed", "Preparation result could not be persisted; retaining artifacts",
+			zap.Error(err))
 		return
 	}
 	if linked == nil {
 		if q.ctx.Err() == nil {
 			if errors.Is(prepareErr, mediaintake.ErrNoValidMedia) {
-				log.Infof("Ignored: %v", prepareErr)
+				log.Info(ctx, "submission_ignored", "No valid media found", zap.Error(prepareErr))
 			} else {
-				log.Errorf("Preparation failed: %v", prepareErr)
+				log.Error(ctx, "submission_failed", "Submission preparation failed", zap.Error(prepareErr))
 			}
 		}
 		return
 	}
 	if linked.ID != job.ID {
-		log.Infof("Resolved to existing Job %s", linked.ID)
+		log.Info(ctx, "job_linked", "Submission resolved to an existing job", zap.String("job_id", linked.ID))
 		return
 	}
 	// Job ownership transfers at the same commit as its Submission link.
 	// Keep prepared media even when its initial admission fails or is interrupted.
 	retained = true
-	log.Infof("Resolved to Job %s", linked.ID)
+	log.Info(ctx, "job_linked", "Submission resolved to a new job", zap.String("job_id", linked.ID))
 	if linked.AttemptStatus != AttemptProcessing {
 		return
 	}
@@ -203,7 +208,7 @@ func (q *Queue) prepareSubmission(submission *Submission) {
 			if _, _, err := q.store.finish(linked, admissionErr, 0); err == nil {
 				break
 			} else {
-				log.Errorf("persist initial admission failure: %v", err)
+				log.Error(ctx, "attempt_persist_failed", "Initial admission failure could not be persisted", zap.Error(err))
 			}
 			var status AttemptStatus
 			if err := q.store.db.QueryRow(`SELECT status FROM attempts WHERE id=?`, linked.AttemptID).Scan(&status); err == nil && status != AttemptProcessing {
@@ -214,7 +219,8 @@ func (q *Queue) prepareSubmission(submission *Submission) {
 			}
 		}
 		if q.ctx.Err() == nil {
-			log.Errorf("Job %s initial admission failed: %v", linked.ID, admissionErr)
+			log.Error(ctx, "job_failed", "Initial admission failed",
+				zap.String("job_id", linked.ID), zap.Error(admissionErr))
 		}
 		return
 	}
@@ -250,7 +256,8 @@ func (q *Queue) persistPreparationResult(submission *Submission, job *Job, prepa
 		if err == nil || errors.Is(err, ErrSubmissionNotFound) || errors.Is(err, ErrInvalidSubmissionAction) {
 			return linked, err
 		}
-		logger.FromContext(logger.WithSubmission(q.ctx, submission.ID)).Errorf("persist preparation outcome; retaining result: %v", err)
+		logger.Component("submission").Error(logger.WithSubmissionID(q.ctx, submission.ID), "submission_persist_failed",
+			"Preparation outcome could not be persisted; retaining result", zap.Error(err))
 		if !q.waitPreparationWrite() {
 			return nil, err
 		}

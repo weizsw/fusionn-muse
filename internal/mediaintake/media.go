@@ -1,11 +1,14 @@
 package mediaintake
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"go.uber.org/zap"
 
 	"github.com/fusionn-muse/pkg/logger"
 )
@@ -84,26 +87,33 @@ func FindValidVideoFile(dir string) (string, error) {
 
 	var bestPath string
 	var bestSize int64
+	// This helper has no request context; its candidates are diagnostic detail.
+	log := logger.Component("mediaintake")
+	ctx := context.Background()
 
 	for _, path := range videos {
 		filename := filepath.Base(path)
 
 		// Check code pattern
 		if !HasVideoCode(filename) {
-			logger.Debugf("⏭️  Skipped (no code pattern): %s", filename)
+			log.Debug(ctx, "candidate_skipped", "Candidate skipped",
+				zap.String("file", filename), zap.String("reason", "no code pattern"))
 			continue
 		}
 
 		// Check file size
 		info, err := os.Stat(path)
 		if err != nil {
-			logger.Debugf("⏭️  Skipped (stat error): %s: %v", filename, err)
+			log.Debug(ctx, "candidate_skipped", "Candidate skipped",
+				zap.String("file", filename), zap.String("reason", "stat error"), zap.Error(err))
 			continue
 		}
 
 		size := info.Size()
 		if size <= MinVideoSize {
-			logger.Debugf("⏭️  Skipped (too small: %dMB): %s", size/(1024*1024), filename)
+			log.Debug(ctx, "candidate_skipped", "Candidate skipped",
+				zap.String("file", filename), zap.String("reason", "too small"),
+				zap.Int64("size_mb", size/(1024*1024)))
 			continue
 		}
 
@@ -119,7 +129,8 @@ func FindValidVideoFile(dir string) (string, error) {
 	}
 
 	if len(videos) > 1 {
-		logger.Debugf("✅ Selected largest valid video: %s (%dMB)", filepath.Base(bestPath), bestSize/(1024*1024))
+		log.Debug(ctx, "video_selected", "Largest valid video selected",
+			zap.String("file", filepath.Base(bestPath)), zap.Int64("size_mb", bestSize/(1024*1024)))
 	}
 
 	return bestPath, nil

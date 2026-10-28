@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
+
+	"github.com/fusionn-muse/internal/executor"
 	"github.com/fusionn-muse/internal/fileops"
 	"github.com/fusionn-muse/pkg/logger"
 )
@@ -133,14 +136,16 @@ func (q *Queue) Start() {
 		go q.stagedWorker(laneOrchestration)
 		go q.stagedWorker(laneTranscription)
 		go q.stagedWorker(laneTranslation)
-		logger.Info("📥 Job queue started (durable orchestration/transcription/translation processing)")
+		logger.Component("queue").Info(q.ctx, "queue_started", "Job queue started",
+			zap.String("lanes", "orchestration,transcription,translation"))
 		return
 	}
 	q.wg.Add(2)
 	q.mu.Unlock()
 	go q.worker(false)
 	go q.worker(true)
-	logger.Info("📥 Job queue started (durable heavy/light processing)")
+	logger.Component("queue").Info(q.ctx, "queue_started", "Job queue started",
+		zap.String("lanes", "heavy,light"))
 }
 
 // Stop gracefully stops the queue.
@@ -161,14 +166,14 @@ func (q *Queue) Stop() {
 	q.cancel()
 	q.mu.Unlock()
 
-	logger.Info("🛑 Stopping job queue...")
+	logger.Component("queue").Info(q.ctx, "queue_stopping", "Job queue stopping")
 	q.wg.Wait()
 
 	q.mu.Lock()
 	q.state = queueStopped
 	close(q.stoppedCh)
 	q.mu.Unlock()
-	logger.Info("✅ Job queue stopped")
+	logger.Component("queue").Info(q.ctx, "queue_stopped", "Job queue stopped")
 }
 
 // Close stops the queue and closes its durable store.
@@ -303,7 +308,10 @@ func (q *Queue) GetJobDetail(id string) *JobDetail {
 func (q *Queue) GetAllJobs() []*Job {
 	jobs, err := q.store.list("")
 	if err != nil {
-		logger.Errorf("list jobs: %v", err)
+		// This read has no request context and swallows its error, so it is the
+		// boundary that records it.
+		logger.Component("queue").Error(context.Background(), "jobs_unavailable",
+			"Job list could not be read", zap.Error(err))
 		return nil
 	}
 	for _, job := range jobs {
@@ -359,7 +367,8 @@ func (q *Queue) ListJobs(cursor string, limit int) ([]*Job, string, error) {
 func (q *Queue) GetPendingJobs() []*Job {
 	jobs, err := q.store.list("WHERE status='pending'")
 	if err != nil {
-		logger.Errorf("list pending jobs: %v", err)
+		logger.Component("queue").Error(context.Background(), "pending_jobs_unavailable",
+			"Pending job list could not be read", zap.Error(err))
 		return nil
 	}
 	return jobs
@@ -480,7 +489,7 @@ func (q *Queue) worker(light bool) {
 		job, err := q.store.claimNext(light, time.Now().Add(-q.retryDelay))
 		q.mu.RUnlock()
 		if err != nil {
-			logger.Errorf("claim queued attempt: %v", err)
+			logger.Component("queue").Error(q.ctx, "claim_failed", "Queued job could not be claimed", zap.Error(err))
 		} else if job != nil {
 			if light {
 				q.launchLight(job)
@@ -521,7 +530,7 @@ func (q *Queue) stagedWorker(lane workerLane) {
 		job, err := q.store.claimNextStage(lane, time.Now().Add(-q.retryDelay))
 		q.mu.RUnlock()
 		if err != nil {
-			logger.Errorf("claim queued stage: %v", err)
+			logger.Component("queue").Error(q.ctx, "claim_failed", "Queued stage could not be claimed", zap.Error(err))
 		} else if job != nil {
 			if lane == laneOrchestration {
 				q.launchStaged(job)
@@ -558,9 +567,13 @@ func (q *Queue) processStagedAttempt(job *Job) {
 	job.artifacts = func(ctx context.Context, job *Job, paths []string) error {
 		return q.persist(ctx, job.ID, "claim artifacts", func() error { return q.store.claimArtifacts(ctx, job, paths) })
 	}
-	ctx := logger.WithAttempt(logger.WithJob(q.ctx, job.ID), job.Retries+1)
-	log := logger.FromContext(ctx)
-	log.Infof("🔄 Processing %s stage: %s", job.AttemptStage, job.FileName)
+	// The persisted attempt ID is the execution identity; the retry ordinal stays
+	// attached because the host-asr request carries it as its existing attempt
+	// field.
+	ctx := logger.WithAttempt(logger.WithAttemptID(logger.WithJobID(q.ctx, job.ID), job.AttemptID), job.Retries+1)
+	log := logger.Component("queue")
+	log.Info(ctx, "attempt_started", "Stage attempt started",
+		zap.String("stage", string(job.AttemptStage)), zap.String("file", job.FileName), zap.Int("retry", job.Retries+1))
 
 	lifecycle := *job
 	nextStage, processErr := processor.ProcessStage(ctx, job)
@@ -582,23 +595,43 @@ func (q *Queue) processStagedAttempt(job *Job) {
 
 	failureStage, retry, persistErr := q.finishAttempt(ctx, job, processErr)
 	if persistErr != nil {
-		log.Errorf("persist attempt result: %v", persistErr)
+		log.Error(ctx, "attempt_persist_failed", "Attempt result could not be persisted", zap.Error(persistErr))
 		return
 	}
 	if processErr == nil {
-		log.Info("✅ Job completed")
+		log.Info(ctx, "job_completed", "Job completed")
 		return
 	}
 	if errors.Is(processErr, context.Canceled) {
 		return
 	}
 	if retry != nil {
-		log.Warnf("⚠️ Translation failed; retry queued after %s: %v", q.retryDelay, processErr)
+		log.Warn(ctx, "translation_retry", "Job will retry",
+			zap.Error(processErr), zap.Int("retry", job.Retries+1),
+			zap.Int("retry_after_ms", int(q.retryDelay.Milliseconds())))
 		q.wake(retry)
 		return
 	}
-	log.Errorf("❌ Job failed at %s after %d attempt(s): %v", failureStage, job.Retries+1, processErr)
+	logger.Component("queue").Error(ctx, "job_failed", "Job failed",
+		failureFields(failureStage, job.Retries+1, processErr)...)
 	q.notifyFailure(ctx, job, failureStage, processErr)
+}
+
+// failureFields describes a failed attempt for the one report a reader sees: the
+// stage, the retry ordinal and the cause, plus the translation script's safe
+// diagnostics when the failure came from it. The script's own copy of the failure
+// is consumed before display, so this is where those details reach the reader.
+func failureFields(stage Stage, retry int, cause error) []zap.Field {
+	fields := []zap.Field{
+		zap.String("stage", string(stage)),
+		zap.Int("retry", retry),
+		zap.Error(cause),
+	}
+	var diagnostics executor.ScriptDiagnostics
+	if errors.As(cause, &diagnostics) {
+		fields = append(fields, diagnostics.Fields()...)
+	}
+	return fields
 }
 
 func restoreLifecycle(job *Job, lifecycle Job) {
@@ -624,9 +657,11 @@ func (q *Queue) processAttempt(job *Job) {
 		job.artifacts = func(ctx context.Context, job *Job, paths []string) error {
 			return q.persist(ctx, job.ID, "claim artifacts", func() error { return q.store.claimArtifacts(ctx, job, paths) })
 		}
-		ctx := logger.WithAttempt(logger.WithJob(q.ctx, job.ID), job.Retries+1)
-		log := logger.FromContext(ctx)
-		log.Infof("🔄 Processing job: %s", job.FileName)
+		ctx := logger.WithAttempt(
+			logger.WithAttemptID(logger.WithJobID(q.ctx, job.ID), job.AttemptID), job.Retries+1)
+		log := logger.Component("queue")
+		log.Info(ctx, "attempt_started", "Job attempt started",
+			zap.String("stage", string(job.AttemptStage)), zap.String("file", job.FileName), zap.Int("retry", job.Retries+1))
 
 		lifecycle := *job
 		processErr := q.processor.Process(ctx, job)
@@ -637,22 +672,25 @@ func (q *Queue) processAttempt(job *Job) {
 
 		failureStage, next, persistErr := q.finishAttempt(ctx, job, processErr)
 		if persistErr != nil {
-			log.Errorf("persist attempt result: %v", persistErr)
+			log.Error(ctx, "attempt_persist_failed", "Attempt result could not be persisted", zap.Error(persistErr))
 			return
 		}
 		if processErr == nil {
-			log.Info("✅ Job completed")
+			log.Info(ctx, "job_completed", "Job completed")
 			return
 		}
 		if errors.Is(processErr, context.Canceled) {
 			return
 		}
 		if next == nil {
-			log.Errorf("❌ Job failed at %s after %d attempt(s): %v", failureStage, job.Retries+1, processErr)
+			logger.Component("queue").Error(ctx, "job_failed", "Job failed",
+				failureFields(failureStage, job.Retries+1, processErr)...)
 			q.notifyFailure(ctx, job, failureStage, processErr)
 			return
 		}
-		log.Warnf("⚠️ Translation failed; retrying in %s: %v", q.retryDelay, processErr)
+		log.Warn(ctx, "translation_retry", "Job will retry",
+			zap.Error(processErr), zap.Int("retry", job.Retries+1),
+			zap.Int("retry_after_ms", int(q.retryDelay.Milliseconds())))
 		timer := time.NewTimer(q.retryDelay)
 		select {
 		case <-timer.C:
@@ -664,7 +702,7 @@ func (q *Queue) processAttempt(job *Job) {
 			claimed, claimErr := q.store.claimAttempt(next.AttemptID)
 			q.mu.RUnlock()
 			if claimErr != nil {
-				log.Errorf("claim translation retry: %v", claimErr)
+				log.Error(ctx, "retry_claim_failed", "Retry attempt could not be claimed", zap.Error(claimErr))
 				return
 			}
 			if claimed == nil {

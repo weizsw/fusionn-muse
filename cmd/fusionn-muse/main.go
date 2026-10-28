@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
 	"github.com/fusionn-muse/internal/client/apprise"
 	"github.com/fusionn-muse/internal/config"
@@ -28,7 +30,12 @@ func main() {
 	logger.Init(isDev)
 	defer logger.Sync()
 
-	version.PrintBanner(nil)
+	// The banner is the one startup exception to the single-line event rule: one
+	// print per start, stating the version and the level that actually applies.
+	version.PrintBanner(nil, logger.Log.Level().CapitalString())
+
+	appLog := logger.Component("app")
+	ctx := context.Background()
 
 	// Load configuration
 	configPath := os.Getenv("CONFIG_PATH")
@@ -36,10 +43,10 @@ func main() {
 		configPath = "config/config.yaml"
 	}
 
-	logger.Infof("📁 Loading config: %s", configPath)
+	appLog.Debug(ctx, "config_loading", "Loading configuration", zap.String("path", configPath))
 	cfgMgr, err := config.NewManager(configPath)
 	if err != nil {
-		logger.Fatalf("❌ Config error: %v", err)
+		fatal("config_unavailable", "Configuration could not be loaded", err)
 	}
 	defer cfgMgr.Stop()
 	cfg := cfgMgr.Get()
@@ -49,17 +56,20 @@ func main() {
 
 	// Ensure required directories exist
 	if err := ensureDirectories(folders); err != nil {
-		logger.Fatalf("❌ Directory setup error: %v", err)
+		fatal("folders_unavailable", "Data folders could not be prepared", err)
 	}
+	appLog.Info(ctx, "folders_ready", "Data folders are ready",
+		zap.String("input", folders.Input),
+		zap.String("scraping", folders.Scraping),
+		zap.String("subtitles", folders.Subtitles))
 
 	// Initialize Apprise client
 	var appriseClient *apprise.Client
 	if cfg.Apprise.Enabled {
 		appriseClient = apprise.NewClient(cfg.Apprise)
-		logger.Infof("🔔 Notifications: enabled (key=%s)", cfg.Apprise.Key)
-	} else {
-		logger.Info("🔔 Notifications: disabled")
 	}
+	appLog.Info(ctx, "notifications_configured", "Notification delivery configured",
+		zap.Bool("enabled", cfg.Apprise.Enabled))
 
 	// Initialize processor service
 	proc := processor.New(cfgMgr, appriseClient, folders, toolrun.ExecRunner{})
@@ -67,7 +77,7 @@ func main() {
 	// Initialize durable job queue
 	jobQueue, err := queue.Open(cfg.Queue.DBPath, proc, cfg.Queue.MaxRetries, cfg.Queue.RetryDelayMs)
 	if err != nil {
-		logger.Fatalf("❌ Queue setup error: %v", err)
+		fatal("queue_unavailable", "Durable job queue could not be opened", err)
 	}
 	jobQueue.Start()
 	defer func() { _ = jobQueue.Close() }()
@@ -76,10 +86,20 @@ func main() {
 	if !isDev {
 		gin.SetMode(gin.ReleaseMode)
 	}
+	// Gin writes its route table and other diagnostics straight to stdout,
+	// which bypasses the shared format; they become DEBUG events instead.
+	gin.DefaultWriter = io.Discard
+	gin.DebugPrintRouteFunc = func(method, route, _ string, _ int) {
+		logger.Component("http").Debug(ctx, "route_registered", "Route registered",
+			zap.String("method", method), zap.String("route", route))
+	}
 
 	router := gin.New()
-	router.Use(gin.Recovery())
-	router.Use(requestLogger())
+	router.Use(handler.RequestContext())
+	// The summary wraps Recovery, so every request leaves its one summary line
+	// even when a handler panics.
+	router.Use(handler.RequestSummary())
+	router.Use(handler.Recovery())
 
 	// Register routes
 	h := handler.New(jobQueue, cfgMgr.Reload)
@@ -95,52 +115,46 @@ func main() {
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalf("❌ Server error: %v", err)
+			appLog.Error(ctx, "server_failed", "HTTP server stopped unexpectedly", zap.Error(err))
+			os.Exit(1)
 		}
 	}()
 
-	// Print startup info
-	logger.Info("")
-	logger.Infof("📂 Data folders (mount these in Docker):")
-	logger.Infof("   %s → Torrent downloads (read)", folders.Input)
-	logger.Infof("   %s → Processed videos (write)", folders.Scraping)
-	logger.Infof("   %s → Translated subtitles (write)", folders.Subtitles)
-	logger.Infof("   %s → Durable task state", cfg.Queue.DBPath)
-	logger.Info("")
 	provider := cfg.Pipeline.Provider
 	if provider == "" {
 		provider = "videocaptioner (unsupported; configure mlx_qwen3_asr)"
 	}
-	logger.Infof("🎤 Pipeline: %s", provider)
-	logger.Infof("🌐 Translate: %s → %s", cfg.Translate.Provider, cfg.Translate.TargetLang)
-	logger.Info("")
-	logger.Infof("🌐 API server: http://localhost:%d", cfg.Server.Port)
-	logger.Infof("   POST /api/v1/webhook/torrent  - qBittorrent callback")
-	logger.Infof("   GET  /api/v1/tasks            - Paginated task list")
-	logger.Infof("   GET  /api/v1/tasks/stats      - Latest execution statistics")
-	logger.Infof("   GET  /api/v1/tasks/:kind/:id  - Task detail and history")
-	logger.Infof("   POST /api/v1/tasks/:kind/:id/actions - Explicit recovery")
-	logger.Info("")
-	logger.Info("────────────────────────────────────────────────────────────────")
-	logger.Info("✅  Ready! Waiting for torrent completion webhooks...")
-	logger.Info("────────────────────────────────────────────────────────────────")
+	appLog.Info(ctx, "service_started", "Service started",
+		zap.String("version", version.Version),
+		zap.Int("port", cfg.Server.Port),
+		zap.String("transcription_provider", provider),
+		zap.String("translate_provider", cfg.Translate.Provider),
+		zap.String("target_language", cfg.Translate.TargetLang),
+		zap.Bool("notifications", cfg.Apprise.Enabled))
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	logger.Info("")
-	logger.Info("🛑 Shutting down...")
+	appLog.Info(ctx, "shutdown_started", "Shutting down")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
-		logger.Errorf("❌ Shutdown error: %v", err)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		appLog.Error(shutdownCtx, "shutdown_failed", "HTTP server shutdown failed", zap.Error(err))
 	}
 
-	logger.Info("👋 Goodbye!")
+	appLog.Info(ctx, "shutdown_complete", "Service stopped")
+}
+
+// fatal records a startup failure and stops the process with a non-zero exit
+// status. It is a function of its own because os.Exit skips deferred cleanup.
+func fatal(event, msg string, err error) {
+	logger.Component("app").Error(context.Background(), event, msg, zap.Error(err))
+	logger.Sync()
+	os.Exit(1)
 }
 
 func ensureDirectories(folders config.FoldersConfig) error {
@@ -162,20 +176,4 @@ func ensureDirectories(folders config.FoldersConfig) error {
 	}
 
 	return nil
-}
-
-// requestLogger returns a gin middleware for logging HTTP requests
-func requestLogger() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		path := c.Request.URL.Path
-
-		c.Next()
-
-		status := c.Writer.Status()
-		if path != "/api/v1/health" || status >= 400 {
-			latency := time.Since(start)
-			logger.Debugf("HTTP %s %s → %d (%v)", c.Request.Method, path, status, latency)
-		}
-	}
 }
