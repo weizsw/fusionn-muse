@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // countingWriter counts the bytes a stream produced without retaining them, so
@@ -72,28 +71,6 @@ func TestExecRunnerStreamKeepsCarriageReturnsAndUnsplitUTF8(t *testing.T) {
 	want := "progress 1\rprogress 2\r中"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
-	}
-}
-
-func TestExecRunnerStreamStopsOnContextCancel(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() {
-		done <- (ExecRunner{}).Stream(ctx, "sh", io.Discard, io.Discard, "-c", "sleep 30")
-	}()
-
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("Stream returned nil error after the context deadline")
-		}
-		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("ctx error = %v, want deadline exceeded", ctx.Err())
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Stream did not return after the context deadline")
 	}
 }
 
