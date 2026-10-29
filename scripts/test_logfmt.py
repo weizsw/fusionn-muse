@@ -21,7 +21,7 @@ FIXED_MOMENT = datetime.datetime(
 )
 
 # The same value matrix is rendered byte for byte by the Go services (which use
-# strconv.Quote) and by scripts/torrent-complete.sh. Verify the Go claim with:
+# strconv.Quote) and by scripts/torrent_complete.py. Verify the Go claim with:
 #   fmt.Printf("%s\n", strconv.Quote(value))
 SHARED_VALUE_MATRIX = [
     ("abc", "abc"),

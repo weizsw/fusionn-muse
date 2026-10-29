@@ -168,13 +168,12 @@ apprise:
 # ════════════════════════════════════════════════════════════════════════════
 #
 # Options → Downloads → Run external program on completion:
-#   /path/to/torrent-complete.sh "%F" "%N" "%L"
+#   python3 /path/to/torrent_complete.py "%N" "%L" "%I" "%F"
 #
-# torrent-complete.sh:
-#   #!/bin/bash
-#   curl -X POST http://fusionn-muse:8080/api/v1/webhook/torrent \
-#     -H "Content-Type: application/json" \
-#     -d "{\"path\": \"$1\", \"name\": \"$2\", \"category\": \"$3\"}"
+# scripts/torrent_complete.py sends each whisparr torrent once:
+#   POST <MUSE_URL>/api/v1/webhook/torrent
+#   {"path": "<container path>", "name": "<name>", "category": "<category>"}
+# Set MUSE_URL and the path mapping at the top of the script.
 #
 # ════════════════════════════════════════════════════════════════════════════
 # API ENDPOINTS
