@@ -576,7 +576,11 @@ func (q *Queue) processStagedAttempt(job *Job) {
 		zap.String("stage", string(job.AttemptStage)), zap.String("file", job.FileName), zap.Int("retry", job.Retries+1))
 
 	lifecycle := *job
-	nextStage, processErr := processor.ProcessStage(ctx, job)
+	var nextStage Stage
+	processErr := catchPanic(func() (err error) {
+		nextStage, err = processor.ProcessStage(ctx, job)
+		return err
+	})
 	if processErr == nil && nextStage == "" {
 		processErr = errors.New("stage processor returned no next stage")
 	}
@@ -608,7 +612,7 @@ func (q *Queue) processStagedAttempt(job *Job) {
 	if retry != nil {
 		log.Warn(ctx, "translation_retry", "Job will retry",
 			zap.Error(processErr), zap.Int("retry", job.Retries+1),
-			zap.Int("retry_after_ms", int(q.retryDelay.Milliseconds())))
+			zap.Int("retry_after_ms", int(q.retryDelay.Milliseconds())), logger.PanicStack(processErr))
 		q.wake(retry)
 		return
 	}
@@ -626,12 +630,25 @@ func failureFields(stage Stage, retry int, cause error) []zap.Field {
 		zap.String("stage", string(stage)),
 		zap.Int("retry", retry),
 		zap.Error(cause),
+		logger.PanicStack(cause),
 	}
 	var diagnostics executor.ScriptDiagnostics
 	if errors.As(cause, &diagnostics) {
 		fields = append(fields, diagnostics.Fields()...)
 	}
 	return fields
+}
+
+// catchPanic runs fn and returns a panic as a *logger.PanicError, so a
+// processing bug fails its attempt through the normal retry and failure path
+// instead of ending the process.
+func catchPanic(fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = logger.Recovered(r)
+		}
+	}()
+	return fn()
 }
 
 func restoreLifecycle(job *Job, lifecycle Job) {
@@ -664,7 +681,7 @@ func (q *Queue) processAttempt(job *Job) {
 			zap.String("stage", string(job.AttemptStage)), zap.String("file", job.FileName), zap.Int("retry", job.Retries+1))
 
 		lifecycle := *job
-		processErr := q.processor.Process(ctx, job)
+		processErr := catchPanic(func() error { return q.processor.Process(ctx, job) })
 		if processErr != nil && q.ctx.Err() != nil {
 			processErr = q.ctx.Err()
 		}
@@ -690,7 +707,7 @@ func (q *Queue) processAttempt(job *Job) {
 		}
 		log.Warn(ctx, "translation_retry", "Job will retry",
 			zap.Error(processErr), zap.Int("retry", job.Retries+1),
-			zap.Int("retry_after_ms", int(q.retryDelay.Milliseconds())))
+			zap.Int("retry_after_ms", int(q.retryDelay.Milliseconds())), logger.PanicStack(processErr))
 		timer := time.NewTimer(q.retryDelay)
 		select {
 		case <-timer.C:

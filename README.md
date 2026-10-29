@@ -157,6 +157,8 @@ Fields appear in this order: `component event`, then `job_id submission_id attem
 
 - The container writes to stdout and stderr. Docker keeps them with `max-size: 20m` and `max-file: 6`, about 120 MiB per container, evicting the oldest data first. Read them with `docker compose logs -f` or the OrbStack container page. These options take effect when the container is recreated.
 - Host-only programs are not part of the container log. `host_asr_server.py` and `host_server.py` write to stderr, and `scripts/torrent-complete.sh` appends the same lines to `$LOG_FILE` (`/tmp/torrent-complete.log` by default). Redirect them to a file or your own collector when you need retention; this project does not rotate those files.
+- Each run of `scripts/torrent-complete.sh` sends an `X-Request-ID` header and writes the same `request_id` on all of its lines. When Muse accepts the request, the script also writes the returned `submission_id`. Search the container log for either value to find the Muse lines for that run.
+- A panic while a Submission or Job is processed does not stop the service. That Submission or attempt fails through the normal failure path, and its `submission_failed`, `translation_retry` or `job_failed` line includes the stack.
 
 ## qBittorrent Setup
 

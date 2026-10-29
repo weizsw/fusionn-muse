@@ -195,8 +195,9 @@ level_rank() {
 # log_line <LEVEL> <event> <msg> [key=value ...]
 # Fields are sorted by name, matching the Go and Python renderers. Values are
 # escaped before sorting so an embedded newline cannot split or reorder a line.
-# shortcut: correlation fields (job_id ... stream) are not emitted here; add the
-# fixed-order prefix if this script ever learns a Job or Submission id.
+# The correlation IDs this run knows (LOG_SUBMISSION_ID, LOG_REQUEST_ID) render
+# right after the event in the shared fixed order; callers cannot pass
+# correlation IDs as fields.
 log_line() {
     local level="$1" event="$2" msg="$3"
     shift 3
@@ -209,6 +210,7 @@ log_line() {
         [[ "$key" =~ ^[a-z][a-z0-9_]*$ ]] || continue
         case "$key" in
             service|component|event|msg|level|time|timestamp) continue ;;
+            job_id|submission_id|attempt_id|request_id|parent_job_id) continue ;;
         esac
         rendered+=("$key=$(log_value "${pair#*=}")")
     done
@@ -217,6 +219,12 @@ log_line() {
     fi
     local line
     line="$(log_timestamp) $level component=$LOG_COMPONENT event=$event"
+    if [[ -n "${LOG_SUBMISSION_ID:-}" ]]; then
+        line+=" submission_id=$(log_value "$LOG_SUBMISSION_ID")"
+    fi
+    if [[ -n "${LOG_REQUEST_ID:-}" ]]; then
+        line+=" request_id=$(log_value "$LOG_REQUEST_ID")"
+    fi
     if ((${#rendered[@]} > 0)); then
         while IFS= read -r pair; do
             line+=" $pair"
@@ -224,6 +232,13 @@ log_line() {
     fi
     line+=" msg=\"$(log_escape "$msg")\""
     printf '%s\n' "$line" | tee -a "$LOG_FILE" >&2
+}
+
+# new_request_id prints an ID for the X-Request-ID header: the epoch second, the
+# process ID and 30 random bits. It fits the shared request ID rule
+# ([A-Za-z0-9._-], 1-64 characters) and needs no tool beyond bash and date.
+new_request_id() {
+    printf 'tc-%s-%s-%04x%04x' "$(date +%s)" "$$" "$RANDOM" "$RANDOM"
 }
 
 # Translate host path to container path if mapping is configured
@@ -235,6 +250,9 @@ fi
 # Main
 detect_time_precision
 resolve_log_level
+# One request ID marks every line of this run and goes to fusionn-muse in the
+# X-Request-ID header; Muse reuses it, so both logs share the value.
+LOG_REQUEST_ID="$(new_request_id)"
 if [[ -n "$INVALID_LEVEL" ]]; then
     log_line WARN config_invalid "Invalid LOG_LEVEL, using INFO" "log_level=$INVALID_LEVEL"
 fi
@@ -275,12 +293,19 @@ PAYLOAD="{\"path\":$(json_string "$CONTENT_PATH"),\"name\":$(json_string "$TORRE
 RESPONSE=$(curl -sS --connect-timeout 5 --max-time 15 \
     -X POST "${MUSE_URL%/}/api/v1/webhook/torrent" \
     -H "Content-Type: application/json" \
+    -H "X-Request-ID: $LOG_REQUEST_ID" \
     --data "$PAYLOAD" --write-out $'\n%{http_code}' 2>&1)
 CURL_STATUS=$?
 HTTP_STATUS="${RESPONSE##*$'\n'}"
 RESPONSE="${RESPONSE%$'\n'*}"
 
 if [[ "$CURL_STATUS" -eq 0 && "$HTTP_STATUS" == "202" ]]; then
+    # The Submission ID links this run to Muse's Submission and Job. Only an
+    # ID-shaped value is taken; anything else in the body is never logged.
+    SUBMISSION_ID_RE='"submission_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9._-]{1,64})"'
+    if [[ "$RESPONSE" =~ $SUBMISSION_ID_RE ]]; then
+        LOG_SUBMISSION_ID="${BASH_REMATCH[1]}"
+    fi
     log_line INFO webhook_sent "Webhook accepted" "http_status=$HTTP_STATUS" "response_bytes=${#RESPONSE}"
     # A logging failure must not turn an accepted webhook into a reported failure.
     exit 0

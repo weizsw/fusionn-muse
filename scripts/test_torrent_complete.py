@@ -13,6 +13,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCRIPT = Path(__file__).with_name("torrent-complete.sh")
 
+# The shared request ID rule: ASCII letters, digits, dot, underscore, hyphen; 1-64.
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+# Correlation fields render right after the event, in this fixed order.
+CORRELATION_KEYS = ["job_id", "submission_id", "attempt_id", "request_id", "parent_job_id"]
+
 # component and event are fixed in that order; msg is last; the line is one physical line.
 LINE_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00 "
@@ -56,14 +62,16 @@ class TorrentCompleteTests(unittest.TestCase):
         for line in lines:
             self.assertRegex(line, LINE_RE)
 
-    def serve(self, status, requests):
+    def serve(self, status, requests, request_ids=None, reply=b'{"message":"result"}'):
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body = self.rfile.read(int(self.headers["Content-Length"]))
                 requests.append((self.path, json.loads(body)))
+                if request_ids is not None:
+                    request_ids.append(self.headers.get("X-Request-ID"))
                 self.send_response(status)
                 self.end_headers()
-                self.wfile.write(b'{"message":"result"}')
+                self.wfile.write(reply)
 
             def log_message(self, *_):
                 pass
@@ -126,14 +134,45 @@ class TorrentCompleteTests(unittest.TestCase):
 
     def test_fields_are_sorted_and_msg_is_last(self):
         requests = []
-        url = self.serve(202, requests)
+        url = self.serve(202, requests, reply=b'{"status":"pending","submission_id":"sub-1"}')
         with tempfile.TemporaryDirectory() as directory:
             _, log = self.invoke(url, directory, ["/movie.mp4", "movie", "video"])
-        line = log.strip().split("\n")[0]
-        keys = re.findall(r"(?:^| )([a-z_]+)=", line)
-        self.assertEqual(keys[:2], ["component", "event"])
-        self.assertEqual(keys[-1], "msg")
-        self.assertEqual(keys[2:-1], sorted(keys[2:-1]))
+        for line in log.strip().split("\n"):
+            keys = re.findall(r"(?:^| )([a-z_]+)=", line)
+            self.assertEqual(keys[:2], ["component", "event"])
+            self.assertEqual(keys[-1], "msg")
+            rest = keys[2:-1]
+            correlation = [key for key in rest if key in CORRELATION_KEYS]
+            self.assertIn("request_id", correlation)
+            self.assertEqual(rest[: len(correlation)], correlation, "correlation fields come first")
+            self.assertEqual(correlation, [key for key in CORRELATION_KEYS if key in correlation], "in the fixed order")
+            self.assertEqual(rest[len(correlation):], sorted(rest[len(correlation):]))
+
+    def test_request_id_links_the_hook_to_the_submission(self):
+        requests, request_ids = [], []
+        url = self.serve(202, requests, request_ids, reply=b'{"message":"webhook accepted","status":"pending","submission_id":"sub-123"}')
+        with tempfile.TemporaryDirectory() as directory:
+            result, log = self.invoke(url, directory, ["/movie.mp4", "movie", "video"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(request_ids), 1)
+        request_id = request_ids[0]
+        self.assertRegex(request_id or "", REQUEST_ID_RE)
+        lines = log.strip().split("\n")
+        for line in lines:
+            self.assertIn(f" request_id={request_id} ", line, "every line of the run carries the sent ID")
+        sent = [line for line in lines if "event=webhook_sent" in line]
+        self.assertEqual(len(sent), 1)
+        self.assertIn(f"event=webhook_sent submission_id=sub-123 request_id={request_id} ", sent[0])
+
+    def test_unsafe_submission_id_is_not_logged(self):
+        requests = []
+        url = self.serve(202, requests, reply=b'{"submission_id":"bad id\\nnext"}')
+        with tempfile.TemporaryDirectory() as directory:
+            result, log = self.invoke(url, directory, ["/movie.mp4", "movie", "video"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_unified_lines(log)
+        self.assertNotIn("submission_id=", log)
+        self.assertNotIn("bad id", log)
 
     @unittest.skipUnless(Path("/bin/bash").exists(), "/bin/bash unavailable")
     def test_runs_on_the_system_bash(self):
@@ -199,6 +238,19 @@ class ShellLevelTest(unittest.TestCase):
         for shell in self.shells():
             with self.subTest(shell=shell):
                 self.assertIn("ERROR", self.run_log(shell, ["log_line ERROR test_event failed"], level="ERROR"))
+
+    def test_correlation_ids_cannot_be_passed_as_fields(self):
+        for shell in self.shells():
+            with self.subTest(shell=shell):
+                output = self.run_log(
+                    shell,
+                    [
+                        'log_line INFO test_event ready "request_id=forged" "job_id=forged"',
+                        'LOG_REQUEST_ID=real; log_line INFO test_event ready "request_id=forged"',
+                    ],
+                )
+                self.assertNotIn("forged", output)
+                self.assertEqual(output.count("request_id=real"), 1)
 
     def test_warning_is_a_compatibility_alias(self):
         for shell in self.shells():

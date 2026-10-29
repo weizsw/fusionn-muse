@@ -58,6 +58,10 @@ func WithRequestID(ctx context.Context, id string) context.Context {
 	return withCorr(ctx, func(c *correlation) { c.requestID = id })
 }
 
+// RequestID reports the request ID attached to ctx, or "" when there is none.
+// Use it to carry the ID into queued work or an outbound X-Request-ID header.
+func RequestID(ctx context.Context) string { return ctxCorr(ctx).requestID }
+
 // WithParentJobID attaches the originating Job ID when a callback creates a
 // new linked Job (rendered as parent_job_id, paired with job_linked events).
 func WithParentJobID(ctx context.Context, id string) context.Context {

@@ -143,7 +143,12 @@ func (q *Queue) prepareSubmission(submission *Submission) {
 	log := logger.Component("submission")
 	log.Info(ctx, "submission_preparing", "Preparing submission",
 		zap.Int64("run_id", submission.RunID), zap.String("path", submission.SourcePath))
-	media, cleanup, prepareErr := q.processor.(submissionPreparer).PrepareSubmission(ctx, submission)
+	var media *mediaintake.ResolvedMedia
+	var cleanup func() error
+	prepareErr := catchPanic(func() (err error) {
+		media, cleanup, err = q.processor.(submissionPreparer).PrepareSubmission(ctx, submission)
+		return err
+	})
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		prepareErr = fmt.Errorf("media preparation timed out after %s: %w", submissionPreparationTimeout, ctx.Err())
 	} else if ctx.Err() != nil {
@@ -184,7 +189,8 @@ func (q *Queue) prepareSubmission(submission *Submission) {
 			if errors.Is(prepareErr, mediaintake.ErrNoValidMedia) {
 				log.Info(ctx, "submission_ignored", "No valid media found", zap.Error(prepareErr))
 			} else {
-				log.Error(ctx, "submission_failed", "Submission preparation failed", zap.Error(prepareErr))
+				log.Error(ctx, "submission_failed", "Submission preparation failed", zap.Error(prepareErr),
+					logger.PanicStack(prepareErr))
 			}
 		}
 		return
