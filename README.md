@@ -156,23 +156,21 @@ Fields appear in this order: `component event`, then `job_id submission_id attem
 ### Where the logs go
 
 - The container writes to stdout and stderr. Docker keeps them with `max-size: 20m` and `max-file: 6`, about 120 MiB per container, evicting the oldest data first. Read them with `docker compose logs -f` or the OrbStack container page. These options take effect when the container is recreated.
-- Host-only programs are not part of the container log. `host_asr_server.py` and `host_server.py` write to stderr, and `scripts/torrent-complete.sh` appends the same lines to `$LOG_FILE` (`/tmp/torrent-complete.log` by default). Redirect them to a file or your own collector when you need retention; this project does not rotate those files.
-- Each run of `scripts/torrent-complete.sh` sends an `X-Request-ID` header and writes the same `request_id` on all of its lines. When Muse accepts the request, the script also writes the returned `submission_id`. Search the container log for either value to find the Muse lines for that run.
+- Host-only programs are not part of the container log. `host_asr_server.py` and `host_server.py` write to stderr, and `scripts/torrent_complete.py` appends the same lines to `$LOG_FILE` (`/tmp/torrent-complete.log` by default). Redirect them to a file or your own collector when you need retention; this project does not rotate those files.
+- Each run of `scripts/torrent_complete.py` sends an `X-Request-ID` header and writes the same `request_id` on all of its lines. When Muse accepts the request, the script also writes the returned `submission_id`. Search the container log for either value to find the Muse lines for that run.
 - A panic while a Submission or Job is processed does not stop the service. That Submission or attempt fails through the normal failure path, and its `submission_failed`, `translation_retry` or `job_failed` line includes the stack.
 
 ## qBittorrent Setup
 
-1. Go to **Options → Downloads → Run external program on torrent completion**
+1. Copy `scripts/torrent_complete.py` to the qBittorrent host. It needs only Python 3.9 or later and its standard library. Set the constants at the top of the file for your deployment: `MUSE_URL`, `MUSE_CATEGORY` (the only category that is sent), and `HOST_INPUT_PATH` and `CONTAINER_INPUT_PATH` (the download mount, and the path that Muse sees for it). You can also set `MUSE_URL`, `LOG_FILE` and `LOG_LEVEL` as environment variables.
 
-2. Add the command:
+2. Go to **Options → Downloads → Run external program on torrent completion** and add the command:
 
    ```bash
-   curl -X POST http://fusionn-muse:8080/api/v1/webhook/torrent \
-     -H "Content-Type: application/json" \
-     -d '{"path": "%F", "name": "%N", "category": "%L"}'
+   python3 /path/to/torrent_complete.py "%N" "%L" "%I" "%F"
    ```
 
-   Prefer `scripts/torrent-complete.sh` when invoking from qBittorrent: it correctly encodes torrent names, limits connection/total request time to 5/15 seconds, and checks for **HTTP 202** rather than treating every completed HTTP transfer as success. Configure `MUSE_URL` and the script's host/container path mapping for your deployment.
+   The script sends one request, does not follow redirects, and stops waiting after 15 seconds. Only **HTTP 202** with a `submission_id` counts as success. A torrent in another category is only logged. A path outside the download mount, a failed request or a missing acknowledgement is logged as `webhook_failed`, and the script exits with status 1.
 
 A `202` receipt includes `submission_id` and means the input and pending preparation have committed to SQLite—not that media preparation or subtitle processing succeeded. Scanning, ISO extraction and multipart conversion run in the background with a three-hour preparation deadline. Poll the Submission detail for its outcome and linked Job.
 
