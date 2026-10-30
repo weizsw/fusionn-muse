@@ -526,3 +526,18 @@ func TestTranslationRateLimitRejectsInvalidValuesWithoutReplacingConfig(t *testi
 		})
 	}
 }
+
+// log_level is read from the file; logger.SetConfigLevel validates and applies it.
+func TestLogLevelIsLoaded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("log_level: debug\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Errorf("LogLevel = %q, want debug", cfg.LogLevel)
+	}
+}

@@ -51,7 +51,9 @@
 
 ## 4. 级别和错误责任
 
-统一通过 `LOG_LEVEL` 控制，默认 INFO，不因开发环境自动开启内容片段日志。允许 DEBUG/INFO/WARN/ERROR。非法值必须有可见的启动诊断，不能悄悄关闭日志。`ALIGN_LOG_LEVEL` 仅在已有 Python／word-align 配置中作兼容别名，且只在未设置 `LOG_LEVEL` 时使用；Go 服务只读取 `LOG_LEVEL`，不新增历史上没有的别名。文档明确适用范围与优先级。
+统一通过 `LOG_LEVEL` 控制，默认 INFO，不因开发环境自动开启内容片段日志。允许 DEBUG/INFO/WARN/ERROR。非法值必须有可见的启动诊断，不能悄悄关闭日志。`ALIGN_LOG_LEVEL` 仅在已有 Python／word-align 配置中作兼容别名，且只在未设置 `LOG_LEVEL` 时使用；Go 服务的环境变量只读取 `LOG_LEVEL`，不新增历史上没有的别名。文档明确适用范围与优先级。
+
+Go 服务的配置文件可以写 `log_level`，取值与 `LOG_LEVEL` 相同。优先级是：`log_level`，然后 `LOG_LEVEL`，都没有时用 INFO；空值等于没写。配置热加载后（约 10 秒内）对整个进程生效，不需要重启。级别变化时记一条 INFO `log_level_changed`，带 `from`、`to` 和 `source`（`config`、`env` 或 `default`），在新旧两个级别中较详细的那个级别下写出。非法值保持当前级别，记一条 WARN `config_invalid`；同一个值不重复告警。Python 脚本和宿主机程序仍只读 `LOG_LEVEL`。
 
 | 级别 | 内容 |
 | --- | --- |
@@ -97,6 +99,7 @@
 - 所有级别都屏蔽 API key、token、密码、Authorization、URL userinfo/凭据 query、命令行密钥及它们出现在错误文字中的形式。优先记录安全字段白名单，不能只依赖一次全局正则。
 - INFO 不记录整份配置、字幕、prompt、LLM 原始响应、HTTP 请求/响应 body 或完整命令环境。
 - DEBUG 可以在明确的 `preview` 字段内记录经过脱敏的挑选片段，最多 512 个 Unicode 字符；超出时带 `truncated=true`。不能通过分拆成多条 preview 把整份内容重新写入日志。限制按字段名执行，不能靠普通字符串字段或 INFO 调用绕过。
+- 工具失败时，报告这次失败的 WARN 或 ERROR 事件可以带 `detail` 字段，所有级别都输出。`detail` 只能由 Go 的 `logger.FailureDetail` 生成：从工具输出的有界尾部挑出像报错的行，跳过 Python traceback 的帧，去重后取最后 3 行，用 ` | ` 连接；先脱敏再截断，最多 300 个 Unicode 字符，始终带双引号。渲染器按字段名执行这些限制，超长时截断并带 `truncated=true`。挑出的行偶尔会带一小段原文（例如字幕），所以不能用 `detail` 转发普通输出；错误文本本身仍不带工具输出。
 - 未知第三方输出也受上条限制；禁止通过 DEBUG 原样逐行转发绕过原文限制，也不能逐条把 msg 截到 512 字符后在 INFO 输出。第三方库经过 root formatter 包装并不意味着内容可信；在产生处选择安全事件/字段，保留脚本失败判定所需的等价常量标记，不以统一格式的正则匹配替代安全策略。
 - 文件路径、媒体标题和参数值必须引用/转义，换行不能伪造下一条日志。可记录必要操作路径，但不得把无关业务正文当作错误原因。
 
@@ -130,7 +133,7 @@ logging:
 ### Fusionn-Muse
 
 - logger 上下文、Submission/Job/真实 Attempt、各处理阶段、错误归属、工具 runner。
-- `llm_subtrans_translate.py`、`detect_hard_sub.py` 的诊断、host-asr、host DuoSubs/uvicorn 以及 torrent-complete.sh。
+- `llm_subtrans_translate.py`、`detect_hard_sub.py` 的诊断、host-asr、host DuoSubs/uvicorn 以及 torrent_complete.py。
 - 保留 OCR stdout、持久化身份、各类恢复/重试含义和已有 HTTP 状态/退出码。
 
 ### Fusionn-Subs

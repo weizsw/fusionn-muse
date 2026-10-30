@@ -51,7 +51,7 @@ var validKeyRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // forceQuoteKeys are free-text fields that always render quoted, even when
 // the value would otherwise match the bare rule (spec: text values are
 // quoted; only identifier-class values may go bare).
-var forceQuoteKeys = map[string]bool{"error": true, "preview": true, "stack": true}
+var forceQuoteKeys = map[string]bool{"detail": true, "error": true, "preview": true, "stack": true}
 
 // kv is a field after value extraction, ready for sorting and rendering.
 type kv struct {
@@ -141,10 +141,10 @@ func renderLine(now time.Time, lvl Level, _ string, with, call []zapcore.Field, 
 			return // first occurrence wins
 		}
 		seen[f.Key] = true
-		if f.Key == "preview" || f.Key == "stack" {
-			// Content excerpts are DEBUG-only; stacks render at their entry
-			// level. Both are redacted and capped; a user-supplied
-			// truncated=false can never override the cap.
+		if f.Key == "preview" || f.Key == "stack" || f.Key == "detail" {
+			// Content excerpts are DEBUG-only; a failure detail and a stack
+			// render at their entry level. All are redacted and capped; a
+			// user-supplied truncated=false can never override the cap.
 			if f.Key == "preview" && lvl != DEBUG {
 				return
 			}
@@ -153,8 +153,11 @@ func renderLine(now time.Time, lvl Level, _ string, with, call []zapcore.Field, 
 				s = fmt.Sprint(zvalue(f))
 			}
 			limit := previewMaxRunes
-			if f.Key == "stack" {
+			switch f.Key {
+			case "stack":
 				limit = stackMaxRunes
+			case "detail":
+				limit = detailMaxRunes
 			}
 			capped, truncated := capRunes(Redact(s), limit)
 			extras = append(extras, kv{f.Key, capped})
@@ -319,6 +322,8 @@ const (
 	// stackMaxRunes caps an escaped panic/exception stack; larger than a
 	// preview so the source location survives, still bounded.
 	stackMaxRunes = 4096
+	// detailMaxRunes caps a failure detail, which shows at every level.
+	detailMaxRunes = 300
 )
 
 // capRunes truncates s to limit runes, reporting truncation.

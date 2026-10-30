@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/fusionn-muse/internal/mediaintake"
+	"github.com/fusionn-muse/internal/toolrun"
 	"github.com/fusionn-muse/pkg/logger"
 	"github.com/google/uuid"
 )
@@ -190,7 +191,7 @@ func (q *Queue) prepareSubmission(submission *Submission) {
 				log.Info(ctx, "submission_ignored", "No valid media found", zap.Error(prepareErr))
 			} else {
 				log.Error(ctx, "submission_failed", "Submission preparation failed", zap.Error(prepareErr),
-					logger.PanicStack(prepareErr))
+					logger.PanicStack(prepareErr), logger.FailureDetail(toolrun.FailureOutput(prepareErr)))
 			}
 		}
 		return

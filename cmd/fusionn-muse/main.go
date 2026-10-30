@@ -50,6 +50,8 @@ func main() {
 	}
 	defer cfgMgr.Stop()
 	cfg := cfgMgr.Get()
+	logger.SetConfigLevel(cfg.LogLevel)
+	cfgMgr.OnChange(func(_, updated *config.Config) { logger.SetConfigLevel(updated.LogLevel) })
 
 	// Get hardcoded folders
 	folders := config.Folders()

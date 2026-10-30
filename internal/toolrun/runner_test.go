@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -170,4 +171,45 @@ func captureStderr(t *testing.T, fn func()) string {
 		t.Fatalf("close reader: %v", err)
 	}
 	return string(output)
+}
+
+// A failed Run keeps the standard error on the exit error for a bounded
+// diagnostic; the error text still never replays it.
+func TestExecRunnerRunKeepsStderrForDiagnostics(t *testing.T) {
+	err := (ExecRunner{}).Run(context.Background(), "sh", "-c",
+		`printf 'progress\n'; printf 'Error opening input\n' >&2; exit 1`)
+	if got := FailureOutput(err); got != "Error opening input\n" {
+		t.Fatalf("FailureOutput = %q, want the standard error", got)
+	}
+	if strings.Contains(err.Error(), "Error opening input") {
+		t.Fatalf("error %q replays the output", err)
+	}
+}
+
+// Run keeps only the end of a long standard error, starting at a whole line.
+func TestExecRunnerRunBoundsTheKeptStderr(t *testing.T) {
+	script := "head -c " + strconv.Itoa(2*stderrLimit) + " /dev/zero | tr '\\0' x >&2; printf '\\nError: last\\n' >&2; exit 1"
+	err := (ExecRunner{}).Run(context.Background(), "sh", "-c", script)
+	if got := FailureOutput(err); got != "Error: last\n" {
+		t.Fatalf("FailureOutput has %d bytes starting %q, want only the last whole line", len(got), got[:min(len(got), 20)])
+	}
+}
+
+// FailureOutput reads every failed run that an error wraps, in order, so a copy
+// that failed and the transcode that failed after it both show.
+func TestFailureOutputReadsEveryWrappedRun(t *testing.T) {
+	ctx := context.Background()
+	copyErr := (ExecRunner{}).Run(ctx, "sh", "-c", `echo 'copy: codec not supported' >&2; exit 1`)
+	transcodeErr := (ExecRunner{}).Run(ctx, "sh", "-c", `echo 'transcode: Conversion failed!' >&2; exit 1`)
+	joined := fmt.Errorf("remux copy failed: %w; transcode failed: %w", copyErr, transcodeErr)
+	if got, want := FailureOutput(joined), "copy: codec not supported\n\ntranscode: Conversion failed!\n"; got != want {
+		t.Errorf("FailureOutput = %q, want %q", got, want)
+	}
+	_, outputErr := (ExecRunner{}).Output(ctx, "sh", "-c", `echo 'probe: Invalid data' >&2; exit 1`)
+	if got := FailureOutput(fmt.Errorf("probe: %w", outputErr)); got != "probe: Invalid data\n" {
+		t.Errorf("FailureOutput of Output = %q", got)
+	}
+	if got := FailureOutput(errors.New("plain")); got != "" {
+		t.Errorf("FailureOutput of a plain error = %q", got)
+	}
 }

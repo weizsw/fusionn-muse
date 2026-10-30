@@ -15,6 +15,7 @@ import (
 
 	"github.com/fusionn-muse/internal/executor"
 	"github.com/fusionn-muse/internal/fileops"
+	"github.com/fusionn-muse/internal/toolrun"
 	"github.com/fusionn-muse/pkg/logger"
 )
 
@@ -631,6 +632,7 @@ func failureFields(stage Stage, retry int, cause error) []zap.Field {
 		zap.Int("retry", retry),
 		zap.Error(cause),
 		logger.PanicStack(cause),
+		logger.FailureDetail(toolrun.FailureOutput(cause)),
 	}
 	var diagnostics executor.ScriptDiagnostics
 	if errors.As(cause, &diagnostics) {

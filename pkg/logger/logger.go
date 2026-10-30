@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -43,9 +44,26 @@ type Config struct {
 	Service string
 	// Output defaults to os.Stdout. Buffers need no Sync.
 	Output zapcore.WriteSyncer
-	// The level always comes from LOG_LEVEL (default INFO) so every emitter
-	// shares one knob; it is not part of Config.
+	// The level comes from LOG_LEVEL (default INFO), and SetConfigLevel can
+	// override it at run time; it is not part of Config.
 }
+
+// level is the process-wide level. Every core reads it on each event, so a
+// change applies to the next event without rebuilding Log.
+var level = zap.NewAtomicLevelAt(INFO)
+
+// levelMu serializes level changes and guards the state below.
+var levelMu sync.Mutex
+
+var (
+	// envLevel is the LOG_LEVEL level, or INFO when LOG_LEVEL is unset or
+	// invalid. It applies whenever the config sets no level.
+	envLevel = INFO
+	// envSource names where envLevel comes from: "env" or "default".
+	envSource = "default"
+	// configLevel is the last value given to SetConfigLevel.
+	configLevel string
+)
 
 // Configure (re)builds the process-wide logger and is the only place Log is
 // assigned in production. Call it once at startup, before logging begins;
@@ -54,7 +72,8 @@ type Config struct {
 // fully replaces the old logger with no duplicated output. Reads LOG_LEVEL:
 // DEBUG/INFO/WARN/ERROR (case-insensitive, WARNING accepted), default INFO.
 // An invalid value keeps INFO and emits a visible config_invalid warning
-// instead of silently disabling logs.
+// instead of silently disabling logs. Configure also clears a level set
+// with SetConfigLevel.
 func Configure(cfg Config) {
 	service := cfg.Service
 	if service == "" {
@@ -65,12 +84,16 @@ func Configure(cfg Config) {
 		out = zapcore.AddSync(os.Stdout)
 	}
 
-	level := INFO
 	raw := strings.TrimSpace(os.Getenv("LOG_LEVEL"))
 	parsed, valid := ParseLevel(raw)
+	levelMu.Lock()
+	envLevel, envSource = INFO, "default"
 	if raw != "" && valid {
-		level = parsed
+		envLevel, envSource = parsed, "env"
 	}
+	configLevel = ""
+	level.SetLevel(envLevel)
+	levelMu.Unlock()
 
 	Log = zap.New(newLineCore(service, level, out)).Sugar()
 
@@ -78,6 +101,53 @@ func Configure(cfg Config) {
 		Component("logger").Warn(context.Background(), "config_invalid",
 			"Invalid LOG_LEVEL, using INFO", zap.String("log_level", raw))
 	}
+}
+
+// SetConfigLevel applies the log_level value of the service config at run
+// time. A valid value (see ParseLevel) overrides LOG_LEVEL. An empty value
+// returns to LOG_LEVEL, or to INFO when LOG_LEVEL is unset. An invalid value
+// keeps the current level and logs one config_invalid warning.
+//
+// Call it at startup and after each config reload. A value that did not
+// change does nothing. A level change logs one log_level_changed event at
+// INFO, written under the more verbose of the two levels, so it shows when
+// either level includes INFO.
+func SetConfigLevel(raw string) {
+	raw = strings.TrimSpace(raw)
+	levelMu.Lock()
+	defer levelMu.Unlock()
+	if raw == configLevel {
+		return
+	}
+	configLevel = raw
+
+	log := Component("logger")
+	ctx := context.Background()
+	to, source := envLevel, envSource
+	if raw != "" {
+		parsed, ok := ParseLevel(raw)
+		if !ok {
+			log.Warn(ctx, "config_invalid", "Invalid log_level in config, level unchanged",
+				zap.String("log_level", raw))
+			return
+		}
+		to, source = parsed, "config"
+	}
+	from := level.Level()
+	if to == from {
+		return
+	}
+	changed := func() {
+		log.Info(ctx, "log_level_changed", "Log level changed", zap.String("from", from.CapitalString()),
+			zap.String("to", to.CapitalString()), zap.String("source", source))
+	}
+	if to < from {
+		level.SetLevel(to)
+		changed()
+		return
+	}
+	changed()
+	level.SetLevel(to)
 }
 
 // Init is deprecated: isDev no longer enables DEBUG or colors (only
@@ -92,7 +162,7 @@ func Sync() {
 }
 
 func init() {
-	Log = zap.New(newLineCore(serviceName, INFO, zapcore.AddSync(os.Stdout))).Sugar()
+	Log = zap.New(newLineCore(serviceName, level, zapcore.AddSync(os.Stdout))).Sugar()
 }
 
 // Logger emits structured events for one stable module name. It is cheap to
