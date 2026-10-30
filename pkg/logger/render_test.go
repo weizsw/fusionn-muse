@@ -10,11 +10,11 @@ import (
 )
 
 func at(sec, ms int) time.Time {
-	return time.Date(2026, 7, 1, 14, 20, sec, ms*int(time.Millisecond), fixedZone)
+	return time.Date(2026, 7, 1, 14, 20, sec, ms*int(time.Millisecond), testZone)
 }
 
 func atMin(min, sec, ms int) time.Time {
-	return time.Date(2026, 7, 1, 14, min, sec, ms*int(time.Millisecond), fixedZone)
+	return time.Date(2026, 7, 1, 14, min, sec, ms*int(time.Millisecond), testZone)
 }
 
 // Golden samples from the spec (docs/design/unified-logging.md §3).
@@ -40,7 +40,7 @@ func TestGoldenSpecSamples(t *testing.T) {
 				zap.String("job_id", "abc"),
 			},
 			msg:  "Job started",
-			want: `2026-07-01T14:20:01.123+08:00 INFO component=worker event=job_started job_id=abc msg="Job started"`,
+			want: `2026-07-01T14:20:01.123 INFO component=worker event=job_started job_id=abc msg="Job started"`,
 		},
 		{
 			name: "tool_started",
@@ -53,7 +53,7 @@ func TestGoldenSpecSamples(t *testing.T) {
 				zap.String("tool", "llm-subtrans"),
 			},
 			msg:  "Translation tool started",
-			want: `2026-07-01T14:20:02.123+08:00 INFO component=translator event=tool_started job_id=abc tool=llm-subtrans msg="Translation tool started"`,
+			want: `2026-07-01T14:20:02.123 INFO component=translator event=tool_started job_id=abc tool=llm-subtrans msg="Translation tool started"`,
 		},
 		{
 			name: "translation_retry_warn",
@@ -68,7 +68,7 @@ func TestGoldenSpecSamples(t *testing.T) {
 				zap.String("error", "provider timeout"),
 			},
 			msg:  "Translation will retry",
-			want: `2026-07-01T14:20:03.456+08:00 WARN component=translator event=translation_retry job_id=abc error="provider timeout" retry=1 retry_after_ms=2000 msg="Translation will retry"`,
+			want: `2026-07-01T14:20:03.456 WARN component=translator event=translation_retry job_id=abc error="provider timeout" retry=1 retry_after_ms=2000 msg="Translation will retry"`,
 		},
 		{
 			name: "job_failed_error",
@@ -82,7 +82,7 @@ func TestGoldenSpecSamples(t *testing.T) {
 				zap.String("error", "retries exhausted"),
 			},
 			msg:  "Job failed",
-			want: `2026-07-01T14:21:00.789+08:00 ERROR component=worker event=job_failed job_id=abc stage=translation error="retries exhausted" msg="Job failed"`,
+			want: `2026-07-01T14:21:00.789 ERROR component=worker event=job_failed job_id=abc stage=translation error="retries exhausted" msg="Job failed"`,
 		},
 	}
 	for _, tt := range tests {
@@ -139,7 +139,7 @@ func TestGoldenEscaping(t *testing.T) {
 				zap.String("event", "e"),
 				zap.String("note", tt.input),
 			}, "m")
-			want := `2026-07-01T14:20:03.456+08:00 INFO component=c event=e note=` + tt.want + ` msg="m"`
+			want := `2026-07-01T14:20:03.456 INFO component=c event=e note=` + tt.want + ` msg="m"`
 			if got != want {
 				t.Errorf("\n got: %s\nwant: %s", got, want)
 			}
@@ -155,7 +155,7 @@ func TestGoldenNumbersAndBools(t *testing.T) {
 		zap.Bool("truncated", true),
 		zap.Float64("ratio", 1.5),
 	}, "m")
-	want := `2026-07-01T14:20:03.456+08:00 INFO component=c event=e ratio=1.5 status=200 truncated=true msg="m"`
+	want := `2026-07-01T14:20:03.456 INFO component=c event=e ratio=1.5 status=200 truncated=true msg="m"`
 	if got != want {
 		t.Errorf("\n got: %s\nwant: %s", got, want)
 	}
@@ -179,7 +179,7 @@ func TestGoldenFieldOrder(t *testing.T) {
 		zap.String("note", "a=b"),
 		zap.String("error", "provider timeout"),
 	}, "Translation will retry")
-	want := `2026-07-01T14:20:03.456+08:00 WARN component=processor event=translation_retry job_id=abc submission_id=sub-1 attempt_id=42 request_id=req-9 stage=translating tool=llm-subtrans stream=stderr error="provider timeout" note="a=b" retry=1 retry_after_ms=2000 msg="Translation will retry"`
+	want := `2026-07-01T14:20:03.456 WARN component=processor event=translation_retry job_id=abc submission_id=sub-1 attempt_id=42 request_id=req-9 stage=translating tool=llm-subtrans stream=stderr error="provider timeout" note="a=b" retry=1 retry_after_ms=2000 msg="Translation will retry"`
 	if got != want {
 		t.Errorf("\n got: %s\nwant: %s", got, want)
 	}
@@ -194,7 +194,7 @@ func TestForceQuoteFreeText(t *testing.T) {
 		zap.String("error", "timeout"),
 		zap.String("note", "timeout"),
 	}, "m")
-	want := `2026-07-01T14:20:03.456+08:00 INFO component=c event=e error="timeout" note=timeout msg="m"`
+	want := `2026-07-01T14:20:03.456 INFO component=c event=e error="timeout" note=timeout msg="m"`
 	if got != want {
 		t.Errorf("\n got: %s\nwant: %s", got, want)
 	}
@@ -214,7 +214,7 @@ func TestMalformedKeysDropped(t *testing.T) {
 		{Key: "bad.key", Type: zapcore.StringType, String: "x"},
 		zap.String("good_key2", "y"),
 	}, "m")
-	want := `2026-07-01T14:20:03.456+08:00 INFO component=c event=e good_key2=y msg="m"`
+	want := `2026-07-01T14:20:03.456 INFO component=c event=e good_key2=y msg="m"`
 	if got != want {
 		t.Errorf("\n got: %s\nwant: %s", got, want)
 	}
@@ -232,7 +232,7 @@ func TestPositionalValuesRedacted(t *testing.T) {
 	if strings.Contains(got, "sk-test123") {
 		t.Errorf("secret leaked through positional/envelope values: %q", got)
 	}
-	want := `2026-07-01T14:20:03.456+08:00 INFO component=c event=e job_id="token=***" stage="password=***" tool="bearer ***" msg="m"`
+	want := `2026-07-01T14:20:03.456 INFO component=c event=e job_id="token=***" stage="password=***" tool="bearer ***" msg="m"`
 	if got != want {
 		t.Errorf("\n got: %s\nwant: %s", got, want)
 	}
@@ -250,7 +250,7 @@ func TestSensitiveFieldNames(t *testing.T) {
 		zap.String("client_secret", "FAKE_SECRET"),
 		zap.Int("token_count", 42),
 	}, "m")
-	want := `2026-07-01T14:20:03.456+08:00 INFO component=c event=e access_key="***" api_key="***" client_secret="***" openrouter_api_key="***" refresh_token="***" token_count=42 msg="m"`
+	want := `2026-07-01T14:20:03.456 INFO component=c event=e access_key="***" api_key="***" client_secret="***" openrouter_api_key="***" refresh_token="***" token_count=42 msg="m"`
 	if got != want {
 		t.Errorf("\n got: %s\nwant: %s", got, want)
 	}
@@ -297,7 +297,7 @@ func TestReservedAndDuplicateFields(t *testing.T) {
 		zap.String("k", "first"),
 		zap.String("k", "second"),
 	}, "real msg")
-	want := `2026-07-01T14:20:03.456+08:00 INFO component=real event=real_event job_id=real-job k=first msg="real msg"`
+	want := `2026-07-01T14:20:03.456 INFO component=real event=real_event job_id=real-job k=first msg="real msg"`
 	if got != want {
 		t.Errorf("\n got: %s\nwant: %s", got, want)
 	}
@@ -313,7 +313,7 @@ func TestServiceNotRenderedAndReserved(t *testing.T) {
 	}
 	for _, lvl := range []Level{DEBUG, INFO, WARN, ERROR} {
 		got := renderLine(at(3, 456), lvl, "ignored-service", nil, base, "m")
-		want := "2026-07-01T14:20:03.456+08:00 " + displayLevel(lvl) + " component=c event=e msg=\"m\""
+		want := "2026-07-01T14:20:03.456 " + displayLevel(lvl) + " component=c event=e msg=\"m\""
 		if got != want {
 			t.Errorf("%s:\n got: %s\nwant: %s", lvl, got, want)
 		}
@@ -322,7 +322,7 @@ func TestServiceNotRenderedAndReserved(t *testing.T) {
 		}
 	}
 	got := renderLine(at(3, 456), INFO, "svc", nil, append(base, zap.String("service", "evil")), "m")
-	want := "2026-07-01T14:20:03.456+08:00 INFO component=c event=e msg=\"m\""
+	want := "2026-07-01T14:20:03.456 INFO component=c event=e msg=\"m\""
 	if got != want {
 		t.Errorf("\n got: %s\nwant: %s", got, want)
 	}

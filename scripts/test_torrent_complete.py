@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import zoneinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -23,7 +25,7 @@ CORRELATION_KEYS = ["job_id", "submission_id", "attempt_id", "request_id", "pare
 
 # component and event are fixed in that order; msg is last; the line is one physical line.
 LINE_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00 "
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3} "
     r"(DEBUG|INFO|WARN|ERROR) component=torrent-complete event=\S+ "
     r'.*msg=".*"$'
 )
@@ -62,7 +64,7 @@ class TorrentCompleteTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return "http://127.0.0.1:%d" % server.server_port, requests
 
-    def invoke(self, url, values, python=sys.executable, level=None, log_file=None):
+    def invoke(self, url, values, python=sys.executable, level=None, log_file=None, tz=None):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(log_file) if log_file else Path(directory) / "hook.log"
             environment = {**os.environ, "MUSE_URL": url, "LOG_FILE": str(log)}
@@ -70,6 +72,8 @@ class TorrentCompleteTests(unittest.TestCase):
                 environment.pop(name, None)
             if level is not None:
                 environment["LOG_LEVEL"] = level
+            if tz is not None:
+                environment["TZ"] = tz
             result = subprocess.run(
                 [python, str(SCRIPT), *values], env=environment, capture_output=True, text=True, timeout=30
             )
@@ -208,6 +212,19 @@ class TorrentCompleteTests(unittest.TestCase):
         self.assertIn("WARN component=torrent-complete event=config_invalid", fallback)
         self.assertIn("log_level=LOUD", fallback)
         self.assertIn("event=webhook_sent", fallback, "an invalid level falls back to INFO")
+
+    def test_timestamps_follow_tz(self):
+        url, _ = self.serve(202)
+        for tz, zone in (("America/New_York", "America/New_York"), ("", "Asia/Shanghai"), ("Mars/Base", "Asia/Shanghai")):
+            with self.subTest(tz=tz):
+                _, log = self.invoke(url, ["movie", "whisparr", "abc123", MOUNTED], tz=tz)
+                for line in self.assert_unified_lines(log):
+                    stamp = datetime.datetime.strptime(line[:23], "%Y-%m-%dT%H:%M:%S.%f")
+                    now = datetime.datetime.now(zoneinfo.ZoneInfo(zone)).replace(tzinfo=None)
+                    self.assertLess(abs((now - stamp).total_seconds()), 60, line)
+                if tz == "Mars/Base":
+                    self.assertIn('WARN component=torrent-complete event=config_invalid', log)
+                    self.assertIn('tz="Mars/Base"', log)
 
     def test_an_unwritable_log_file_does_not_fail_the_run(self):
         url, requests = self.serve(202)

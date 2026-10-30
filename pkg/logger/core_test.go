@@ -11,7 +11,7 @@ import (
 
 func TestCoreKeepsEntryStackEscaped(t *testing.T) {
 	var buf bytes.Buffer
-	core := newLineCore("svc", ERROR, zapcore.AddSync(&buf))
+	core := newLineCore("svc", ERROR, zapcore.AddSync(&buf), testZone)
 	e := zapcore.Entry{
 		Time:    at(3, 456),
 		Level:   zapcore.ErrorLevel,
@@ -23,7 +23,7 @@ func TestCoreKeepsEntryStackEscaped(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.TrimRight(buf.String(), "\n")
-	want := `2026-07-01T14:20:03.456+08:00 ERROR component=c event=e stack="goroutine 1 [running]:\nmain.main()\n\tmain.go:12" msg="boom"`
+	want := `2026-07-01T14:20:03.456 ERROR component=c event=e stack="goroutine 1 [running]:\nmain.main()\n\tmain.go:12" msg="boom"`
 	if got != want {
 		t.Errorf("\n got: %s\nwant: %s", got, want)
 	}
@@ -34,7 +34,7 @@ func TestCoreKeepsEntryStackEscaped(t *testing.T) {
 
 func TestCoreExplicitStackWinsOverAuto(t *testing.T) {
 	var buf bytes.Buffer
-	core := newLineCore("svc", ERROR, zapcore.AddSync(&buf))
+	core := newLineCore("svc", ERROR, zapcore.AddSync(&buf), testZone)
 	e := zapcore.Entry{Time: at(3, 456), Level: zapcore.ErrorLevel, Message: "boom", Stack: "auto-stack"}
 	fs := []zapcore.Field{
 		zap.String("component", "c"),
@@ -52,7 +52,7 @@ func TestCoreExplicitStackWinsOverAuto(t *testing.T) {
 
 func TestCoreStackBoundedAndRedacted(t *testing.T) {
 	var buf bytes.Buffer
-	core := newLineCore("svc", ERROR, zapcore.AddSync(&buf))
+	core := newLineCore("svc", ERROR, zapcore.AddSync(&buf), testZone)
 	e := zapcore.Entry{
 		Time:    at(3, 456),
 		Level:   zapcore.ErrorLevel,

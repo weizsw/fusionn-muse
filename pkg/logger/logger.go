@@ -95,11 +95,16 @@ func Configure(cfg Config) {
 	level.SetLevel(envLevel)
 	levelMu.Unlock()
 
-	Log = zap.New(newLineCore(service, level, out)).Sugar()
+	zone, invalidTZ := logZone(os.Getenv("TZ"))
+	Log = zap.New(newLineCore(service, level, out, zone)).Sugar()
 
 	if raw != "" && !valid {
 		Component("logger").Warn(context.Background(), "config_invalid",
 			"Invalid LOG_LEVEL, using INFO", zap.String("log_level", raw))
+	}
+	if invalidTZ != "" {
+		Component("logger").Warn(context.Background(), "config_invalid",
+			"Unknown TZ, using Asia/Shanghai for log timestamps", zap.String("tz", invalidTZ))
 	}
 }
 
@@ -162,7 +167,8 @@ func Sync() {
 }
 
 func init() {
-	Log = zap.New(newLineCore(serviceName, level, zapcore.AddSync(os.Stdout))).Sugar()
+	zone, _ := logZone(os.Getenv("TZ"))
+	Log = zap.New(newLineCore(serviceName, level, zapcore.AddSync(os.Stdout), zone)).Sugar()
 }
 
 // Logger emits structured events for one stable module name. It is cheap to

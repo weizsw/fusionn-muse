@@ -481,6 +481,7 @@ func (q *Queue) worker(light bool) {
 	defer q.wg.Done()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	var backoff claimBackoff
 	for {
 		q.mu.RLock()
 		if q.state != queueRunning {
@@ -490,8 +491,13 @@ func (q *Queue) worker(light bool) {
 		job, err := q.store.claimNext(light, time.Now().Add(-q.retryDelay))
 		q.mu.RUnlock()
 		if err != nil {
-			logger.Component("queue").Error(q.ctx, "claim_failed", "Queued job could not be claimed", zap.Error(err))
-		} else if job != nil {
+			if !backoff.failed(q.ctx, logger.Component("queue"), "Queued job could not be claimed", err) {
+				return
+			}
+			continue
+		}
+		backoff.reset()
+		if job != nil {
 			if light {
 				q.launchLight(job)
 			} else {
@@ -522,6 +528,7 @@ func (q *Queue) stagedWorker(lane workerLane) {
 	defer q.wg.Done()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	var backoff claimBackoff
 	for {
 		q.mu.RLock()
 		if q.state != queueRunning {
@@ -531,8 +538,13 @@ func (q *Queue) stagedWorker(lane workerLane) {
 		job, err := q.store.claimNextStage(lane, time.Now().Add(-q.retryDelay))
 		q.mu.RUnlock()
 		if err != nil {
-			logger.Component("queue").Error(q.ctx, "claim_failed", "Queued stage could not be claimed", zap.Error(err))
-		} else if job != nil {
+			if !backoff.failed(q.ctx, logger.Component("queue"), "Queued stage could not be claimed", err) {
+				return
+			}
+			continue
+		}
+		backoff.reset()
+		if job != nil {
 			if lane == laneOrchestration {
 				q.launchStaged(job)
 			} else {

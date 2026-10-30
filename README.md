@@ -146,10 +146,10 @@ See [config.example.yaml](config/config.example.yaml) for full documentation.
 Every application event is one physical line of plain text on the program's standard output stream — the Go service writes to stdout, the Python and script programs to stderr:
 
 ```text
-2026-07-01T14:20:03.456+08:00 WARN component=processor event=translation_retry job_id=abc retry=1 retry_after_ms=2000 error="provider timeout" msg="Translation will retry"
+2026-07-01T14:20:03.456 WARN component=processor event=translation_retry job_id=abc retry=1 retry_after_ms=2000 error="provider timeout" msg="Translation will retry"
 ```
 
-Fields appear in this order: `component event`, then `job_id submission_id attempt_id request_id parent_job_id stage tool stream` when they apply, then the remaining fields sorted by name, and `msg` last. Timestamps are always UTC+8 with milliseconds. The complete rules are in [docs/design/unified-logging.md](docs/design/unified-logging.md).
+Fields appear in this order: `component event`, then `job_id submission_id attempt_id request_id parent_job_id stage tool stream` when they apply, then the remaining fields sorted by name, and `msg` last. Timestamps show milliseconds and no time zone offset. The `TZ` environment variable sets their time zone; the compose file sets it, and the default is `Asia/Shanghai`. An unknown `TZ` logs a `config_invalid` warning and uses `Asia/Shanghai`. Host programs such as `torrent_complete.py` follow the same rule, so set `TZ` on the host if it is not in UTC+8. The complete rules are in [docs/design/unified-logging.md](docs/design/unified-logging.md).
 
 `LOG_LEVEL` selects the level and defaults to `INFO`. In the Go service, the config key `log_level` overrides it without a restart: the service applies a change within 10 seconds of saving the file and logs one `log_level_changed` event. An empty `log_level` returns to `LOG_LEVEL`, and an invalid one keeps the current level. The Python scripts that the service starts keep using `LOG_LEVEL`. `ALIGN_LOG_LEVEL` is a Python and script compatibility alias, read by those programs only when `LOG_LEVEL` is unset; the Go service does not read it. An unknown value logs a visible `config_invalid` warning and falls back to `INFO`. Credentials are redacted at every level, and content excerpts appear only at `DEBUG`, in a `preview` field of at most 512 characters. The one exception is `detail`: when an external tool such as ffmpeg fails, the failure line (`job_failed`, `translation_retry`, `submission_failed` or `hard_sub_detection_failed`) carries up to three lines of the tool's standard error that look like error messages, capped at 300 characters.
 
@@ -159,6 +159,7 @@ Fields appear in this order: `component event`, then `job_id submission_id attem
 - Host-only programs are not part of the container log. `host_asr_server.py` and `host_server.py` write to stderr, and `scripts/torrent_complete.py` appends the same lines to `$LOG_FILE` (`/tmp/torrent-complete.log` by default). Redirect them to a file or your own collector when you need retention; this project does not rotate those files.
 - Each run of `scripts/torrent_complete.py` sends an `X-Request-ID` header and writes the same `request_id` on all of its lines. When Muse accepts the request, the script also writes the returned `submission_id`. Search the container log for either value to find the Muse lines for that run.
 - A panic while a Submission or Job is processed does not stop the service. That Submission or attempt fails through the normal failure path, and its `submission_failed`, `translation_retry` or `job_failed` line includes the stack.
+- If the queue database fails, each worker loop logs one `claim_failed` WARN per attempt with `retry_after_ms`, and waits 1, 2, 4 and up to 30 seconds before it tries again. An outage therefore leaves a few lines per minute and does not push older lines out of the 120 MiB log.
 
 ## qBittorrent Setup
 

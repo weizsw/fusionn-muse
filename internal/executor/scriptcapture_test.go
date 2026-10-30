@@ -21,7 +21,7 @@ import (
 // script writes it today: the service field is gone, so the component follows
 // the level directly.
 func scriptLine(level, event, fields string) string {
-	line := "2026-07-01T14:20:09.456+08:00 " + level +
+	line := "2026-07-01T14:20:09.456 " + level +
 		" component=llm-subtrans event=" + event
 	if fields != "" {
 		line += " " + fields
@@ -70,24 +70,26 @@ func TestScriptCaptureVerdict(t *testing.T) {
 		{"the script's constant failure event", []string{scriptLine("ERROR", "script_failure_detected", "") + "\n"}, true},
 		{"the control event is read from the header, not from a quoted value",
 			[]string{scriptLine("INFO", "translation_started", `preview="event=script_failure_detected"`) + "\n"}, false},
+		{"a header with the offset that older releases wrote is still ours",
+			[]string{"2026-07-01T14:20:09.456+08:00 ERROR component=llm-subtrans event=script_failure_detected msg=\"failed\"\n"}, true},
 		{"a header from before the service field was removed is still ours",
-			[]string{"2026-07-01T14:20:09.456+08:00 ERROR service=fusionn-muse component=llm-subtrans event=script_failure_detected msg=\"failed\"\n"}, true},
+			[]string{"2026-07-01T14:20:09.456 ERROR service=fusionn-muse component=llm-subtrans event=script_failure_detected msg=\"failed\"\n"}, true},
 		{"a quoted control event in a legacy header is not the real record",
-			[]string{"2026-07-01T14:20:09.456+08:00 INFO service=fusionn-muse component=llm-subtrans event=translation_started preview=\"event=script_failure_detected\" msg=\"failed\"\n"}, false},
+			[]string{"2026-07-01T14:20:09.456 INFO service=fusionn-muse component=llm-subtrans event=translation_started preview=\"event=script_failure_detected\" msg=\"failed\"\n"}, false},
 		{"a foreign service with our component is not ours",
-			[]string{"2026-07-01T14:20:09.456+08:00 ERROR service=fusionn-subs component=llm-subtrans event=script_failure_detected msg=\"theirs\"\n"}, false},
+			[]string{"2026-07-01T14:20:09.456 ERROR service=fusionn-subs component=llm-subtrans event=script_failure_detected msg=\"theirs\"\n"}, false},
 		{"a foreign component without the legacy prefix keeps the raw verdict",
-			[]string{"2026-07-01T14:20:09.456+08:00 ERROR component=other event=translation_failed Traceback: body\n"}, true},
+			[]string{"2026-07-01T14:20:09.456 ERROR component=other event=translation_failed Traceback: body\n"}, true},
 		{"the control event in a message is not a failure",
 			[]string{scriptLine("INFO", "translation_started", "") + "\n"}, false},
 		{"a foreign service keeps the raw verdict",
-			[]string{"2026-07-01T14:20:09.456+08:00 ERROR service=fusionn-subs component=translator event=translation_failed Error: body" + "\n"}, true},
+			[]string{"2026-07-01T14:20:09.456 ERROR service=fusionn-subs component=translator event=translation_failed Error: body" + "\n"}, true},
 		{"a foreign component of our own service keeps the raw verdict",
-			[]string{"2026-07-01T14:20:09.456+08:00 ERROR service=fusionn-muse component=other event=translation_failed Traceback: body" + "\n"}, true},
+			[]string{"2026-07-01T14:20:09.456 ERROR service=fusionn-muse component=other event=translation_failed Traceback: body" + "\n"}, true},
 		{"a foreign service control event is not ours",
-			[]string{"2026-07-01T14:20:09.456+08:00 ERROR service=fusionn-subs component=translator event=script_failure_detected msg=\"theirs\"" + "\n"}, false},
+			[]string{"2026-07-01T14:20:09.456 ERROR service=fusionn-subs component=translator event=script_failure_detected msg=\"theirs\"" + "\n"}, false},
 		{"a foreign service without a legacy marker is not a failure",
-			[]string{"2026-07-01T14:20:09.456+08:00 ERROR service=fusionn-subs component=translator event=translation_failed msg=\"theirs\"" + "\n"}, false},
+			[]string{"2026-07-01T14:20:09.456 ERROR service=fusionn-subs component=translator event=translation_failed msg=\"theirs\"" + "\n"}, false},
 		{"a quoted translation_failed token is not the real record",
 			[]string{scriptLine("INFO", "translation_started", `token="event=translation_failed"`) + "\n"}, false},
 		{"a normalized line is never searched for failure text",
@@ -254,7 +256,7 @@ func TestScriptCaptureCountsWhatItDoesNotShow(t *testing.T) {
 		scriptLine("WARN", "log", `logger=httpx`),
 		scriptLine("INFO", "translation_started", ""),
 		"raw legacy line",
-		"2026-07-01T14:20:09.456+08:00 INFO service=fusionn-subs component=translator event=job_started msg=\"theirs\"",
+		"2026-07-01T14:20:09.456 INFO service=fusionn-subs component=translator event=job_started msg=\"theirs\"",
 		"",
 	}, "\n"))
 

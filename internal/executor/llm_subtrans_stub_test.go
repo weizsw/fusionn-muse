@@ -48,7 +48,7 @@ mode = os.environ.get("MUSE_STUB_MODE", "fail")
 
 
 def line(level, event, fields=""):
-    stamp = "2026-07-01T14:20:09.456+08:00"
+    stamp = "2026-07-01T14:20:09.456"
     service = "service=fusionn-muse " if os.environ.get("MUSE_STUB_LEGACY") == "1" else ""
     suffix = " " + fields if fields else ""
     return "%s %s %scomponent=llm-subtrans event=%s%s msg=\"failed\"" % (

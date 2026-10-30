@@ -26,7 +26,7 @@ func capture(t *testing.T, level string) *bytes.Buffer {
 	return &buf
 }
 
-var lineRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00 `)
+var lineRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3} `)
 
 func TestComponentEventFormat(t *testing.T) {
 	buf := capture(t, "")

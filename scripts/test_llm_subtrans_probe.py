@@ -36,7 +36,7 @@ PREVIOUS_SCRIPT = SCRIPTS / "testdata" / "previous_llm_subtrans_translate-8d6dd9
 PREVIOUS_SCRIPT_SHA256 = "f2f06c983d7861075acc65787f95623b1df97500023ccc1cdadd3dffd7a15f4a"
 
 UNIFIED_LINE = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2} "
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(?:[+-]\d{2}:\d{2})? "
     r"(DEBUG|INFO|WARN|ERROR) (?:service=fusionn-muse )?component=llm-subtrans event=(\S+)(?: |$)"
 )
 
@@ -226,7 +226,7 @@ class VerdictDifferentialTest(unittest.TestCase):
 
     def test_a_normalized_debug_preview_never_fails_a_successful_run(self):
         line = (
-            "2026-07-01T14:20:03.456+08:00 DEBUG component=llm-subtrans "
+            "2026-07-01T14:20:03.456 DEBUG component=llm-subtrans "
             'event=llm_response_preview preview="Error: Traceback inside a kept excerpt" '
             'msg="LLM response preview"'
         )
@@ -240,7 +240,7 @@ class VerdictDifferentialTest(unittest.TestCase):
 
     def test_the_control_event_is_read_from_our_own_header(self):
         record = (
-            "2026-07-01T14:20:03.456+08:00 ERROR component=llm-subtrans "
+            "2026-07-01T14:20:03.456 ERROR component=llm-subtrans "
             "event=" + SCRIPT_FAILURE_EVENT + ' msg="Script output matched"'
         )
         self.assertTrue(current_verdict(record), "our own control record must fail the run")

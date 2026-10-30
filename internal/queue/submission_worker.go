@@ -115,6 +115,7 @@ func (q *Queue) submissionWorker() {
 	defer q.wg.Done()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	var backoff claimBackoff
 	for {
 		q.mu.RLock()
 		if q.state != queueRunning {
@@ -123,10 +124,16 @@ func (q *Queue) submissionWorker() {
 		}
 		submission, err := q.store.claimSubmission(q.ctx)
 		q.mu.RUnlock()
-		if err != nil && q.ctx.Err() == nil {
-			logger.Component("submission").Error(q.ctx, "claim_failed",
-				"Submission preparation could not be claimed", zap.Error(err))
-		} else if submission != nil {
+		if err != nil {
+			// An error from a stopping queue is its cancellation, not a failure.
+			if q.ctx.Err() != nil ||
+				!backoff.failed(q.ctx, logger.Component("submission"), "Submission preparation could not be claimed", err) {
+				return
+			}
+			continue
+		}
+		backoff.reset()
+		if submission != nil {
 			q.prepareSubmission(submission)
 			continue
 		}

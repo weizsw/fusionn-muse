@@ -35,11 +35,13 @@ content-safety boundary.
 from __future__ import annotations
 
 import datetime
+import functools
 import logging
 import os
 import re
 import sys
 import uuid
+import zoneinfo
 
 __all__ = [
     "SERVICE",
@@ -57,9 +59,41 @@ __all__ = [
 
 SERVICE = "fusionn-muse"
 
-# A log timestamp is always UTC+8. The process TZ is never modified, so business
-# timing and quota resets keep using the host timezone.
-_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+# A log timestamp is wall time in the zone that TZ names, or in Asia/Shanghai
+# when TZ is unset or names no known zone; it carries no offset. Asia/Shanghai
+# has had no daylight saving time since 1991, so a fixed UTC+8 stands in for it
+# where the system has no zone database.
+_DEFAULT_ZONE = "Asia/Shanghai"
+_DEFAULT_ZONE_FALLBACK = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _load_zone(name):
+    """Return the zone named name, or None when this system does not know it."""
+    if name == "UTC":
+        return datetime.timezone.utc
+    try:
+        return zoneinfo.ZoneInfo(name)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError, OSError):
+        return None
+
+
+@functools.lru_cache(maxsize=None)
+def _zone_for(tz):
+    name = tz.strip()
+    if name.startswith(":"):
+        name = name[1:]
+    invalid = None
+    if name and name != _DEFAULT_ZONE:
+        zone = _load_zone(name)
+        if zone is not None:
+            return zone, None
+        invalid = tz
+    return _load_zone(_DEFAULT_ZONE) or _DEFAULT_ZONE_FALLBACK, invalid
+
+
+def _log_zone():
+    """Return (zone, invalid TZ value or None) for log timestamps."""
+    return _zone_for(os.environ.get("TZ", ""))
 
 # Correlation fields keep this order; every other field is sorted by name and
 # ``msg`` stays last.
@@ -325,11 +359,10 @@ def _render_field(key, value):
 
 
 def format_timestamp(moment=None):
-    """Render an aware datetime as YYYY-MM-DDTHH:MM:SS.SSS+08:00."""
-    moment = datetime.datetime.now(_UTC8) if moment is None else moment.astimezone(_UTC8)
-    stamp = moment.strftime("%Y-%m-%dT%H:%M:%S.%f")
-    offset = moment.strftime("%z")
-    return "%s.%s%s:%s" % (stamp[:19], stamp[20:23], offset[:3], offset[3:])
+    """Render an aware datetime as YYYY-MM-DDTHH:MM:SS.SSS in the log zone."""
+    zone, _ = _log_zone()
+    moment = datetime.datetime.now(zone) if moment is None else moment.astimezone(zone)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f")[:23]
 
 
 def _is_secret_field(key):
@@ -529,7 +562,7 @@ class _Formatter(logging.Formatter):
         return "log", "Third-party log", fields
 
     def format(self, record):
-        moment = datetime.datetime.fromtimestamp(record.created, _UTC8)
+        moment = datetime.datetime.fromtimestamp(record.created, datetime.timezone.utc)
         component = getattr(record, "component", None)
         service = getattr(record, "service", None)
         event = getattr(record, "event", None)
@@ -661,5 +694,12 @@ def configure(service=SERVICE, component=None, level=None, stream=None):
             "config_invalid",
             "Invalid LOG_LEVEL, using INFO",
             log_level=invalid,
+        )
+    _, invalid_tz = _log_zone()
+    if invalid_tz is not None:
+        logger.warn(
+            "config_invalid",
+            "Unknown TZ, using Asia/Shanghai for log timestamps",
+            tz=invalid_tz,
         )
     return logger

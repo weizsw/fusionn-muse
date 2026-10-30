@@ -1,6 +1,8 @@
 package logger
 
 import (
+	"time"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -18,10 +20,11 @@ type lineCore struct {
 	lvl     zapcore.LevelEnabler
 	out     zapcore.WriteSyncer
 	with    []zapcore.Field
+	zone    *time.Location // time zone of the timestamp; see logZone
 }
 
-func newLineCore(service string, lvl zapcore.LevelEnabler, out zapcore.WriteSyncer) *lineCore {
-	return &lineCore{service: service, lvl: lvl, out: zapcore.Lock(out)}
+func newLineCore(service string, lvl zapcore.LevelEnabler, out zapcore.WriteSyncer, zone *time.Location) *lineCore {
+	return &lineCore{service: service, lvl: lvl, out: zapcore.Lock(out), zone: zone}
 }
 
 func (c *lineCore) Enabled(l zapcore.Level) bool { return c.lvl.Enabled(l) }
@@ -30,7 +33,7 @@ func (c *lineCore) With(fs []zapcore.Field) zapcore.Core {
 	merged := make([]zapcore.Field, 0, len(c.with)+len(fs))
 	merged = append(merged, c.with...)
 	merged = append(merged, fs...)
-	return &lineCore{service: c.service, lvl: c.lvl, out: c.out, with: merged}
+	return &lineCore{service: c.service, lvl: c.lvl, out: c.out, with: merged, zone: c.zone}
 }
 
 func (c *lineCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
@@ -46,7 +49,7 @@ func (c *lineCore) Write(e zapcore.Entry, fs []zapcore.Field) error {
 		// dropping it. An explicit stack field always wins.
 		fs = append(fs, zap.String("stack", e.Stack))
 	}
-	_, err := c.out.Write([]byte(renderLine(e.Time, e.Level, c.service, c.with, fs, e.Message) + "\n"))
+	_, err := c.out.Write([]byte(renderLine(e.Time.In(c.zone), e.Level, c.service, c.with, fs, e.Message) + "\n"))
 	return err
 }
 
