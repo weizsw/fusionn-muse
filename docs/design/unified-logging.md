@@ -49,6 +49,31 @@
 
 事件名应表达已经发生的事实，例如 `service_started`、`config_reloaded`、`job_received`、`job_started`、`stage_completed`、`job_completed`、`job_failed`、`job_linked`、`translation_retry`、`tool_started`、`tool_completed`、`request_completed`。不要求为所有普通诊断消息建大枚举，但关键生命周期事件必须可按 event 检索。
 
+### 统一的事件名
+
+三个服务里同一件事用同一个事件名。新增事件先看这张表，已有的名字不再另起：
+
+| 事件 | 含义 |
+|---|---|
+| `service_started`、`shutdown_started`、`service_stopped`、`service_failed` | 进程启动、开始停止、已经停止、启动或运行失败。`service_failed` 用 `stage` 写失败的环节，例如 `config`、`init`、`listen` |
+| `config_loaded`、`config_reload_detected`、`config_reloaded`、`config_reload_failed`、`config_field_changed` | 配置首次加载、发现配置文件变化、重新加载完成、重新加载失败、某个字段变化 |
+| `job_received`、`job_started`、`job_completed`、`job_failed`、`job_linked` | 任务的生命周期 |
+| `stage_started`、`stage_completed` | 任务的一个阶段开始、结束，两条日志的 `stage` 相同 |
+| `step_started`、`step_completed`、`step_failed`、`step_skipped` | fusionn 一个阶段里的一个处理器，带 `stage` 和 `step` |
+| `tool_started`、`tool_completed`、`tool_invocation`、`tool_output` | 外部工具开始、结束，以及 DEBUG 级别的命令行和输出预览 |
+| `request_started`、`request_completed`、`request_panicked` | HTTP 请求开始、结束、处理时 panic |
+| `model_load_started`、`model_load_completed` | 模型开始加载、加载完成 |
+
+`stage` 表示任务所处的阶段，同一个任务的开始、结束和失败事件用同一个值：
+
+| 服务 | `stage` 取值 |
+|---|---|
+| Fusionn | `analyze`、`enqueue`、`merge`。处理器写在 `step` 里，例如 `analyzer`、`bazarr_search`、`merger` |
+| Fusionn-Muse | `preparing`、`moving`、`transcribing`、`translating`、`delivering`，与任务库里的阶段一致 |
+| Fusionn-Subs | `translation`、`callback` |
+
+`service_failed` 的 `stage` 写的是启动或运行中失败的环节，不是任务阶段。宿主机 Python 服务内部的 `stage`（例如 `lookup`、`asr`、`publish`）只在该服务内使用。uvicorn 自己的生命周期记录（`server_started`、`startup_complete`、`shutdown_complete`、`server_stopped`）保留与 uvicorn 原文对应的名字。
+
 ## 4. 级别和错误责任
 
 统一通过 `LOG_LEVEL` 控制，默认 INFO，不因开发环境自动开启内容片段日志。允许 DEBUG/INFO/WARN/ERROR。非法值必须有可见的启动诊断，不能悄悄关闭日志。`ALIGN_LOG_LEVEL` 仅在已有 Python／word-align 配置中作兼容别名，且只在未设置 `LOG_LEVEL` 时使用；Go 服务的环境变量只读取 `LOG_LEVEL`，不新增历史上没有的别名。文档明确适用范围与优先级。

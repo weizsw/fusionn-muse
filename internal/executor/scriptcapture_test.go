@@ -398,7 +398,7 @@ func TestScriptCaptureReportCountsWithoutReplaying(t *testing.T) {
 	var summary, sanitized string
 	for _, line := range lines {
 		switch {
-		case strings.Contains(line, "event=tool_output_summary"):
+		case strings.Contains(line, "event=tool_output "):
 			summary = line
 		case strings.Contains(line, "event=subtitle_sanitized"):
 			sanitized = line

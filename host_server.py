@@ -127,7 +127,7 @@ def _get_model() -> SentenceTransformer:
     if _model is None:
         args = MergeArgs()
         _model = load_sentence_transformer_model(args, None)
-        log.info("model_loaded", "Sentence transformer model loaded", model=args.model)
+        log.info("model_load_completed", "Sentence transformer model loaded", model=args.model)
     return _model
 
 

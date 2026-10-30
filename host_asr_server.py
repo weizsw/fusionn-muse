@@ -191,7 +191,7 @@ async def transcribe_video(payload: TranscribeRequest, response: Response, reque
             **fields,
         )
         log.debug(
-            "tool_command",
+            "tool_invocation",
             "Transcription command",
             tool="mlx-qwen3-asr",
             command=" ".join(cmd),
