@@ -273,10 +273,10 @@ func (c *scriptCapture) report(ctx context.Context, log logger.Logger) {
 		fields = append(fields, zap.Int("dropped_lines", c.dropped))
 	}
 	if c.logWarnings > 0 {
-		log.Warn(ctx, "tool_output_summary", "Child reported warnings", fields...)
+		log.Warn(ctx, "tool_output", "Child reported warnings", fields...)
 		return
 	}
-	log.Debug(ctx, "tool_output_summary", "Child output summarized", fields...)
+	log.Debug(ctx, "tool_output", "Child output summarized", fields...)
 }
 
 // unifiedHeader is the part of a unified line that carries meaning: its level,

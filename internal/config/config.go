@@ -257,7 +257,7 @@ func (m *Manager) pollForChanges(interval time.Duration) {
 			m.mu.RUnlock()
 
 			if stat.ModTime().After(lastMod) {
-				logger.Component("config").Info(context.Background(), "config_reloading",
+				logger.Component("config").Info(context.Background(), "config_reload_detected",
 					"Configuration file changed; reloading")
 				if err := m.Reload(); err != nil {
 					logger.Component("config").Error(context.Background(), "config_reload_failed",
@@ -333,10 +333,10 @@ func logChanges(old, cur any, prefix string) {
 		if !reflect.DeepEqual(oldField.Interface(), newField.Interface()) {
 			// INFO names the changed field only: the configuration values may
 			// hold an instruction, a path or a credential.
-			logger.Component("config").Info(context.Background(), "config_changed",
+			logger.Component("config").Info(context.Background(), "config_field_changed",
 				"Configuration value changed", zap.String("field", fieldName))
 			if !credentialField(fieldName) {
-				logger.Component("config").Debug(context.Background(), "config_changed_detail",
+				logger.Component("config").Debug(context.Background(), "config_field_changed_detail",
 					"Configuration value detail",
 					zap.String("field", fieldName),
 					logger.Preview(formatValue(oldField)+" -> "+formatValue(newField)))

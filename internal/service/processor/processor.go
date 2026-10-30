@@ -78,21 +78,23 @@ func pipelineProvider(cfg config.Config) string {
 	return provider
 }
 
-// stepTimer tracks timing for a processing step.
-type stepTimer struct {
+// stageTimer times one processing stage.
+type stageTimer struct {
 	ctx   context.Context
-	name  string
+	stage queue.Stage
 	start time.Time
 }
 
-func startStep(ctx context.Context, name string) *stepTimer {
-	return &stepTimer{ctx: ctx, name: name, start: time.Now()}
+func startStage(ctx context.Context, stage queue.Stage) *stageTimer {
+	return &stageTimer{ctx: ctx, stage: stage, start: time.Now()}
 }
 
-func (s *stepTimer) done() time.Duration {
+// done logs stage_completed with the same stage value as the stage_started
+// line, so the two pair up, and returns the stage's duration.
+func (s *stageTimer) done() time.Duration {
 	elapsed := time.Since(s.start)
-	logger.Component("pipeline").Info(s.ctx, "step_completed", "Pipeline step completed",
-		zap.String("step", s.name), logger.DurMs(elapsed))
+	logger.Component("pipeline").Info(s.ctx, "stage_completed", "Stage completed",
+		zap.String("stage", string(s.stage)), logger.DurMs(elapsed))
 	return elapsed
 }
 
@@ -234,7 +236,7 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 		}
 		stagingPath = filepath.Join(s.folders.Staging, job.FileName)
 		pipelineLog.Info(ctx, "stage_started", "Staging file", zap.String("stage", string(queue.StagePreparing)))
-		t := startStep(ctx, "Staging")
+		t := startStage(ctx, queue.StagePreparing)
 		if err := hardlinkOrCopyOnce(ctx, job.SourcePath, stagingPath); err != nil {
 			return "", s.handleError(ctx, "staging", err)
 		}
@@ -266,7 +268,7 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 		}
 		processingPath = filepath.Join(s.folders.Process, job.FileName)
 		pipelineLog.Info(ctx, "stage_started", "Moving to processing", zap.String("stage", string(queue.StageMoving)))
-		t := startStep(ctx, "Move to processing")
+		t := startStage(ctx, queue.StageMoving)
 		preserveStaging, err = moveToProcessing(ctx, job, stagingPath, processingPath)
 		if err != nil {
 			return "", s.handleError(ctx, "move to processing", err)
@@ -317,7 +319,7 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 			}
 			pipelineLog.Info(ctx, "stage_started", "Transcribing",
 				zap.String("stage", string(queue.StageTranscribing)), zap.String("provider", provider))
-			t := startStep(ctx, "Transcription")
+			t := startStage(ctx, queue.StageTranscribing)
 			if _, statErr := os.Stat(job.SubtitlePath); errors.Is(statErr, os.ErrNotExist) {
 				if err := job.ValidateMedia(processingPath); err != nil {
 					return "", s.handleError(ctx, "read processing media", err)
@@ -360,7 +362,7 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 			}
 			pipelineLog.Info(ctx, "stage_started", "Translating subtitle",
 				zap.String("stage", string(queue.StageTranslating)), zap.String("target_language", cfg.Translate.TargetLang))
-			t := startStep(ctx, "Translation")
+			t := startStage(ctx, queue.StageTranslating)
 			job.TranslatedPath, err = s.translateWithReceipt(ctx, job, translator)
 			if err != nil {
 				return "", s.handleError(ctx, "translation", err)
@@ -426,7 +428,7 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 				return "", s.handleError(ctx, "prepare scraping folder", err)
 			}
 			pipelineLog.Info(ctx, "stage_started", "Moving video to scraping", zap.String("stage", string(queue.StageDelivering)))
-			t := startStep(ctx, "Move to scraping")
+			t := startStage(ctx, queue.StageDelivering)
 			if err := moveOnce(ctx, processingPath, scrapingPath); err != nil {
 				return "", s.handleError(ctx, "move video to scraping", err)
 			}

@@ -190,7 +190,7 @@ func TestLLMSubtransStubSuccessWithLibraryErrorsStillSucceeds(t *testing.T) {
 		if strings.Contains(line, "event=subtitle_sanitized") {
 			sanitized++
 		}
-		if strings.Contains(line, "event=tool_output_summary") {
+		if strings.Contains(line, "event=tool_output ") {
 			summary = line
 		}
 		for _, replayed := range []string{"logger=PySubtrans", "logger=httpx", "你好"} {

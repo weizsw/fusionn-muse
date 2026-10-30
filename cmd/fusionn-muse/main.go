@@ -117,7 +117,7 @@ func main() {
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			appLog.Error(ctx, "server_failed", "HTTP server stopped unexpectedly", zap.Error(err))
+			appLog.Error(ctx, "service_failed", "HTTP server stopped unexpectedly", zap.String("stage", "listen"), zap.Error(err))
 			os.Exit(1)
 		}
 	}()
@@ -148,7 +148,7 @@ func main() {
 		appLog.Error(shutdownCtx, "shutdown_failed", "HTTP server shutdown failed", zap.Error(err))
 	}
 
-	appLog.Info(ctx, "shutdown_complete", "Service stopped")
+	appLog.Info(ctx, "service_stopped", "Service stopped")
 }
 
 // fatal records a startup failure and stops the process with a non-zero exit
