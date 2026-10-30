@@ -774,6 +774,40 @@ func TestNotificationsIncludeJobID(t *testing.T) {
 	}
 }
 
+// The failure notification leaves the service, so its error text is redacted
+// like a log line.
+func TestFailureNotificationRedactsTheError(t *testing.T) {
+	bodies := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request apprise.NotifyRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode notification: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		bodies <- request.Body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := apprise.NewClient(config.AppriseConfig{Enabled: true, BaseURL: server.URL, Key: "test"})
+	svc := Service{apprise: client}
+	job := queue.NewJob("d4e79fec-d17d-48bd-82e0-c064c6bc80e1", "/tmp/movie.mp4", "movie.mp4", "", "")
+
+	svc.NotifyFailure(context.Background(), job, queue.StageTranslating,
+		errors.New("provider rejected the request: api_key=sk-live-123456 token=abcdef"))
+
+	body := <-bodies
+	if strings.Contains(body, "sk-live-123456") || strings.Contains(body, "abcdef") {
+		t.Fatalf("notification leaks a credential: %q", body)
+	}
+	for _, want := range []string{"Error: provider rejected the request: api_key=***", "token=***"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("notification body = %q, want %q", body, want)
+		}
+	}
+}
+
 func TestNewUsesProvidedFolders(t *testing.T) {
 	root := t.TempDir()
 	cfgMgr := newTestConfigManager(t, root, "")
