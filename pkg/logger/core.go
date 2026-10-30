@@ -20,7 +20,7 @@ type lineCore struct {
 	with    []zapcore.Field
 }
 
-func newLineCore(service string, lvl Level, out zapcore.WriteSyncer) *lineCore {
+func newLineCore(service string, lvl zapcore.LevelEnabler, out zapcore.WriteSyncer) *lineCore {
 	return &lineCore{service: service, lvl: lvl, out: zapcore.Lock(out)}
 }
 

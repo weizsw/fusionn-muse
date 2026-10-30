@@ -3,6 +3,11 @@
 # ════════════════════════════════════════════════════════════════════════════
 # Subtitle transcription and translation pipeline for qBittorrent
 
+# Log level: DEBUG, INFO, WARN or ERROR. It overrides LOG_LEVEL and takes
+# effect within 10 seconds of saving this file, without a restart. Leave it
+# empty to use LOG_LEVEL (default INFO).
+log_level: ""
+
 server:
   port: 8080
 

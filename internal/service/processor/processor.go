@@ -284,7 +284,8 @@ func (s *Service) process(ctx context.Context, job *queue.Job, singleStage bool)
 			detected, detectErr := s.detectHardSubtitle(ctx, processingPath)
 			if detectErr != nil {
 				pipelineLog.Warn(ctx, "hard_sub_detection_failed", "Hard-sub detection failed; continuing without it",
-					zap.String("file", job.FileName), zap.Error(detectErr))
+					zap.String("file", job.FileName), zap.Error(detectErr),
+					logger.FailureDetail(toolrun.FailureOutput(detectErr)))
 			} else if detected {
 				hasChineseSub = true
 				job.IsLight = true

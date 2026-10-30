@@ -19,6 +19,8 @@ import (
 
 // Config holds all configuration for the application.
 type Config struct {
+	// LogLevel overrides LOG_LEVEL at run time; see logger.SetConfigLevel.
+	LogLevel    string            `mapstructure:"log_level"`
 	Server      ServerConfig      `mapstructure:"server"`
 	Pipeline    PipelineConfig    `mapstructure:"pipeline"`
 	Whisper     WhisperConfig     `mapstructure:"whisper"`
