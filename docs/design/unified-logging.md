@@ -23,12 +23,12 @@
 ## 3. 单行文本格式
 
 ```text
-2026-07-01T14:20:03.456+08:00 WARN component=translator event=translation_retry job_id=abc error="provider timeout" retry=1 retry_after_ms=2000 msg="Translation will retry"
+2026-07-01T14:20:03.456 WARN component=translator event=translation_retry job_id=abc error="provider timeout" retry=1 retry_after_ms=2000 msg="Translation will retry"
 ```
 
 ### 基础规则
 
-1. 时间为 `YYYY-MM-DDTHH:mm:ss.SSS+08:00`。在格式化器内转换为固定 UTC+8，不为日志修改全局 `TZ`，不影响业务计时或配额重置。
+1. 时间为 `YYYY-MM-DDTHH:mm:ss.SSS`，不带时区后缀。时区由 `TZ` 环境变量决定，Docker 部署在 compose 的 `environment` 里设置；没有设置时用 `Asia/Shanghai`。`TZ` 指向不存在的时区时也用 `Asia/Shanghai`，并记一条 WARN `config_invalid`，带 `tz` 字段。系统没有时区数据库时，`Asia/Shanghai` 按固定 UTC+8 处理（该时区 1991 年起没有夏令时）。日志代码只读取 `TZ`，不修改它。
 2. 级别统一为 `DEBUG`、`INFO`、`WARN`、`ERROR`。Python 的 WARNING 映射为 WARN。致命启动错误记录 ERROR，再由程序退出；不能因此改变退出码。
 3. 每条应用事件恰好一个物理行。换行、回车、制表符和控制字符必须转义，不能靠多行缩进表达事件结构。
 4. 不含 emoji、树形缩进、ANSI 清屏、进度条或纯装饰分隔行。首版不输出颜色，保证终端与收集结果一致。启动时的项目 ASCII banner 例外：每次启动打印一次，并显示版本与实际生效的日志等级；其余业务事件仍遵守单行规则。
@@ -41,10 +41,10 @@
 ### 样例事件
 
 ```text
-2026-07-01T14:20:01.123+08:00 INFO component=worker event=job_started job_id=abc msg="Job started"
-2026-07-01T14:20:02.123+08:00 INFO component=translator event=tool_started job_id=abc tool=llm-subtrans msg="Translation tool started"
-2026-07-01T14:20:03.456+08:00 WARN component=translator event=translation_retry job_id=abc error="provider timeout" retry=1 retry_after_ms=2000 msg="Translation will retry"
-2026-07-01T14:21:00.789+08:00 ERROR component=worker event=job_failed job_id=abc stage=translation error="retries exhausted" msg="Job failed"
+2026-07-01T14:20:01.123 INFO component=worker event=job_started job_id=abc msg="Job started"
+2026-07-01T14:20:02.123 INFO component=translator event=tool_started job_id=abc tool=llm-subtrans msg="Translation tool started"
+2026-07-01T14:20:03.456 WARN component=translator event=translation_retry job_id=abc error="provider timeout" retry=1 retry_after_ms=2000 msg="Translation will retry"
+2026-07-01T14:21:00.789 ERROR component=worker event=job_failed job_id=abc stage=translation error="retries exhausted" msg="Job failed"
 ```
 
 事件名应表达已经发生的事实，例如 `service_started`、`config_reloaded`、`job_received`、`job_started`、`stage_completed`、`job_completed`、`job_failed`、`job_linked`、`translation_retry`、`tool_started`、`tool_completed`、`request_completed`。不要求为所有普通诊断消息建大枚举，但关键生命周期事件必须可按 event 检索。

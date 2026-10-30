@@ -36,11 +36,12 @@ const (
 // unifiedLine is the header every line of the script's own display output
 // starts with: timestamp, level, its component and the event name. The service
 // field was removed from the format, so the legacy prefix is optional and
-// accepted only with this service's name; a foreign service never matches. Only
-// the header is matched, never a quoted value, so text inside a preview or a
-// message can never be read as an event.
+// accepted only with this service's name; a foreign service never matches. The
+// timestamp no longer carries an offset; the offset that older releases wrote
+// is still accepted. Only the header is matched, never a quoted value, so text
+// inside a preview or a message can never be read as an event.
 var unifiedLine = regexp.MustCompile(
-	`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2} (DEBUG|INFO|WARN|ERROR) (?:service=` +
+	`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(?:[+-]\d{2}:\d{2})? (DEBUG|INFO|WARN|ERROR) (?:service=` +
 		regexp.QuoteMeta(scriptServiceName) + ` )?component=` + regexp.QuoteMeta(scriptComponentName) +
 		` event=(\S+)(?: |$)`,
 )

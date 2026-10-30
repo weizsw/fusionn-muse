@@ -12,11 +12,9 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// fixedZone is the fixed UTC+8 zone used for log timestamps only. It never
-// touches the process TZ or business timing.
-var fixedZone = time.FixedZone("UTC+8", 8*3600)
-
-const timeLayout = "2006-01-02T15:04:05.000-07:00"
+// timeLayout renders a timestamp as wall time without an offset. The core
+// converts the time to its log zone first (see logZone).
+const timeLayout = "2006-01-02T15:04:05.000"
 
 // correlation holds the identity fields carried by context.Context. They are
 // rendered in a fixed order and may never be overridden by free-form fields.
@@ -70,6 +68,7 @@ type kv struct {
 //
 // It is the single render path for all output; golden tests call it directly.
 func renderLine(now time.Time, lvl Level, _ string, with, call []zapcore.Field, msg string) string {
+	loc := now.Location()
 	component := "app"
 	event := "log_message"
 	compSet, eventSet := false, false
@@ -82,17 +81,17 @@ func renderLine(now time.Time, lvl Level, _ string, with, call []zapcore.Field, 
 	collect := func(f zapcore.Field) {
 		switch f.Key {
 		case "component":
-			if s, ok := zstring(f); ok && !compSet {
+			if s, ok := zstring(f, loc); ok && !compSet {
 				component, compSet = s, true
 			}
 			return
 		case "event":
-			if s, ok := zstring(f); ok && !eventSet {
+			if s, ok := zstring(f, loc); ok && !eventSet {
 				event, eventSet = s, true
 			}
 			return
 		case "job_id", "submission_id", "attempt_id", "request_id", "parent_job_id":
-			s, ok := zstring(f)
+			s, ok := zstring(f, loc)
 			if !ok {
 				return
 			}
@@ -128,7 +127,7 @@ func renderLine(now time.Time, lvl Level, _ string, with, call []zapcore.Field, 
 			for _, pk := range positionalKeys {
 				if f.Key == pk {
 					if _, dup := positional[pk]; !dup {
-						if s, ok := zstring(f); ok {
+						if s, ok := zstring(f, loc); ok {
 							positional[pk] = s
 						}
 					}
@@ -148,9 +147,9 @@ func renderLine(now time.Time, lvl Level, _ string, with, call []zapcore.Field, 
 			if f.Key == "preview" && lvl != DEBUG {
 				return
 			}
-			s, ok := zstring(f)
+			s, ok := zstring(f, loc)
 			if !ok {
-				s = fmt.Sprint(zvalue(f))
+				s = fmt.Sprint(zvalue(f, loc))
 			}
 			limit := previewMaxRunes
 			switch f.Key {
@@ -172,7 +171,7 @@ func renderLine(now time.Time, lvl Level, _ string, with, call []zapcore.Field, 
 			extras = append(extras, kv{f.Key, "***"})
 			return
 		}
-		extras = append(extras, kv{f.Key, zvalue(f)})
+		extras = append(extras, kv{f.Key, zvalue(f, loc)})
 	}
 	for _, f := range with {
 		collect(f)
@@ -194,7 +193,7 @@ func renderLine(now time.Time, lvl Level, _ string, with, call []zapcore.Field, 
 
 	var b strings.Builder
 	b.Grow(160)
-	b.WriteString(now.In(fixedZone).Format(timeLayout))
+	b.WriteString(now.Format(timeLayout))
 	b.WriteByte(' ')
 	b.WriteString(displayLevel(lvl))
 	b.WriteString(" component=")
@@ -245,8 +244,9 @@ func displayLevel(l zapcore.Level) string {
 	return l.CapitalString()
 }
 
-// zvalue extracts a renderable Go value from a zapcore.Field.
-func zvalue(f zapcore.Field) any {
+// zvalue extracts a renderable Go value from a zapcore.Field. A time renders as
+// wall time in loc, the zone of the line's timestamp.
+func zvalue(f zapcore.Field, loc *time.Location) any {
 	switch f.Type {
 	case zapcore.StringType:
 		return f.String
@@ -271,7 +271,7 @@ func zvalue(f zapcore.Field) any {
 		}
 		return fmt.Sprint(f.Interface)
 	case zapcore.TimeType, zapcore.TimeFullType:
-		return time.Unix(0, f.Integer).In(fixedZone).Format(timeLayout)
+		return time.Unix(0, f.Integer).In(loc).Format(timeLayout)
 	default:
 		// ReflectType and anything else is stringified at render time.
 		if f.Interface != nil {
@@ -281,8 +281,8 @@ func zvalue(f zapcore.Field) any {
 	}
 }
 
-func zstring(f zapcore.Field) (string, bool) {
-	switch v := zvalue(f).(type) {
+func zstring(f zapcore.Field, loc *time.Location) (string, bool) {
+	switch v := zvalue(f, loc).(type) {
 	case string:
 		return v, true
 	case int64:

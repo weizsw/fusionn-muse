@@ -18,6 +18,7 @@ Optional environment variables (the defaults are the constants below):
     MUSE_URL    fusionn-muse base URL
     LOG_FILE    file that the log lines are appended to
     LOG_LEVEL   DEBUG, INFO, WARN or ERROR; the default is INFO
+    TZ          time zone of the log timestamps; the default is Asia/Shanghai
 
 The log lines use the unified format of docs/design/unified-logging.md. They go
 to stderr and are appended to LOG_FILE; stdout stays empty. Every line of a run
@@ -36,6 +37,7 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
+import zoneinfo
 
 MUSE_URL = os.environ.get("MUSE_URL", "http://192.168.50.135:4444")
 LOG_FILE = os.environ.get("LOG_FILE", "/tmp/torrent-complete.log")
@@ -53,8 +55,12 @@ MAX_RESPONSE_BYTES = 65536
 
 COMPONENT = "torrent-complete"
 
-# Log timestamps are fixed UTC+8; the host TZ is not changed.
-_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+# A log timestamp is wall time in the zone that TZ names, or in Asia/Shanghai
+# when TZ is unset or names no known zone; it carries no offset. Asia/Shanghai
+# has had no daylight saving time since 1991, so a fixed UTC+8 stands in for it
+# where the system has no zone database.
+_DEFAULT_ZONE = "Asia/Shanghai"
+_DEFAULT_ZONE_FALLBACK = datetime.timezone(datetime.timedelta(hours=8))
 
 DEBUG, INFO, WARN, ERROR = 10, 20, 30, 40
 _LEVELS = {"DEBUG": DEBUG, "INFO": INFO, "WARN": WARN, "WARNING": WARN, "ERROR": ERROR}
@@ -132,10 +138,36 @@ def format_value(value):
     return '"%s"' % _escape(text)
 
 
+def _load_zone(name):
+    """Return the zone named name, or None when this system does not know it."""
+    if name == "UTC":
+        return datetime.timezone.utc
+    try:
+        return zoneinfo.ZoneInfo(name)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError, OSError):
+        return None
+
+
+def resolve_zone():
+    """Return (zone, invalid TZ value or None) from TZ; the default is Asia/Shanghai."""
+    raw = os.environ.get("TZ", "")
+    name = raw.strip()
+    if name.startswith(":"):
+        name = name[1:]
+    invalid = None
+    if name and name != _DEFAULT_ZONE:
+        zone = _load_zone(name)
+        if zone is not None:
+            return zone, None
+        invalid = raw
+    return _load_zone(_DEFAULT_ZONE) or _DEFAULT_ZONE_FALLBACK, invalid
+
+
 def format_timestamp(moment=None):
-    """Render a time as YYYY-MM-DDTHH:MM:SS.SSS+08:00."""
-    moment = datetime.datetime.now(_UTC8) if moment is None else moment.astimezone(_UTC8)
-    return "%s.%03d+08:00" % (moment.strftime("%Y-%m-%dT%H:%M:%S"), moment.microsecond // 1000)
+    """Render a time as YYYY-MM-DDTHH:MM:SS.SSS in the log zone (see resolve_zone)."""
+    zone, _ = resolve_zone()
+    moment = datetime.datetime.now(zone) if moment is None else moment.astimezone(zone)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f")[:23]
 
 
 def format_line(level, event, msg, fields, moment=None):
@@ -303,6 +335,9 @@ def main(argv):
     log.ids["request_id"] = request_id
     if invalid_level is not None:
         log.warn("config_invalid", "Invalid LOG_LEVEL, using INFO", log_level=invalid_level)
+    _, invalid_tz = resolve_zone()
+    if invalid_tz is not None:
+        log.warn("config_invalid", "Unknown TZ, using Asia/Shanghai for log timestamps", tz=invalid_tz)
 
     if len(argv) < 5:
         log.error(
