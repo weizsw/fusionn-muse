@@ -746,7 +746,9 @@ func (s *Service) NotifyFailure(ctx context.Context, job *queue.Job, stage queue
 	}
 
 	title := "❌ Subtitle Processing Failed"
-	body := fmt.Sprintf("**%s**\nJob ID: %s\nFailed at: %s\nError: %v", job.FileName, job.ID, stage, err)
+	// The error goes to every notification target, so it is redacted like a
+	// log line.
+	body := fmt.Sprintf("**%s**\nJob ID: %s\nFailed at: %s\nError: %s", job.FileName, job.ID, stage, logger.Redact(err.Error()))
 
 	if notifyErr := s.apprise.NotifyError(ctx, title, body); notifyErr != nil {
 		logger.Component("pipeline").Warn(ctx, "notification_failed", "Failure notification could not be sent", zap.Error(notifyErr))
