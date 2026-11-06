@@ -7,23 +7,24 @@
 ## 一、平台支持现状客观说明
 
 | 模块 / 环节 | Linux 运行状态 | 说明 |
-|------------|--------------|------|
-| **Muse 核心服务** (Go + 队列调度) |  完全原生支持 | 标准 Docker 容器化运行，支持 x86_64 与 arm64 |
-| **媒体扫描与过滤** (广告过滤/番号提取/ISO合并) |  完全原生支持 | 依赖容器内内置的 ffmpeg 与 ffprobe，无平台依赖 |
-| **中文字幕检测** (文件名/外挂/内嵌) |  完全原生支持 | 纯文本与 ffprobe 流元数据检测 |
-| **硬字幕 OCR 检出** (RapidOCR) |  完全原生支持 | 基于 CPU ONNX Runtime，容器内独立执行，支持 Linux |
-| **LLM 字幕翻译** (PySubtrans Custom Server) |  完全原生支持 | 容器内直接发起 HTTP 翻译请求至外部 OpenAI 兼容端点 |
-| **下游联动** (mdc-ng / 115strm / Emby) |  完全原生支持 | 纯标准目录监控与文件流转 |
-| **本地语音转录 (ASR)** | ⚠️ **专项调研适配中** | 当前生产实测方案基于 macOS Apple Silicon 的 MLX 框架。Linux 平台无法运行 MLX，适配工作正在独立调查推进中。 |
+|:---|:---:|:---|
+| **Muse 核心服务** (Go + 任务队列调度) |  完全原生支持 | 标准 Docker 容器化运行，支持 x86_64 与 arm64 |
+| **媒体扫描与过滤** (广告过滤/番号提取/多段合并/ISO提取) |  完全原生支持 | 基于容器内置的 ffmpeg 与 ffprobe，无宿主平台依赖 |
+| **中文字幕智能检测** (文件名/外挂/内嵌字幕流) |  完全原生支持 | 纯文本与 ffprobe 媒体流元数据检测 |
+| **硬字幕 OCR 覆盖率判定** (RapidOCR) |  完全原生支持 | 基于 CPU ONNX Runtime，容器内执行，用于检测是否已有硬字幕 |
+| **LLM 字幕翻译引擎** (PySubtrans) |  完全原生支持 | 容器内向外部 OpenAI 兼容端点发起 HTTP 请求 |
+| **下游影视联动** (mdc-ng / 115strm / Emby) |  完全原生支持 | 标准目录监控与文件流转 |
+| **本地语音转录 (ASR)** | ⚠️ **专项开发进行中** | 当前生产实测方案基于 macOS Apple Silicon 的 MLX 框架。Linux 平台（首批覆盖 NVIDIA GPU 与纯 CPU）转录适配正在专项推进中。 |
 
-> **Linux 语音转录现状说明**：
-> macOS 上的超低延迟与低资源消耗得益于 Apple Silicon 的统一内存架构与 MLX 框架。对于 Linux 平台，官方正在进行独立的 ASR 适配调查，评估包括容器化/宿主机部署的 **Faster-Whisper**、**Whisper.cpp**、**FunASR** 或 **vLLM / Qwen-ASR** 等方案。在官方 Linux ASR 模块正式发布之前，Linux 用户可参考下文的部署方案。
+> **特别说明（重要机制）**：
+> 1. **硬字幕 OCR 的真实行为**：内置的 RapidOCR 仅用于抽样检测视频是否已压制充分的中文字幕。**一旦检测命中，Muse 会判定视频已有中文字幕，直接跳过转录与翻译，将视频交付至 `scraping` 目录供下游刮削**；OCR 模块**并不提取文字内容进行翻译**。
+> 2. **转录依赖**：对于无中文字幕的生肉视频，Muse 必须调用 ASR 转录服务。当前内置客户端 `mlx_qwen3_asr` 调用的是专有的 `/transcribe` 文件路径协议（由 macOS 宿主机 `host_asr_server.py` 实现），不兼容 OpenAI Whisper API。因此在当前版本中，缺少中文字幕的视频在 Linux 下尚无法在本地完成转录。
 
 ---
 
 ## 二、当前 Linux 用户的部署与使用方式
 
-在 Linux 环境下，用户可以非常顺畅地使用 Muse 处理**硬字幕检测过滤**、**已有字幕翻译**以及**多媒体自动化流转**。
+在当前版本中，Linux 用户可使用 Muse 运行**媒体准备、广告过滤、多段合并、ISO提取，以及已压制中文字幕的智能识别与自动放行流转**。
 
 ### 1. 目录架构规划
 
@@ -46,10 +47,10 @@
     └── adults/                # Emby 媒体库目录
 ```
 
-在终端快速创建目录结构：
+在终端创建目录结构：
 
 ```bash
-STORAGE_ROOT="/mnt/storage"  # 替换为你的实际路径
+STORAGE_ROOT="/mnt/storage"  # 替换为你的实际物理存储根路径
 
 mkdir -p "${STORAGE_ROOT}/torrents/whisparr"
 mkdir -p "${STORAGE_ROOT}/automation/"{staging,processing,scraping,finished,subtitles,transcriptions,meta,failed}
@@ -78,8 +79,6 @@ services:
       - PUID=1000
       - PGID=1000
       - LOG_LEVEL=info
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     logging:
       driver: json-file
       options:
@@ -89,8 +88,6 @@ services:
 
 ### 3. 配置 `config.yaml`
 
-如果视频已有内嵌/外挂字幕或硬编码字幕，Muse 会自动通过 OCR 检出并直接送入翻译或刮削交付，无需调用本地 ASR：
-
 ```yaml
 server:
   port: 8080
@@ -98,7 +95,6 @@ server:
 pipeline:
   provider: "mlx_qwen3_asr"
 
-# 若 Linux 宿主机架设了兼容的转录服务代理（返回 SRT 路径），可指向宿主机网关
 mlx_qwen3_asr:
   server_url: "http://host.docker.internal:8766"
   host_prefix: "/mnt/storage"
@@ -108,7 +104,7 @@ mlx_qwen3_asr:
   timeout_minutes: 180
 
 translate:
-  provider: "openai"              # 或 "custom" / "deepseek"
+  provider: "openai"              # 支持 openai, deepseek, siliconcloud, custom 等
   model: "gpt-4o-mini"
   api_key: "sk-your-api-key"
   target_lang: "Simplified Chinese"
@@ -122,7 +118,7 @@ llm_subtrans:
   min_batch_size: 10
   max_batch_size: 100
 
-# 开启硬字幕检测（关键：自动识别已有中文字幕，避免无谓转录）
+# 开启硬字幕检测（关键：自动识别已有中文字幕并直接放行交付至 scraping）
 hard_sub_ocr:
   enabled: true
 
@@ -132,26 +128,28 @@ queue:
   retry_delay_ms: 10000
 ```
 
-### 4. 启动服务与检查
+> **注意**：若处理的媒体未检出中文字幕，流水线将尝试请求 `mlx_qwen3_asr.server_url` 进行转录。因当前 Linux 尚未搭载该服务，生肉视频任务会报错并等待后续 Linux ASR 模块。
+
+### 4. 启动服务与连通性验证
 
 ```bash
 docker compose up -d
 
-# 检查健康状态
+# 检查健康状态接口
 curl -s http://127.0.0.1:4444/api/v1/health
 ```
 
 ---
 
-## 三、后续 Linux ASR 演进规划
+## 三、首批 Linux ASR 演进路线（确定范围）
 
-对于无字幕生肉视频的本地转录，团队正在评估以下 Linux 适配路线：
+根据项目规划，首批 Linux ASR 转录适配将**同时覆盖 NVIDIA GPU 与纯 CPU 硬件**，具体方案包括：
 
-1. **容器化 Whisper 方案**：
-   - 使用 `faster-whisper` 或 `whisper.cpp` 封装为轻量级独立 Sidecar 容器。
-   - 支持 NVIDIA CUDA 硬件加速以及纯 CPU 多线程转录。
-2. **国产模型方案 (FunASR / Qwen ASR GPU)**：
-   - 适配对中日双语及成人专有名词理解力更强的国产开源语音模型。
-   - 提供标准 Dockerfile 与 docker-compose 模板，支持一键拉起。
+1. **NVIDIA GPU 方案**：
+   - 基于官方 Qwen3-ASR 或 Faster-Whisper GPU 运行时，利用 CUDA 核心实现高并发高速转录。
+   - 适配标准 `/transcribe` 服务接口协议，与 Muse 无缝对接。
+2. **纯 CPU 方案**：
+   - 针对无独显的 Linux NAS / 软路由设备，集成 `faster-whisper` 多线程 CPU 推理。
+   - 自动适配 CPU 核心数与轻量量化模型（如 `base` / `small`），保障低资源占用。
 
-适配完成后，官方将更新发布支持 Linux 本地 GPU/CPU 转录的一键配置方案与预构建镜像。
+相关方案已完成前期技术调研（见 `docs/research/linux-transcription.md`），即将在后续任务中正式编码落地并交付实测。

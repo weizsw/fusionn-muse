@@ -45,6 +45,11 @@ docker --version && docker compose version
 python3 --version
 ```
 
+> **系统支持边界检查（重要）**：
+> 当前版本的一键全流程自动部署**仅支持搭载 Apple Silicon 芯片（M1/M2/M3/M4，`arm64` 架构）的 macOS 宿主机**。
+> - 如果检测到宿主机为 **Linux** 或 Intel 芯片 macOS：Agent **必须明确向用户说明**：面向 Linux 平台（涵盖 NVIDIA GPU 与纯 CPU）的原生 ASR 语音转录适配正在专项开发推进中；当前 Linux 仅支持已有中文字幕视频的检测放行与流转，无法直接部署全功能转录。**切勿在 Linux 上跳过 ASR 配置后继续生成无效的 MLX ASR 指向并向用户误报完整部署成功**。
+> - 如果检测到系统为 Apple Silicon macOS，则继续推进全自动部署流程。
+
 **与用户交互确认**（若未预先提供）：
 - 媒体存储根目录路径（`MEDIA_ROOT`，如 `/Volumes/External`）。
 - 翻译服务类型（如 DeepSeek, OpenAI, SiliconCloud 等）及 `API_KEY`。
@@ -235,7 +240,7 @@ docker compose up -d
 
 ### Phase 7: 自动化全链路健康检查循环 (Verification Loop)
 
-Agent 必须在终端运行并验证以下全部检查项：
+Agent 必须在终端运行并验证以下全部检查项，明确区分接口投递检查与端到端真实处理验证：
 
 1. **Muse 容器连通性**：
    ```bash
@@ -249,21 +254,37 @@ Agent 必须在终端运行并验证以下全部检查项：
    # 预期 HTTP 200: {"status":"healthy","service":"host-asr"}
    ```
 
-3. **Webhook 模拟投递测试**：
+3. **Webhook 接口投递与持久化校验 (Ingress Check)**：
    ```bash
-   python3 ${HOME}/Development/scripts/torrent_complete.py \
+   # 执行投递并提取返回的 submission_id
+   OUTPUT=$(python3 ${HOME}/Development/scripts/torrent_complete.py \
      "Test-Verification" \
      "whisparr" \
      "test-probe-001" \
-     "{{MEDIA_ROOT}}/torrents/whisparr/test.mp4"
-   # 预期退出码 0，并输出 Accepted submission: <id>
+     "{{MEDIA_ROOT}}/torrents/whisparr/test.mp4")
+   echo "${OUTPUT}"
+   # 提取并验证 Submission 记录入库状态：
+   SUBMISSION_ID=$(echo "${OUTPUT}" | grep -o 'Accepted submission: [^ ]*' | awk '{print $3}')
+   if [ -n "${SUBMISSION_ID}" ]; then
+     curl -s "http://127.0.0.1:{{HOST_PORT}}/api/v1/tasks/submission/${SUBMISSION_ID}" | grep -q "${SUBMISSION_ID}"
+     echo "Webhook 通道与持久化验证通过 (Submission ID: ${SUBMISSION_ID})"
+   fi
    ```
+   > **注意**：由于上述测试未提供真实视频文件，后台扫描阶段会将其标记为文件不存在，**该测试仅能证明 Webhook 接收与 SQLite 入库正常，不能证明 ASR 转录和 LLM 翻译正常**。
 
-4. **任务持久化状态验证**：
-   ```bash
-   curl -s http://127.0.0.1:{{HOST_PORT}}/api/v1/tasks | grep -q "tasks"
-   # 确认任务已正确持久化入 SQLite 数据库
-   ```
+4. **端到端真实处理完整性验证指引 (End-to-End Real Sample Verification)**：
+   Agent 应向用户说明完整的端到端验证标准：
+   - 用户或 Agent 在 `{{MEDIA_ROOT}}/torrents/whisparr/` 下放入一个真实存在的番号视频样本（例如 `SNOS-411.mp4`，文件大小必须 >200MB 以免被广告过滤规则跳过）。
+   - 执行 Webhook 投递：
+     ```bash
+     python3 ${HOME}/Development/scripts/torrent_complete.py \
+       "SNOS-411" "whisparr" "real-hash" "{{MEDIA_ROOT}}/torrents/whisparr/SNOS-411.mp4"
+     ```
+   - 轮询等待任务状态变为 `completed`：
+     ```bash
+     curl -s "http://127.0.0.1:{{HOST_PORT}}/api/v1/tasks/job/SNOS-411" | grep -q '"status":"completed"'
+     ```
+   - 核对最终物理交付物：确认 `{{MEDIA_ROOT}}/automation/scraping/` 目录下同时生成了视频文件和非空的 `.zh-CN.srt` 中文字幕文件。只有产物全部就绪，才代表端到端处理完全成功。
 
 ---
 

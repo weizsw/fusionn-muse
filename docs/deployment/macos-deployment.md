@@ -322,12 +322,16 @@ services:
 
 ---
 
-## 六、端到端全链路冒烟测试
+## 六、分级冒烟测试与全链路验证
 
-你可以无需等待真实下载完成，在终端直接发起一次模拟测试：
+部署完成后，请按以下两个层级进行验证，切勿仅凭 Webhook 返回 202 就判定全链路部署成功：
+
+### 级别 1：接口投递与 Webhook 连通性测试
+
+此阶段仅验证 qBittorrent 脚本、网络连通性与 SQLite 入库：
 
 ```bash
-# 模拟执行 qB 完成回调脚本
+# 执行回调脚本测试投递
 python3 /Users/your-username/Development/scripts/torrent_complete.py \
   "SNOS-411" \
   "whisparr" \
@@ -335,17 +339,42 @@ python3 /Users/your-username/Development/scripts/torrent_complete.py \
   "/Volumes/External/torrents/whisparr/SNOS-411.mp4"
 ```
 
-查看执行结果：
-1. 终端应输出 `Accepted submission: <submission_id>`。
-2. 访问 Muse 任务中心查看任务实时进度：
+1. **终端输出**：应显示 `Accepted submission: <submission_id>`。
+2. **查询 Submission 入库状态**：
    ```bash
-   curl -s http://127.0.0.1:4444/api/v1/tasks | jq .
+   curl -s http://127.0.0.1:4444/api/v1/tasks/submission/<submission_id> | jq .
    ```
-3. 查看容器日志跟踪执行过程：
+   确认返回包含正确的 `submission_id`。
+   > **注意**：如果该路径下的物理文件并不存在，Submission 提交后后台准备阶段会将其判定为文件不存在而终止。**此测试仅证明 Webhook 接收通道通畅，不能证明 ASR 转录与 LLM 翻译正常。**
+
+### 级别 2：端到端真实媒体全链路验证
+
+为了彻底检验媒体扫描、宿主机 ASR、容器内 LLM 翻译与产物交付全流程，请使用真实媒体样本进行端到端测试：
+
+1. **准备有效样本文件**：
+   在下载目录放置一个带有标准番号的真实视频文件（例如 `/Volumes/External/torrents/whisparr/SNOS-411.mp4`）。
+   > **重要提醒**：文件大小需大于 200MB，否则会被内置广告过滤器识别为 sample/广告片直接剔除。
+2. **发起 Webhook 投递**：
    ```bash
-   docker compose logs -f fusionn-muse
+   python3 /Users/your-username/Development/scripts/torrent_complete.py \
+     "SNOS-411" \
+     "whisparr" \
+     "mock-hash-real" \
+     "/Volumes/External/torrents/whisparr/SNOS-411.mp4"
    ```
-4. 查看宿主机 ASR 服务日志：
+3. **轮询观察任务流水线状态**：
+   通过番号代码查询任务详情与阶段：
    ```bash
-   tail -f /tmp/host-asr.log
+   curl -s http://127.0.0.1:4444/api/v1/tasks/job/SNOS-411 | jq '{status: .task.status, stage: .task.stage}'
    ```
+   流水线将依次经历：`stage: "transcribing"`（宿主机 MLX ASR 转录）➔ `stage: "translating"`（PySubtrans LLM 翻译）➔ 最终状态变为 `status: "completed"`。
+4. **验证物理交付产物**：
+   检查输出目录 `/Volumes/External/automation/scraping/`：
+   ```bash
+   ls -la /Volumes/External/automation/scraping/
+   ```
+   **判定成功标准**：
+   - 存在规范命名的视频文件（如 `SNOS-411.mp4`）。
+   - 存在对应的同名中文字幕文件（如 `SNOS-411.zh-CN.srt` 或 `SNOS-411.srt`）。
+   - 字幕文件内容非空，且包含时间戳和由 LLM 翻译的地道中文内容。
+   只有完成上述检查，才证明整套转录与翻译流水线已完全具备生产交付能力！

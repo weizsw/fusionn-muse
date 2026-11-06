@@ -91,7 +91,7 @@
 
 ### 2. Linux —— 【架构说明与演进规划】
 - **当前运行状态**：Muse 核心容器、任务队列、媒体准备、中文字幕检测、RapidOCR（CPU ONNX）硬字幕检测与 LLM 翻译均**完全支持 Linux 原生运行**。
-- **语音转录说明**：因 Linux 不支持 Apple MLX 框架，官方目前正在进行独立的 Linux ASR 方案调研（评估容器化/宿主机部署 Faster-Whisper, Whisper.cpp, FunASR, vLLM 等路线）。在独立调查结果落地前，Linux 用户可直接使用 Muse 运行已有字幕检出过滤、硬字幕 OCR 提取翻译，或接入外部 OpenAI Whisper 兼容端点。
+- **语音转录说明**：因 Linux 无法运行 Apple MLX 框架，针对 Linux（涵盖 NVIDIA GPU 与纯 CPU 硬件）的 ASR 转录适配正在专项开发推进中。当前版本下，Muse 在 Linux 上支持媒体准备过滤与中文字幕智能检出（对于已包含中文字幕的视频直接放行交付至 `scraping` 目录供下游刮削）；对于缺少中文字幕需进行语音转录的视频，当前版本尚无法在 Linux 本地完成 ASR 转录（推荐在 macOS Apple Silicon 上部署全功能版本）。
 - **详尽说明**：参见 [Linux 部署与架构说明](docs/deployment/linux-deployment.md)。
 
 ---
@@ -323,4 +323,4 @@ make docker
 
 ## 开源协议
 
-本项目采用 [MIT License](LICENSE) 许可证开源。
+本项目采用 [GNU General Public License v3.0 (GPL-3.0)](LICENSE) 许可证开源。

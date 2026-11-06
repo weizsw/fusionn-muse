@@ -24,6 +24,8 @@ import logfmt  # noqa: E402
 
 
 def install_stubs():
+    if "fastapi" in sys.modules and "fastapi.responses" in sys.modules:
+        return sys.modules["fastapi"]
     fastapi = types.ModuleType("fastapi")
 
     class Request:
@@ -70,8 +72,10 @@ def install_stubs():
         def post(self, path, **_kwargs):
             return self._route("POST", path)
 
+    responses = types.ModuleType("fastapi.responses")
+    responses.JSONResponse = JSONResponse
+    fastapi.responses = responses
     fastapi.FastAPI = FastAPI
-    fastapi.JSONResponse = JSONResponse
     fastapi.Request = Request
     fastapi.Response = Response
 
@@ -94,6 +98,7 @@ def install_stubs():
     pydantic.BaseModel = BaseModel
 
     sys.modules["fastapi"] = fastapi
+    sys.modules["fastapi.responses"] = responses
     sys.modules["uvicorn"] = uvicorn
     sys.modules.setdefault("pydantic", pydantic)
     return fastapi
@@ -359,6 +364,11 @@ class HostASRLoggingTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertIn(canary, result.error, "the caller keeps the real reason")
         self.assertGreater(len(result.error), logfmt.FIELD_LIMIT)
+
+    def test_json_response_imported_from_fastapi_responses(self):
+        """fastapi does not export JSONResponse on the root module in modern versions."""
+        import fastapi.responses
+        self.assertIs(service.JSONResponse, fastapi.responses.JSONResponse)
 
 
 if __name__ == "__main__":
