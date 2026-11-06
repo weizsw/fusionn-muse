@@ -64,7 +64,7 @@ class TorrentCompleteTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return "http://127.0.0.1:%d" % server.server_port, requests
 
-    def invoke(self, url, values, python=sys.executable, level=None, log_file=None, tz=None):
+    def invoke(self, url, values, python=sys.executable, level=None, log_file=None, tz=None, env=None):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(log_file) if log_file else Path(directory) / "hook.log"
             environment = {**os.environ, "MUSE_URL": url, "LOG_FILE": str(log)}
@@ -74,6 +74,8 @@ class TorrentCompleteTests(unittest.TestCase):
                 environment["LOG_LEVEL"] = level
             if tz is not None:
                 environment["TZ"] = tz
+            if env is not None:
+                environment.update(env)
             result = subprocess.run(
                 [python, str(SCRIPT), *values], env=environment, capture_output=True, text=True, timeout=30
             )
@@ -294,6 +296,53 @@ class TorrentCompleteTests(unittest.TestCase):
         self.assertEqual(len(requests), 1)
         self.assertIn("event=webhook_sent", log)
 
+    def test_trailing_slash_in_mount_environment_still_submits_webhook(self):
+        url, requests = self.serve(202)
+        # 1. Trailing slash in HOST_INPUT_PATH
+        result, log = self.invoke(
+            url,
+            ["movie", "whisparr", "abc123", "/mnt/storage/downloads/movie.mp4"],
+            env={"HOST_INPUT_PATH": "/mnt/storage/", "CONTAINER_INPUT_PATH": "/data"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["body"]["path"], "/data/downloads/movie.mp4")
+        self.assert_unified_lines(log)
+        self.assertIn("event=webhook_sent", log)
+
+        # 2. Trailing slash in both HOST_INPUT_PATH and CONTAINER_INPUT_PATH
+        requests.clear()
+        result, log = self.invoke(
+            url,
+            ["movie", "whisparr", "abc123", "/mnt/storage/downloads/movie.mp4"],
+            env={"HOST_INPUT_PATH": "/mnt/storage/", "CONTAINER_INPUT_PATH": "/data/"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["body"]["path"], "/data/downloads/movie.mp4")
+
+        # 3. Root host mount HOST_INPUT_PATH=/
+        requests.clear()
+        result, log = self.invoke(
+            url,
+            ["movie", "whisparr", "abc123", "/downloads/movie.mp4"],
+            env={"HOST_INPUT_PATH": "/", "CONTAINER_INPUT_PATH": "/data"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["body"]["path"], "/data/downloads/movie.mp4")
+
+        # 4. Path outside mount with trailing slash is rejected without sending POST
+        requests.clear()
+        result, log = self.invoke(
+            url,
+            ["movie", "whisparr", "abc123", "/mnt/storage-other/movie.mp4"],
+            env={"HOST_INPUT_PATH": "/mnt/storage/", "CONTAINER_INPUT_PATH": "/data"},
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(requests), 0)
+        self.assertIn('error="path is outside the download mount"', log)
+
 
 class HookRenderingTest(unittest.TestCase):
     """The hook renders like the shared renderer without importing it."""
@@ -324,6 +373,7 @@ class HookRenderingTest(unittest.TestCase):
     def test_path_mapping(self):
         cases = {
             "/Volumes/External": "/data",
+            "/Volumes/External/": "/data",
             "/Volumes/External/a b/c.mkv": "/data/a b/c.mkv",
             "/Volumes/ExternalOther/c.mkv": None,
             "/Users/me/c.mkv": None,
@@ -331,6 +381,40 @@ class HookRenderingTest(unittest.TestCase):
         for path, want in cases.items():
             with self.subTest(path=path):
                 self.assertEqual(self.hook.container_path(path), want)
+
+    def test_mount_path_normalization_and_root_semantics(self):
+        self.assertEqual(self.hook.normalize_mount_path("/Volumes/External/"), "/Volumes/External")
+        self.assertEqual(self.hook.normalize_mount_path("/Volumes/External///"), "/Volumes/External")
+        self.assertEqual(self.hook.normalize_mount_path("/"), "/")
+        self.assertEqual(self.hook.normalize_mount_path("///"), "/")
+        self.assertEqual(self.hook.normalize_mount_path("//"), "/")
+        self.assertEqual(self.hook.normalize_mount_path("", "/default"), "/default")
+        self.assertEqual(self.hook.normalize_mount_path(None, "/default"), "/default")
+
+        combinations = [
+            ("/mnt/storage/downloads/movie.mp4", "/mnt/storage/", "/data", "/data/downloads/movie.mp4"),
+            ("/mnt/storage/downloads/movie.mp4", "/mnt/storage", "/data/", "/data/downloads/movie.mp4"),
+            ("/mnt/storage/downloads/movie.mp4", "/mnt/storage///", "/data///", "/data/downloads/movie.mp4"),
+            ("/mnt/storage", "/mnt/storage/", "/data", "/data"),
+            ("/mnt/storage/", "/mnt/storage/", "/data", "/data"),
+            ("/mnt/storage-other/movie.mp4", "/mnt/storage/", "/data", None),
+            # Root host mount
+            ("/downloads/movie.mp4", "/", "/data", "/data/downloads/movie.mp4"),
+            ("/", "/", "/data", "/data"),
+            ("///", "/", "/data", "/data"),
+            # Root container mount
+            ("/mnt/storage/downloads/movie.mp4", "/mnt/storage", "/", "/downloads/movie.mp4"),
+            ("/mnt/storage", "/mnt/storage", "/", "/"),
+            # Both root
+            ("/downloads/movie.mp4", "/", "/", "/downloads/movie.mp4"),
+            ("/", "/", "/", "/"),
+            # Outside or relative
+            ("downloads/movie.mp4", "/mnt/storage", "/data", None),
+            ("downloads/movie.mp4", "/", "/data", None),
+        ]
+        for path, host, container, expected in combinations:
+            with self.subTest(path=path, host=host, container=container):
+                self.assertEqual(self.hook.container_path(path, host=host, container=container), expected)
 
 
 if __name__ == "__main__":

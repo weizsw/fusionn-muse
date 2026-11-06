@@ -41,6 +41,7 @@ import http.client
 import json
 import math
 import os
+import posixpath
 import re
 import sys
 import urllib.error
@@ -54,9 +55,18 @@ LOG_FILE = os.environ.get("LOG_FILE", "/tmp/torrent-complete.log")
 # Only this category is sent to fusionn-muse.
 MUSE_CATEGORY = "whisparr"
 
+def normalize_mount_path(path, default=""):
+    """Normalize a mount path by removing trailing slashes, preserving root."""
+    raw = (path or "").strip() or default
+    normalized = posixpath.normpath(raw)
+    if normalized == "//":
+        return "/"
+    return normalized
+
+
 # The host download mount, and the path that fusionn-muse sees for it.
-HOST_INPUT_PATH = os.environ.get("HOST_INPUT_PATH", "/Volumes/External")
-CONTAINER_INPUT_PATH = os.environ.get("CONTAINER_INPUT_PATH", "/data")
+HOST_INPUT_PATH = normalize_mount_path(os.environ.get("HOST_INPUT_PATH"), "/Volumes/External")
+CONTAINER_INPUT_PATH = normalize_mount_path(os.environ.get("CONTAINER_INPUT_PATH"), "/data")
 
 REQUEST_TIMEOUT_SECONDS = 15
 # The acknowledgement is small; reading stops at this size.
@@ -254,10 +264,31 @@ class Log:
         self.emit(ERROR, event, msg, **fields)
 
 
-def container_path(path):
-    """Map a path under HOST_INPUT_PATH to the container path, else return None."""
-    if path == HOST_INPUT_PATH or path.startswith(HOST_INPUT_PATH + "/"):
-        return CONTAINER_INPUT_PATH + path[len(HOST_INPUT_PATH):]
+def container_path(path, host=None, container=None):
+    """Map a path under host (default HOST_INPUT_PATH) to container (default CONTAINER_INPUT_PATH), else return None."""
+    if host is None:
+        host = HOST_INPUT_PATH
+    if container is None:
+        container = CONTAINER_INPUT_PATH
+    host = normalize_mount_path(host, "/Volumes/External")
+    container = normalize_mount_path(container, "/data")
+
+    if host == "/":
+        if not path.startswith("/"):
+            return None
+        subpath = path.lstrip("/")
+        if not subpath:
+            return container
+        return "/" + subpath if container == "/" else container + "/" + subpath
+
+    if path == host:
+        return container
+    prefix = host + "/"
+    if path.startswith(prefix):
+        subpath = path[len(prefix):].lstrip("/")
+        if not subpath:
+            return container
+        return "/" + subpath if container == "/" else container + "/" + subpath
     return None
 
 
