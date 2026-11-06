@@ -231,11 +231,63 @@ class TorrentCompleteTests(unittest.TestCase):
         )
 
     def test_an_empty_category_sends_the_uncategorized_torrents(self):
+        """An empty category, as an option and as a set-but-empty variable."""
         url, requests = self.serve(202)
-        result, _ = self.invoke(url, ["--category", "", "movie", "", "abc123", MOUNTED])
+        for values, mount in (
+            (["--category", "", "movie", "", "abc123", MOUNTED], {}),
+            (["movie", "", "abc123", MOUNTED], {"MUSE_CATEGORY": ""}),
+        ):
+            with self.subTest(values=values, mount=mount):
+                result, _ = self.invoke(url, values, mount=mount)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0]["body"]["category"], "")
+                requests.clear()
+
+    def test_an_empty_variable_does_not_fall_back_to_its_default(self):
+        """A set-but-empty variable counts as set, like an option with no value."""
+        url, requests = self.serve(202)
+        # An empty category is the only meaningful empty value: whisparr is now
+        # an ordinary torrent of another category and is skipped, not submitted.
+        result, log = self.invoke(url, ["movie", "whisparr", "abc123", MOUNTED], mount={"MUSE_CATEGORY": ""})
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("event=torrent_skipped", log)
+        self.assertEqual(requests, [], "an empty category must not become whisparr")
+        # An empty address or mount is a configuration error, not a default.
+        for mount in ({"MUSE_URL": ""}, {"HOST_INPUT_PATH": ""}):
+            with self.subTest(variable=next(iter(mount))):
+                result, log = self.invoke(url, ["movie", "whisparr", "abc123", MOUNTED], mount=mount)
+                self.assertEqual(result.returncode, 1)
+                self.assert_unified_lines(log)
+                self.assertIn("ERROR component=torrent-complete event=config_invalid", log)
+                self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(requests, [])
+
+    def test_a_torrent_name_that_looks_like_an_option_is_still_an_argument(self):
+        url, requests = self.serve(202)
+        for values in (
+            ["--movie", "whisparr", "abc123", MOUNTED],
+            ["--category", "whisparr", "--movie", "whisparr", "abc123", MOUNTED],
+            ["--category", "whisparr", "--", "--movie", "whisparr", "abc123", MOUNTED],
+        ):
+            with self.subTest(values=values):
+                result, log = self.invoke(url, values)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_unified_lines(log)
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0]["body"]["name"], "--movie")
+                self.assertEqual(requests[0]["body"]["category"], "whisparr")
+                self.assertIn("event=webhook_sent", log)
+                requests.clear()
+
+    def test_the_option_separator_ends_a_name_that_is_a_known_option(self):
+        """"--" is the way to pass a name that is spelled like an option."""
+        url, requests = self.serve(202)
+        result, log = self.invoke(url, ["--category", "whisparr", "--", "--category", "whisparr", "abc123", MOUNTED])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_unified_lines(log)
         self.assertEqual(len(requests), 1)
-        self.assertEqual(requests[0]["body"]["category"], "")
+        self.assertEqual(requests[0]["body"]["name"], "--category")
 
     def test_an_unconfigured_mount_fails_without_a_request(self):
         url, requests = self.serve(202)

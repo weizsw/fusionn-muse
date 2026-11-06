@@ -168,7 +168,7 @@ Fields appear in this order: `component event`, then `job_id submission_id attem
    | `--host-input` | `HOST_INPUT_PATH` | The download mount as qBittorrent sees it; required |
    | `--container-input` | `CONTAINER_INPUT_PATH` | The same mount as Muse sees it; default `/data` |
 
-   An option wins over its environment variable. `LOG_FILE`, `LOG_LEVEL` and `TZ` are environment-only.
+   An option wins over its environment variable, and a variable that is set to an empty value counts as set (an empty category selects the uncategorized torrents; an empty address or download mount is a configuration error). `LOG_FILE`, `LOG_LEVEL` and `TZ` are environment-only.
 
 2. Go to **Options → Downloads → Run external program on torrent completion** and add the command as one line, with the options before the placeholders:
 

@@ -23,7 +23,9 @@ request fails, or fusionn-muse does not answer HTTP 202 with a submission_id;
 resubmit a missed completion by hand.
 
 Settings (the option wins over the environment variable; the default is used
-when neither is set):
+when neither is set). A variable that is set to an empty value counts as set: an
+empty category selects the uncategorized torrents, while an empty address or
+download mount is a configuration error rather than a default:
 
     --muse-url (MUSE_URL)                fusionn-muse base URL; default
                                          http://127.0.0.1:8080, which qBittorrent
@@ -77,6 +79,7 @@ SETTINGS = {
 }
 _OPTION_NAMES = {option: name for name, (option, _, _) in SETTINGS.items()}
 
+ARGUMENT_COUNT = 4
 USAGE = "Usage: torrent_complete.py [options] <name> <category> <info_hash> <path>"
 
 REQUEST_TIMEOUT_SECONDS = 15
@@ -287,14 +290,24 @@ class UsageError(ValueError):
 def parse_options(argv):
     """Split the leading options from the four qBittorrent arguments.
 
-    Parsing stops at the first argument that is not an option, so a torrent name
-    or path that starts with a dash cannot be read as one.
+    Options come first. A leading "--name" is read as an option only while it is
+    a known one, and an unknown one is passed through as the first argument when
+    exactly the four arguments are left, so a torrent name such as "--movie"
+    cannot be mistaken for an option. A bare "--" ends the options as well; it is
+    the way to pass a name that is spelled like a known option.
     """
     options = {}
     position = 0
-    while position < len(argv) and argv[position].startswith("--"):
+    while position < len(argv):
         option = argv[position]
+        if not option.startswith("--"):
+            break
+        if option == "--" and len(argv) - position > ARGUMENT_COUNT:
+            position += 1
+            break
         if option not in _OPTION_NAMES:
+            if len(argv) - position == ARGUMENT_COUNT:
+                break
             raise UsageError("unknown option", option)
         if position + 1 >= len(argv):
             raise UsageError("option needs a value", option)
@@ -304,11 +317,16 @@ def parse_options(argv):
 
 
 def setting(name, options):
-    """Return a setting: the option, else its environment variable, else the default."""
+    """Return a setting: the option, else its environment variable, else the default.
+
+    A variable that is set but empty wins over the default, exactly as an option
+    with an empty value does; only an unset variable falls back. An empty
+    category is meaningful: it selects the uncategorized torrents.
+    """
     _, variable, default = SETTINGS[name]
     if name in options:
         return options[name]
-    return os.environ.get(variable) or default
+    return os.environ.get(variable, default)
 
 
 def container_path(path, host_input, container_input):
@@ -416,7 +434,7 @@ def main(argv):
     except UsageError as error:
         log.error("arguments_invalid", USAGE, error=error.reason, option=error.option)
         return 1
-    if len(arguments) != 4:
+    if len(arguments) != ARGUMENT_COUNT:
         log.error("arguments_invalid", USAGE, arguments=len(arguments))
         return 1
 
@@ -431,6 +449,15 @@ def main(argv):
     if category != wanted_category:
         log.info("torrent_skipped", "Category is not sent to fusionn-muse", category=category)
         return 0
+    if not muse_url:
+        log.error(
+            "config_invalid",
+            "The fusionn-muse address is not configured",
+            error="muse address is not configured",
+            option=SETTINGS["muse_url"][0],
+            variable=SETTINGS["muse_url"][1],
+        )
+        return 1
     if not host_input:
         log.error(
             "config_invalid",
