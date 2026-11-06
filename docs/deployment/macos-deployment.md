@@ -354,21 +354,31 @@ python3 /Users/your-username/Development/scripts/torrent_complete.py \
 1. **准备有效样本文件**：
    在下载目录放置一个带有标准番号的真实视频文件（例如 `/Volumes/External/torrents/whisparr/SNOS-411.mp4`）。
    > **重要提醒**：文件大小需大于 200MB，否则会被内置广告过滤器识别为 sample/广告片直接剔除。
-2. **发起 Webhook 投递**：
+2. **发起 Webhook 投递并获取回执**：
    ```bash
-   python3 /Users/your-username/Development/scripts/torrent_complete.py \
+   OUTPUT=$(python3 /Users/your-username/Development/scripts/torrent_complete.py \
      "SNOS-411" \
      "whisparr" \
      "mock-hash-real" \
-     "/Volumes/External/torrents/whisparr/SNOS-411.mp4"
+     "/Volumes/External/torrents/whisparr/SNOS-411.mp4" 2>&1)
+   echo "${OUTPUT}"
+   SUBMISSION_ID=$(echo "${OUTPUT}" | grep -o 'submission_id=[^ ]*' | head -n 1 | cut -d= -f2)
    ```
-3. **轮询观察任务流水线状态**：
-   通过番号代码查询任务详情、执行阶段与最终产物路径（`status`、`stage` 位于顶层）：
+   确认脚本退出码为 0，且提取到有效的 `SUBMISSION_ID`。
+3. **跟踪本次 Submission 并获取关联 Job**：
+   切勿直接查询固定番号代码，以防误读同名历史任务的完成状态。先查询本次提交：
    ```bash
-   curl -s http://127.0.0.1:4444/api/v1/tasks/job/SNOS-411 | jq '{status: .status, stage: .stage, error: .error, translated_path: .job.translated_path}'
+   curl -s "http://127.0.0.1:4444/api/v1/tasks/submission/${SUBMISSION_ID}" | jq '{status: .status, stage: .stage, error: .error, canonical_task: .canonical_task}'
+   ```
+   - 若 `status` 为 `failed`、`ignored` 或 `interrupted`，说明准备阶段异常（如文件未找到或被过滤），需检查顶层 `error` 并终止。
+   - 准备完成后，`canonical_task` 将返回关联的 Job（例如 `{"kind":"job","id":"<job_id>"}`）。
+4. **跟踪关联 Job 的执行状态**：
+   通过上述获取到的关联 Job ID 跟踪当前执行（`status`、`stage` 位于顶层）：
+   ```bash
+   curl -s "http://127.0.0.1:4444/api/v1/tasks/job/<job_id>" | jq '{status: .status, stage: .stage, error: .error, translated_path: .job.translated_path}'
    ```
    流水线将依次经历：`stage: "transcribing"`（宿主机 MLX ASR 转录）➔ `stage: "translating"`（PySubtrans LLM 翻译）➔ 最终状态变为 `status: "completed"`。
-4. **验证物理交付产物**：
+5. **验证物理交付产物**：
    Muse 在处理完成后，会将视频与字幕分别交付至对应目录：
    - **视频交付目录**：`/Volumes/External/automation/scraping/`
      ```bash
@@ -382,4 +392,4 @@ python3 /Users/your-username/Development/scripts/torrent_complete.py \
      head -n 20 /Volumes/External/automation/subtitles/SNOS-411.srt
      ```
      确认字幕文件非空，且包含时间戳和由 LLM 翻译的地道中文内容（对应任务返回的 `.job.translated_path`）。
-   只有视频已就位且字幕文件生成完整，才证明整套转录与翻译流水线具备生产交付能力！
+   只有本次提交被成功解析并处理、关联 Job 状态变为 `completed` 且产物文件生成完整，才证明整套转录与翻译流水线具备生产交付能力！

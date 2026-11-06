@@ -291,30 +291,57 @@ Agent 必须在终端运行并验证以下全部检查项，明确区分接口�
 
 4. **端到端真实处理完整性验证指引 (End-to-End Real Sample Verification)**：
    Agent 应向用户说明端到端全链路的真实验证标准与步骤：
-   - 用户或 Agent 在 `{{MEDIA_ROOT}}/torrents/whisparr/` 下放入一个真实存在的番号视频样本（例如 `SNOS-411.mp4`，文件大小必须大于 200MB 以免被广告过滤规则跳过）。
-   - 执行 Webhook 投递：
+   - 准备样本：在 `{{MEDIA_ROOT}}/torrents/whisparr/` 下放入一个真实存在的番号视频样本（例如 `SNOS-411.mp4`，文件大小必须大于 200MB 以免被广告过滤规则跳过）。
+   - 执行 Webhook 投递并提取回执（切勿直接按固定番号代码查 Job，必须先捕获本次 Submission ID）：
      ```bash
      OUTPUT=$(python3 "${HOME}/Development/scripts/torrent_complete.py" \
        "SNOS-411" "whisparr" "real-hash-001" "{{MEDIA_ROOT}}/torrents/whisparr/SNOS-411.mp4" 2>&1)
+     EXIT_CODE=$?
+     if [ ${EXIT_CODE} -ne 0 ]; then
+       echo "❌ Webhook 投递执行失败 (退出码 ${EXIT_CODE}): ${OUTPUT}" >&2
+       exit 1
+     fi
+
      SUBMISSION_ID=$(echo "${OUTPUT}" | grep -o 'submission_id=[^ ]*' | head -n 1 | cut -d= -f2)
+     if [ -z "${SUBMISSION_ID}" ]; then
+       echo "❌ 无法从 Webhook 输出中解析 submission_id: ${OUTPUT}" >&2
+       exit 1
+     fi
      ```
-   - 轮询跟踪任务状态（读取顶层 `.status` 与 `.stage`，区分完成、失败与中断）：
+   - 步骤一：轮询跟踪本次 Submission，处理准备状态并提取关联 Job ID：
      ```bash
-     TASK_JSON=$(curl -fsS "http://127.0.0.1:{{HOST_PORT}}/api/v1/tasks/job/SNOS-411")
+     # 查询本次提交详情
+     SUB_RESP=$(curl -fsS "http://127.0.0.1:{{HOST_PORT}}/api/v1/tasks/submission/${SUBMISSION_ID}")
+     SUB_STATUS=$(echo "${SUB_RESP}" | jq -r '.status // empty')
+     SUB_ERROR=$(echo "${SUB_RESP}" | jq -r '.error // empty')
+     JOB_ID=$(echo "${SUB_RESP}" | jq -r '.canonical_task.id // empty')
+
+     if [ "${SUB_STATUS}" = "failed" ] || [ "${SUB_STATUS}" = "ignored" ] || [ "${SUB_STATUS}" = "interrupted" ]; then
+       echo "❌ Submission 准备阶段异常终止: 状态=${SUB_STATUS}, 错误=${SUB_ERROR}" >&2
+       exit 1
+     fi
+
+     if [ -z "${JOB_ID}" ]; then
+       echo "⏳ 任务仍在准备中（preparing），尚未解析关联 Job ID"
+     fi
+     ```
+   - 步骤二：通过本次 Submission 关联的 Job ID 跟踪当前执行状态：
+     ```bash
+     TASK_JSON=$(curl -fsS "http://127.0.0.1:{{HOST_PORT}}/api/v1/tasks/job/${JOB_ID}")
      STATUS=$(echo "${TASK_JSON}" | jq -r '.status // empty')
      STAGE=$(echo "${TASK_JSON}" | jq -r '.stage // empty')
      ERROR=$(echo "${TASK_JSON}" | jq -r '.error // empty')
      TRANSLATED_PATH=$(echo "${TASK_JSON}" | jq -r '.job.translated_path // empty')
 
      if [ "${STATUS}" = "failed" ] || [ "${STATUS}" = "interrupted" ]; then
-       echo "❌ 任务执行异常: 状态=${STATUS}, 阶段=${STAGE}, 错误=${ERROR}" >&2
+       echo "❌ 关联 Job 执行失败: 状态=${STATUS}, 阶段=${STAGE}, 错误=${ERROR}" >&2
        exit 1
      fi
      ```
-   - 核对物理交付产物（视频与字幕发布至不同目录）：
+   - 步骤三：当状态变为 `"completed"` 时，核对物理交付产物（视频与字幕发布至不同目录）：
      - **视频文件**：检查 `{{MEDIA_ROOT}}/automation/scraping/SNOS-411.mp4` 确认已移入待刮削目录。
      - **中文字幕**：检查 `{{MEDIA_ROOT}}/automation/subtitles/SNOS-411.srt`（默认无后缀时生成 `.srt`，对应任务返回的 `.job.translated_path`），确认文件非空且包含翻译后的中文字幕条目。
-     只有当任务顶层状态达到 `"completed"` 且两个目录下的产物均已就绪时，才判定端到端部署全链路成功。
+     只有当本次 Submission 成功关联至 Job、关联 Job 顶层状态达到 `"completed"` 且两个目录下的产物均已就绪时，才判定端到端部署全链路成功。
 
 ---
 
