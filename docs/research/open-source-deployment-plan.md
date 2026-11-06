@@ -7,7 +7,7 @@
 ## 0. 结论速览
 
 1. **主服务两平台都用 Docker 运行，差别只在转写。** `config.Folders()` 把工作目录写死为 `/data/automation/*`，翻译脚本路径写死为 `/app/scripts/...`，所以主服务离开镜像无法直接运行。macOS 保留"宿主机 MLX + 容器主服务"；Linux 改为"转写服务也进容器"。
-2. **Linux 转写建议沿用现有 `/transcribe` 路径协议，由 Muse 提供一个 Linux ASR 容器。** 这样 Muse 的 Go 代码不用改，macOS 链路原样保留。容器内放两种引擎：NVIDIA 用 Qwen3-ASR（`qwen-asr`，PyTorch/CUDA），与 macOS 同一模型；CPU 默认用 faster-whisper。faster-whisper 有公开的 CPU 基准，Qwen3-ASR 没有任何公开的 CPU 速度数据。两条路都需要先做一次实机基准。
+2. **Linux 转写建议沿用现有 `/transcribe` 路径协议，由 Muse 提供一个 Linux ASR 容器。** 这样 Muse 的 Go 代码不用改，macOS 链路原样保留。容器内放两种引擎：NVIDIA 用 Qwen3-ASR（`qwen-asr`，PyTorch/CUDA），与 macOS 同一模型；CPU 默认用 faster-whisper。faster-whisper 有公开的 CPU 基准，Qwen3-ASR 没有任何公开的 CPU 速度数据。用户已确认当初换成 MLX 主要是为了用上 Mac 的 GPU，并非对 faster-whisper 的质量不满，所以 CPU 默认用 faster-whisper 没有已知障碍。用户目前没有 Linux 测试机，因此 Linux 两条路线首发都标为"实验"（见第 7 节）。
 3. **mdc-ng 与 Muse 之间没有代码集成，衔接靠文件系统。** Muse 把视频交付到 `/data/automation/scraping/`，把字幕交付到 `/data/automation/subtitles/`，这是两个不同目录。mdc-ng 应该怎样监控、怎样匹配字幕，要以用户现在的实际设置为准（见第 7 节问题）。
 4. **陌生用户照现有文档部署会失败。** 有三处硬伤：
    - `host_asr_server.py` 在任何真实 FastAPI 版本下都无法启动（已实测）。
@@ -83,7 +83,7 @@ Muse 对转写端的要求来自 `internal/executor/host_asr.go` 和处理流程
 |---|---|---|---|---|
 | **Qwen3-ASR 官方 `qwen-asr`（transformers 后端）** | 代码上可用：没有 CUDA 时设备默认为 CPU[2]。**没有任何公开的 CPU 速度数据** | 官方示例使用 `cuda:0`、bfloat16，推荐 FlashAttention 2；官方 Docker 镜像需要 `--gpus all` 和 NVIDIA Container Toolkit[1][2] | 不能直接出。只返回词或字级 `time_stamps`，需要 Qwen3-ForcedAligner-0.6B（单段 ≤5 分钟，包内自动切块再拼接）[1][2]，切句成 SRT 要自己实现 | 与 macOS 同一套权重，质量最一致。包版本 0.0.6，钉死 `transformers==4.57.6`，并拉入 gradio、flask 等较重的依赖[3]。官方未给出最低显存 |
 | Qwen3-ASR + vLLM（`qwen-asr-serve`） | 不可用 | 可用，需要 CUDA[2] | vLLM 转写接口**不支持 srt/vtt**，只有 json/verbose_json；默认拒绝超过 600 秒或 25 MB 的音频（可用环境变量放宽）[7] | 吞吐高，但长视频和 SRT 都要额外处理，对单机单任务的 Muse 收益有限 |
-| **faster-whisper（CTranslate2）** | 可用，int8；官方基准：13 分钟音频、small 模型、i7-12700K 8 线程，int8 耗时 1 分 42 秒，内存 1.5 GB[5] | 可用，需要 CUDA 12 + cuDNN 9；官方基准：large-v2 在 RTX 3070 Ti 上，fp16 耗时 1 分 03 秒、显存 4.5 GB；int8 显存 2.9 GB[5] | 返回分段时间轴，可开 VAD，转 SRT 很简单[5] | 成熟、MIT 许可。这个项目以前通过 VideoCaptioner 用过 FasterWhisper，后来停用。停用原因（质量还是维护）**没有记录**，需要用户说明（D2） |
+| **faster-whisper（CTranslate2）** | 可用，int8；官方基准：13 分钟音频、small 模型、i7-12700K 8 线程，int8 耗时 1 分 42 秒，内存 1.5 GB[5] | 可用，需要 CUDA 12 + cuDNN 9；官方基准：large-v2 在 RTX 3070 Ti 上，fp16 耗时 1 分 03 秒、显存 4.5 GB；int8 显存 2.9 GB[5] | 返回分段时间轴，可开 VAD，转 SRT 很简单[5] | 成熟、MIT 许可。这个项目以前通过 VideoCaptioner 用过 FasterWhisper，后来停用。用户确认停用主要是为了用上 Mac 的 GPU，不是因为质量（D2） |
 | speaches（faster-whisper 的 OpenAI 兼容服务） | 有官方 `latest-cpu` 镜像 | 有 `latest-cuda` 等镜像[6] | 支持 `response_format=srt`，长文件靠 VAD 分段[6] | 上传式接口（multipart），与 Muse 的路径协议不同，需要新写 Go 适配器。最新发布仍是 `v0.9.0-rc.3`（2025-12）[6] |
 | sherpa-onnx 的 Qwen3-ASR（ONNX） | 可用 | 可用 | **不输出时间戳**[8] | 不适合直接做字幕，排除 |
 | 云端 ASR API | — | — | 视服务而定 | 有费用和内容合规风险（成人内容可能违反服务条款），只作为用户自选项，不作默认 |
@@ -109,7 +109,7 @@ Muse 对转写端的要求来自 `internal/executor/host_asr.go` 和处理流程
 
 配置命名问题：`pipeline.provider: mlx_qwen3_asr` 和配置段 `mlx_qwen3_asr:` 在 Linux 上名不副实。provider 值会写进任务的设置快照，所以改名必须保留旧值作为别名。建议首发**不改名**，文档里说明"这是宿主或独立 ASR 服务协议，名字沿用历史"。改名留作后续工单。
 
-### 3.4 实机才能确认的事项（建议作为第一张实施工单）
+### 3.4 实机才能确认的事项（有机器时再做）
 
 在真实 Linux 机器上，用同一段 1–2 小时、以日语为主的样片测量以下内容：
 
@@ -121,6 +121,13 @@ Muse 对转写端的要求来自 `internal/executor/host_asr.go` 和处理流程
 | 最小可用显存 / 内存，用于文档里的"硬件要求" | ✔ | ✔ |
 
 判定规则（建议，属于本方案的自定判断）：如果 Qwen 在 CPU 上处理 2 小时视频超过 6 小时，CPU 首发默认用 faster-whisper，Qwen-CPU 标为"实验"。NVIDIA 默认用 Qwen，除非实测质量或显存不可接受。
+
+**现状（用户答复）：暂时没有任何 Linux 测试机。** 因此：
+
+- 首发不以本节基准为前提。CPU 默认 faster-whisper，NVIDIA 默认 Qwen，均按上游文档的依据选定，两条路线在文档里都明确标为"实验"，并写明"未经项目作者实机验证"。
+- 文档里的硬件要求只引用上游公开数字（第 3.2 节），不写作者自己的估计。
+- 镜像构建和不需要 GPU 的部分可以在 GitHub Actions 的 Linux 环境里验证：镜像能构建、服务能启动、`/health` 正常、用几秒钟的短样片能走通 `/transcribe` 并产出 SRT（CPU 引擎，小模型）。这能证明"能跑通"，不能证明速度和日语质量。
+- 速度和质量基准留到有机器时再做：可以是作者以后的机器、按小时租用的云 GPU，或社区用户反馈。届时按上面的判定规则决定是否调整默认引擎，并去掉"实验"标记。
 
 ## 4. mdc-ng 衔接
 
@@ -175,7 +182,7 @@ Muse 对转写端的要求来自 `internal/executor/host_asr.go` 和处理流程
 ### 6.1 文档结构
 
 ```text
-README.md                      入口：是什么、架构图、平台矩阵、5 分钟上手、文档导航（主语言见 D1）
+README.md / README.zh-CN.md    入口：是什么、架构图、平台矩阵、5 分钟上手、文档导航（中英双份，见 D1）
 docs/
   deploy/
     macos.md                   Apple Silicon：Docker 主服务 + 宿主 MLX 转写（含常驻）
@@ -193,6 +200,14 @@ examples/
 ```
 
 README 只保留入口内容。现有 README 里的恢复、API、升级安全等长段落原样迁到 `operations.md`，避免改写已有的准确内容。
+
+**中英双份的组织方式**（用户选定中英双份；以下文件命名属于本方案的自定判断）：
+
+- 英文版用不带后缀的文件名（`README.md`、`docs/deploy/linux.md`），中文版加 `.zh-CN` 后缀（`README.zh-CN.md`、`docs/deploy/linux.zh-CN.md`）。GitHub 打开仓库首页时默认显示 `README.md`，所以英文放在默认位置，两份文档顶部互相链接。
+- 命令、配置示例、compose 文件只有一份（放在 `examples/`），两种语言的文档都引用同一份，避免两边示例不一致。
+- 每篇中文文档顶部注明对应英文版文件。修改文档时两份一起改；PR 模板加一项"中英两份都已更新"的勾选。
+- `agent-deploy.md` 同样出两份。agent 读哪一份都能执行，用户可以按自己的语言把对应文件交给 agent。
+- 本方案文档（`docs/research/`）和已有的设计、ADR 文档是内部记录，不在双份范围内。
 
 ### 6.2 各文档必须讲清楚的内容
 
@@ -260,9 +275,9 @@ README 只保留入口内容。现有 README 里的恢复、API、升级安全�
 
 | # | 决策 | 建议 | 影响 |
 |---|---|---|---|
-| D1 | 文档主语言 | 中文为主（用户、mdc-ng 社区和目标用户都以中文为主），README 顶部附一段英文简介 | 全部文档 |
-| D2 | Linux CPU 的默认引擎 | 先按 faster-whisper 设计，基准测试后再定；需要用户说明当初停用 FasterWhisper 的原因 | ASR 镜像内容 |
-| D3 | Linux 首发时的支持级别 | NVIDIA 和 CPU 都写进文档；没有实机验证过的标为"实验"。**需要用户确认有没有 Linux NVIDIA 机器可以做测试** | 首发范围和验证工单 |
+| D1 | 文档主语言 | **已定（用户）：中英双份。** 组织方式见第 6.1 节 | 全部面向用户的文档 |
+| D2 | Linux CPU 的默认引擎 | **已定：faster-whisper。** 用户确认当初换成 MLX 主要是为了用 Mac 的 GPU，不是因为质量 | ASR 镜像内容 |
+| D3 | Linux 首发时的支持级别 | **已定：CPU 和 NVIDIA 都写进文档，都标为"实验"。** 用户暂时没有 Linux 测试机；CI 只验证能跑通，速度和质量基准以后再做（见第 3.4 节） | 首发范围和验证工单 |
 | D4 | mdc-ng 的实际设置 | 请用户提供：监控目录、整理模式、字幕库路径、媒体库路径、是否接 Emby、现在 `language_suffix` 的值 | mdc-ng 教程能否写准确 |
 | D5 | 发布方式 | Muse 继续用 `ghcr.io/weizsw/fusionn-muse`；Linux ASR 镜像分 CPU 和 CUDA 两个标签，同仓发布；以新的 minor 版本号首发 | CI 工作流 |
 | D6 | Agent 说明的形式 | 仓库内通用 Markdown；以后需要时再封装成特定 agent 的技能 | 维护成本 |
@@ -272,10 +287,10 @@ README 只保留入口内容。现有 README 里的恢复、API、升级安全�
 ## 8. 建议的后续工单（按依赖顺序）
 
 1. **修复阻断项**（B1–B4）：修正 host_asr_server 的导入并补测试；重写 compose；`torrent_complete.py` 改成环境变量配置；更新示例配置并移除失效的 API 列表。B2 的长期修复（内置地址表）可以同时做，也可以单独做。
-2. **Linux 转写实机基准**（第 3.4 节）：只产出数据和结论，作为第 3 项的输入。
-3. **Linux ASR 镜像**（方案 A）：实现与 `/transcribe` 相同的契约，支持 `qwen` 和 `whisper` 两种引擎，提供 CPU 和 CUDA 两个镜像，并接入 CI。
-4. **文档重写**：按第 6 节的结构，取决于 D1、D4。
-5. **Agent 部署说明**：在第 1、3、4 项完成后编写，用一台全新机器实际跑一遍。
+2. **Linux ASR 镜像**（方案 A）：实现与 `/transcribe` 相同的契约，支持 `qwen` 和 `whisper` 两种引擎，提供 CPU 和 CUDA 两个镜像，并接入 CI。CI 用短样片验证 CPU 引擎能跑通（第 3.4 节）；CUDA 镜像只验证能构建。
+3. **文档重写（中英双份）**：按第 6 节的结构，取决于 D4。
+4. （有机器时再做）**Linux 转写实机基准**（第 3.4 节）：产出速度和日语质量数据，据此决定是否调整默认引擎、去掉"实验"标记。
+5. **Agent 部署说明（中英双份）**：在第 1、2、3 项完成后编写，在 macOS 上用一个全新环境实际跑一遍；Linux 部分在有机器前只能按文档推演，同样标为"实验"。
 6. （可选）provider 改为通用名称并保留旧名作为别名；容器以非 root / PUID 运行；给 API 加可选 token。
 
 ## 9. 本次做过的验证
