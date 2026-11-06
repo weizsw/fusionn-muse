@@ -12,3 +12,12 @@
 !scripts/
 !scripts/llm_subtrans_translate.py
 !scripts/detect_hard_sub.py
+# Linux transcription images (asr/): the whole package, plus the shared logging
+# module the service imports. The tests and caches are not part of any image, so
+# they are excluded again below — the last line that matches a path wins.
+!asr/
+!asr/**
+!scripts/logfmt.py
+asr/tests
+**/__pycache__
+**/*.pyc

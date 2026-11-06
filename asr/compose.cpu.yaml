@@ -1,0 +1,56 @@
+# Linux transcription, CPU route — an override for the repository's compose file.
+#
+#   cd <repository root>
+#   docker compose -f docker-compose.yaml -f asr/compose.cpu.yaml up -d
+#
+# The main service stays defined in docker-compose.yaml only; this file adds the
+# asr sidecar and points the main service at it. See docs/deploy/linux.md.
+services:
+  asr:
+    image: fusionn-muse-asr-cpu:local
+    build:
+      context: .
+      dockerfile: asr/Dockerfile.cpu
+      args:
+        VERSION: ${MUSE_VERSION:-dev}
+    container_name: fusionn-muse-asr
+    restart: unless-stopped
+    environment:
+      - ASR_ENGINE=whisper
+      - ASR_MODEL=${MUSE_ASR_MODEL:-large-v3-turbo}
+      # Empty means auto-detect per video.
+      - ASR_LANGUAGE=${MUSE_ASR_LANGUAGE:-}
+      # Overrides the prefix a request carries, for mounts that differ from the
+      # client's view. Both prefixes are /data on Linux, so this is the identity.
+      - HOST_MEDIA_PATH=/data
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TZ=${TZ:-Asia/Singapore}
+    volumes:
+      # The automation tree. The request names a video under
+      # /data/automation/processing and the subtitle is written next to it, so this
+      # has to be the same host directory the main service sees at /data.
+      - ${MUSE_DATA_DIR:-./data}:/data
+      # Model cache: without it, every container start downloads the model again.
+      - muse-asr-models:/models
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "6"
+
+  fusionn-muse:
+    environment:
+      # The provider stays mlx_qwen3_asr: Linux keeps the same /transcribe
+      # protocol, only the address changes, to the sidecar above.
+      - FUSIONN_MUSE_PIPELINE_PROVIDER=mlx_qwen3_asr
+      - FUSIONN_MUSE_MLX_QWEN3_ASR_SERVER_URL=http://asr:8766
+      - FUSIONN_MUSE_MLX_QWEN3_ASR_CONTAINER_PREFIX=/data
+      - FUSIONN_MUSE_MLX_QWEN3_ASR_HOST_PREFIX=/data
+    depends_on:
+      asr:
+        # The main service waits for the model to load once, instead of failing
+        # every job until it has. Remove these four lines to start it regardless.
+        condition: service_healthy
+
+volumes:
+  muse-asr-models:

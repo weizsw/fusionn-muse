@@ -1,0 +1,4 @@
+# Web layer shared by both Linux transcription images. The engines' own
+# dependencies are in requirements-cpu.txt and requirements-cuda.txt.
+fastapi==0.162.0
+uvicorn==0.54.0

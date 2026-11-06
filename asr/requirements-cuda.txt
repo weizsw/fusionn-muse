@@ -1,0 +1,8 @@
+# Linux transcription, NVIDIA route.
+#
+# torch comes from PyPI, where the Linux x86_64 wheel is the CUDA 12.8 build and
+# carries the CUDA runtime, cuDNN, NCCL and cuBLAS libraries with it. Needed:
+# a driver at least 525 (the CUDA 12 minor-version compatibility floor).
+-r requirements.txt
+torch==2.9.1
+qwen-asr==0.0.6

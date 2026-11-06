@@ -1,0 +1,6 @@
+# Linux transcription, CPU route.
+#
+# faster-whisper runs CTranslate2 and decodes media with PyAV; both ship wheels
+# with the library, so this image needs no CUDA and no torch.
+-r requirements.txt
+faster-whisper==1.2.1

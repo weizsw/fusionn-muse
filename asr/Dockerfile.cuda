@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1
+
+# Linux transcription, NVIDIA route: Qwen3-ASR on CUDA, installed from PyPI
+# wheels. Build from the repository root so the image can take asr/ and the
+# shared logging module:
+#
+#   docker build -f asr/Dockerfile.cuda -t fusionn-muse-asr-cuda:local .
+#
+# The host needs the NVIDIA container toolkit; see docs/deploy/linux.md.
+FROM python:3.12-slim-trixie
+
+ARG VERSION=dev
+
+WORKDIR /app
+ENV ASR_ENGINE=qwen \
+    ASR_HOST=0.0.0.0 \
+    ASR_PORT=8766 \
+    ASR_MODEL_DIR=/models \
+    ASR_VERSION=${VERSION} \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# ffmpeg decodes the video to the WAV that the Qwen3-ASR loader reads.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg libgomp1 ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY asr/requirements.txt asr/requirements-cuda.txt ./asr/
+# torch alone unpacks to roughly 5 GB with its CUDA libraries.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --no-compile -r asr/requirements-cuda.txt \
+    && python -m pip check
+
+COPY asr ./asr
+COPY scripts/logfmt.py ./scripts/
+
+# The repository's .dockerignore selects what the two COPY lines above can see,
+# and a directory COPY does not fail on a file that was filtered out: import the
+# modules here so a missing one breaks the build instead of the first request.
+RUN python -c "import asr.engines, asr.server, scripts.logfmt"
+
+EXPOSE 8766
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30m --retries=3 \
+    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen(f\"http://127.0.0.1:{os.environ.get('ASR_PORT', '8766')}/health\", timeout=8)"]
+
+CMD ["python", "-m", "asr.server"]
