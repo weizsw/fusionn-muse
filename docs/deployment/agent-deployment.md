@@ -352,6 +352,7 @@ Agent 必须在终端运行并验证以下全部检查项，明确区分接口�
        STATUS=$(echo "${TASK_JSON}" | jq -r '.status // empty')
        STAGE=$(echo "${TASK_JSON}" | jq -r '.stage // empty')
        ERROR=$(echo "${TASK_JSON}" | jq -r '.error // empty')
+       IS_LIGHT=$(echo "${TASK_JSON}" | jq -r '.is_light // .job.is_light // false')
        TRANSLATED_PATH=$(echo "${TASK_JSON}" | jq -r '.job.translated_path // empty')
 
        if [ "${STATUS}" = "failed" ] || [ "${STATUS}" = "interrupted" ]; then
@@ -360,7 +361,7 @@ Agent 必须在终端运行并验证以下全部检查项，明确区分接口�
        fi
 
        if [ "${STATUS}" = "completed" ]; then
-         echo "✅ 关联 Job 执行完成 (stage=${STAGE})"
+         echo "✅ 关联 Job 执行完成 (stage=${STAGE}, is_light=${IS_LIGHT})"
          break
        fi
 
@@ -373,23 +374,35 @@ Agent 必须在终端运行并验证以下全部检查项，明确区分接口�
        exit 1
      fi
      ```
-   - 步骤三：当状态变为 `"completed"` 时，核对物理交付产物（视频与字幕发布至不同目录）：
+   - 步骤三：当状态变为 `"completed"` 时，核对物理交付产物（视频与字幕发布至不同目录，区分已有字幕放行与 ASR/LLM 实际产物）：
      - **视频文件**：检查 `{{MEDIA_ROOT}}/automation/scraping/SNOS-411.mp4` 确认已移入待刮削目录。
-     - **中文字幕**：检查 `{{MEDIA_ROOT}}/automation/subtitles/SNOS-411.srt`（默认无后缀时生成 `.srt`，对应任务返回的 `.job.translated_path`），确认文件非空且包含翻译后的中文字幕条目。
+     - **中文字幕**：绑定本次 Job 返回的 `translated_path` 映射校验，严禁直接读取固定路径的残留旧文件。
      ```bash
      if [ ! -s "{{MEDIA_ROOT}}/automation/scraping/SNOS-411.mp4" ]; then
        echo "❌ 待刮削视频文件缺失或为空: {{MEDIA_ROOT}}/automation/scraping/SNOS-411.mp4" >&2
        exit 1
      fi
 
-     if [ ! -s "{{MEDIA_ROOT}}/automation/subtitles/SNOS-411.srt" ]; then
-       echo "❌ 中文字幕文件缺失或为空: {{MEDIA_ROOT}}/automation/subtitles/SNOS-411.srt" >&2
+     if [ "${IS_LIGHT}" = "true" ]; then
+       echo "⚠️ 视频命中硬字幕或内嵌字幕规则直接放行 (is_light=true)，未触发 ASR 转录与 LLM 翻译流水线"
+       echo "ℹ️ 若需验证 ASR 与 LLM 翻译完整链路，请提供未压制中文字幕的生肉视频样本"
        exit 1
      fi
 
-     echo "✅ 端到端部署全链路验证通过: Submission=${SUBMISSION_ID}, Job=${JOB_ID}, 产物均已就绪"
+     if [ -z "${TRANSLATED_PATH}" ]; then
+       echo "❌ 关联 Job 未返回 translated_path 产物路径" >&2
+       exit 1
+     fi
+
+     HOST_SUB_PATH="{{MEDIA_ROOT}}${TRANSLATED_PATH#/data}"
+     if [ ! -s "${HOST_SUB_PATH}" ]; then
+       echo "❌ 本次生成的字幕文件不存在或为空: ${HOST_SUB_PATH}" >&2
+       exit 1
+     fi
+
+     echo "✅ 端到端全链路（ASR 转录与 LLM 翻译）部署验证通过: Submission=${SUBMISSION_ID}, Job=${JOB_ID}, 字幕=${HOST_SUB_PATH}"
      ```
-     只有当本次 Submission 成功关联至 Job、关联 Job 顶层状态达到 `"completed"` 且两个目录下的产物均已就绪时，才判定端到端部署全链路成功。
+     只有当本次 Submission 成功关联至 Job、关联 Job 顶层状态达到 `"completed"`、属于真正完成转录翻译（非 `is_light` 放行）且本次产物文件均已就绪时，才判定端到端部署全链路成功。
 
 ---
 

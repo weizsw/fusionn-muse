@@ -353,7 +353,7 @@ python3 /Users/your-username/Development/scripts/torrent_complete.py \
 
 1. **准备有效样本文件**：
    在下载目录放置一个带有标准番号的真实视频文件（例如 `/Volumes/External/torrents/whisparr/SNOS-411.mp4`）。
-   > **重要提醒**：文件大小需大于 200MB，否则会被内置广告过滤器识别为 sample/广告片直接剔除。
+   > **重要提醒**：文件大小需大于 200MB，且不能为已压制中文字幕的熟肉（否则会触发硬字幕检测直接放行，跳过 ASR 与 LLM 翻译）。
 2. **发起 Webhook 投递并获取回执**：
    ```bash
    OUTPUT=$(python3 /Users/your-username/Development/scripts/torrent_complete.py \
@@ -361,39 +361,109 @@ python3 /Users/your-username/Development/scripts/torrent_complete.py \
      "whisparr" \
      "mock-hash-real" \
      "/Volumes/External/torrents/whisparr/SNOS-411.mp4" 2>&1)
+   EXIT_CODE=$?
    echo "${OUTPUT}"
+   if [ ${EXIT_CODE} -ne 0 ]; then
+     echo "❌ Webhook 投递失败 (退出码 ${EXIT_CODE}): ${OUTPUT}" >&2
+     exit 1
+   fi
    SUBMISSION_ID=$(echo "${OUTPUT}" | grep -o 'submission_id=[^ ]*' | head -n 1 | cut -d= -f2)
+   if [ -z "${SUBMISSION_ID}" ]; then
+     echo "❌ 无法从 Webhook 输出中解析 submission_id: ${OUTPUT}" >&2
+     exit 1
+   fi
    ```
    确认脚本退出码为 0，且提取到有效的 `SUBMISSION_ID`。
 3. **跟踪本次 Submission 并获取关联 Job**：
-   切勿直接查询固定番号代码，以防误读同名历史任务的完成状态。先查询本次提交：
+   切勿直接查询固定番号代码，以防误读同名历史任务的完成状态。轮询查询本次提交（失败、中断或异常时立即阻断退出）：
    ```bash
-   curl -s "http://127.0.0.1:4444/api/v1/tasks/submission/${SUBMISSION_ID}" | jq '{status: .status, stage: .stage, error: .error, canonical_task: .canonical_task}'
+   JOB_ID=""
+   for i in $(seq 1 30); do
+     if ! SUB_RESP=$(curl -fsS "http://127.0.0.1:4444/api/v1/tasks/submission/${SUBMISSION_ID}" 2>/dev/null); then
+       echo "❌ 查询 Submission 接口失败" >&2
+       exit 1
+     fi
+     SUB_STATUS=$(echo "${SUB_RESP}" | jq -r '.status // empty')
+     SUB_ERROR=$(echo "${SUB_RESP}" | jq -r '.error // empty')
+     JOB_ID=$(echo "${SUB_RESP}" | jq -r '.canonical_task.id // empty')
+
+     if [ "${SUB_STATUS}" = "failed" ] || [ "${SUB_STATUS}" = "ignored" ] || [ "${SUB_STATUS}" = "interrupted" ]; then
+       echo "❌ Submission 准备阶段异常终止: 状态=${SUB_STATUS}, 错误=${SUB_ERROR}" >&2
+       exit 1
+     fi
+
+     if [ -n "${JOB_ID}" ]; then
+       echo "✅ 关联 Job ID: ${JOB_ID}"
+       break
+     fi
+     echo "⏳ 任务仍在准备中（preparing），等待后台入库解析 (第 ${i} 次)..."
+     sleep 2
+   done
+
+   if [ -z "${JOB_ID}" ]; then
+     echo "❌ 超时未解析出关联 Job ID (canonical_task 为空)，终止验证" >&2
+     exit 1
+   fi
    ```
-   - 若处于准备阶段（`status: "processing"`, `stage: "preparing"`, `canonical_task: null`），稍候数秒后再次查询。
-   - 若 `status` 为 `failed`、`ignored` 或 `interrupted`，说明准备阶段异常（如文件未找到或被过滤），需检查顶层 `error` 并终止，切勿继续跟踪 Job。
-   - 准备完成后，`canonical_task` 将返回关联的 Job（例如 `{"kind":"job","id":"<job_id>"}`）。提取该 ID：
-     ```bash
-     JOB_ID=$(curl -s "http://127.0.0.1:4444/api/v1/tasks/submission/${SUBMISSION_ID}" | jq -r '.canonical_task.id // empty')
-     ```
 4. **跟踪关联 Job 的执行状态**：
-   通过上述获取到的本次关联 Job ID 跟踪当前执行（`status`、`stage` 位于顶层，切勿留空或按固定番号查询）：
+   通过上述获取到的本次关联 Job ID 轮询跟踪当前执行（`status`、`stage` 位于顶层，切勿留空或按固定番号查询；遇到失败立即阻断）：
    ```bash
-   curl -s "http://127.0.0.1:4444/api/v1/tasks/job/${JOB_ID}" | jq '{status: .status, stage: .stage, error: .error, translated_path: .job.translated_path}'
+   STATUS=""
+   for i in $(seq 1 180); do
+     if ! TASK_JSON=$(curl -fsS "http://127.0.0.1:4444/api/v1/tasks/job/${JOB_ID}" 2>/dev/null); then
+       echo "❌ 查询关联 Job 失败 (Job ID: ${JOB_ID})" >&2
+       exit 1
+     fi
+     STATUS=$(echo "${TASK_JSON}" | jq -r '.status // empty')
+     STAGE=$(echo "${TASK_JSON}" | jq -r '.stage // empty')
+     ERROR=$(echo "${TASK_JSON}" | jq -r '.error // empty')
+     IS_LIGHT=$(echo "${TASK_JSON}" | jq -r '.is_light // .job.is_light // false')
+     TRANSLATED_PATH=$(echo "${TASK_JSON}" | jq -r '.job.translated_path // empty')
+
+     if [ "${STATUS}" = "failed" ] || [ "${STATUS}" = "interrupted" ]; then
+       echo "❌ 关联 Job 执行失败: 状态=${STATUS}, 阶段=${STAGE}, 错误=${ERROR}" >&2
+       exit 1
+     fi
+
+     if [ "${STATUS}" = "completed" ]; then
+       echo "✅ 关联 Job 执行完成 (stage=${STAGE}, is_light=${IS_LIGHT})"
+       break
+     fi
+     echo "⏳ 任务流水线处理中: stage=${STAGE:-transcribing}... (第 ${i} 次)"
+     sleep 5
+   done
+
+   if [ "${STATUS}" != "completed" ]; then
+     echo "❌ 关联 Job 未能在预期时间内达到 completed 状态 (当前状态: ${STATUS})" >&2
+     exit 1
+   fi
    ```
    流水线将依次经历：`stage: "transcribing"`（宿主机 MLX ASR 转录）➔ `stage: "translating"`（PySubtrans LLM 翻译）➔ 最终状态变为 `status: "completed"`。
 5. **验证物理交付产物**：
-   Muse 在处理完成后，会将视频与字幕分别交付至对应目录：
-   - **视频交付目录**：`/Volumes/External/automation/scraping/`
-     ```bash
-     ls -la /Volumes/External/automation/scraping/SNOS-411.mp4
-     ```
-     确认视频文件已成功移动至待刮削目录（供 mdc-ng 监听整理）。
-   - **中文字幕交付目录**：`/Volumes/External/automation/subtitles/`
-     ```bash
-     # 默认未配置 subtitle.language_suffix 时生成 SNOS-411.srt
-     ls -la /Volumes/External/automation/subtitles/SNOS-411.srt
-     head -n 20 /Volumes/External/automation/subtitles/SNOS-411.srt
-     ```
-     确认字幕文件非空，且包含时间戳和由 LLM 翻译的地道中文内容（对应任务返回的 `.job.translated_path`）。
-   只有本次提交被成功解析并处理、关联 Job 状态变为 `completed` 且产物文件生成完整，才证明整套转录与翻译流水线具备生产交付能力！
+   Muse 在处理完成后，会将视频与字幕分别交付至对应目录。检查物理文件（若命中已有字幕放行则说明未经过 ASR/LLM，若完成全流程则校验实际返回的 `translated_path`）：
+   ```bash
+   if [ ! -s "/Volumes/External/automation/scraping/SNOS-411.mp4" ]; then
+     echo "❌ 待刮削视频文件缺失或为空: /Volumes/External/automation/scraping/SNOS-411.mp4" >&2
+     exit 1
+   fi
+
+   if [ "${IS_LIGHT}" = "true" ]; then
+     echo "⚠️ 视频命中硬字幕或内嵌字幕规则直接放行 (is_light=true)，未触发 ASR 转录与 LLM 翻译流水线"
+     echo "ℹ️ 若需验证 ASR 与 LLM 翻译完整链路，请提供未压制中文字幕的生肉视频样本"
+     exit 1
+   fi
+
+   if [ -z "${TRANSLATED_PATH}" ]; then
+     echo "❌ 关联 Job 未返回 translated_path 产物路径" >&2
+     exit 1
+   fi
+
+   HOST_SUB_PATH="/Volumes/External${TRANSLATED_PATH#/data}"
+   if [ ! -s "${HOST_SUB_PATH}" ]; then
+     echo "❌ 本次生成的字幕文件不存在或为空: ${HOST_SUB_PATH}" >&2
+     exit 1
+   fi
+
+   echo "✅ 端到端全链路（ASR 转录与 LLM 翻译）部署验证通过: Submission=${SUBMISSION_ID}, Job=${JOB_ID}, 字幕=${HOST_SUB_PATH}"
+   ```
+   只有本次提交被成功解析并处理、关联 Job 状态变为 `completed`、完成真正 ASR/LLM 翻译且本次产物文件生成完整，才证明整套转录与翻译流水线具备生产交付能力！

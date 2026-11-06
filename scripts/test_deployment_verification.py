@@ -1,6 +1,7 @@
 import http.server
 import json
 import os
+import re
 import shutil
 import socketserver
 import subprocess
@@ -39,7 +40,7 @@ class MockMuseDeploymentHandler(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/api/v1/tasks/submission/"):
             sub_id = self.path.split("/")[-1]
             MockMuseDeploymentHandler.submission_polls += 1
-            if MockMuseDeploymentHandler.scenario in ("success", "job_failed", "artifacts_missing"):
+            if MockMuseDeploymentHandler.scenario in ("success", "job_failed", "artifacts_missing", "light_bypass"):
                 if MockMuseDeploymentHandler.submission_polls < 2:
                     resp = {
                         "id": sub_id,
@@ -121,6 +122,7 @@ class MockMuseDeploymentHandler(http.server.BaseHTTPRequestHandler):
                     "id": "SNOS-411",
                     "status": "completed",
                     "stage": "translating",
+                    "is_light": false,
                     "error": "",
                     "job": {"translated_path": "/data/automation/subtitles/SNOS-411.srt"}
                 }
@@ -134,8 +136,23 @@ class MockMuseDeploymentHandler(http.server.BaseHTTPRequestHandler):
                         "id": "job-associated-999",
                         "status": "failed",
                         "stage": "translating",
+                        "is_light": False,
                         "error": "LLM API key invalid",
                         "job": {"translated_path": ""}
+                    }
+                elif MockMuseDeploymentHandler.scenario == "light_bypass":
+                    resp = {
+                        "id": "job-associated-999",
+                        "status": "completed",
+                        "stage": "scraping",
+                        "is_light": True,
+                        "error": "",
+                        "job": {
+                            "id": "job-associated-999",
+                            "is_light": True,
+                            "subtitle_detection_reason": "hard_sub",
+                            "translated_path": ""
+                        }
                     }
                 else:
                     if MockMuseDeploymentHandler.job_polls < 2:
@@ -143,6 +160,7 @@ class MockMuseDeploymentHandler(http.server.BaseHTTPRequestHandler):
                             "id": "job-associated-999",
                             "status": "processing",
                             "stage": "transcribing",
+                            "is_light": False,
                             "error": "",
                             "job": {"translated_path": ""}
                         }
@@ -151,8 +169,13 @@ class MockMuseDeploymentHandler(http.server.BaseHTTPRequestHandler):
                             "id": "job-associated-999",
                             "status": "completed",
                             "stage": "translating",
+                            "is_light": False,
                             "error": "",
-                            "job": {"translated_path": "/data/automation/subtitles/SNOS-411.srt"}
+                            "job": {
+                                "id": "job-associated-999",
+                                "is_light": False,
+                                "translated_path": "/data/automation/subtitles/SNOS-411.srt"
+                            }
                         }
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -167,6 +190,23 @@ class MockMuseDeploymentHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         pass
+
+
+def extract_tutorial_bash_script(markdown_path, start_heading, end_heading=None):
+    with open(markdown_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    start_pos = content.find(start_heading)
+    if start_pos == -1:
+        raise ValueError(f"Heading '{start_heading}' not found in {markdown_path}")
+    sub = content[start_pos:]
+    if end_heading:
+        end_pos = sub.find(end_heading, len(start_heading))
+        if end_pos != -1:
+            sub = sub[:end_pos]
+    blocks = re.findall(r"```bash\s*\n(.*?)\n\s*```", sub, re.DOTALL)
+    if not blocks:
+        raise ValueError(f"No bash code blocks found under '{start_heading}' in {markdown_path}")
+    return "\n\n".join(blocks)
 
 
 class DeploymentVerificationTests(unittest.TestCase):
@@ -191,176 +231,197 @@ class DeploymentVerificationTests(unittest.TestCase):
         with open(self.sample_file, "wb") as f:
             f.write(b"0" * 1024)
 
+        # Pre-seed scraping video
+        self.scraping_video = f"{self.tmpdir}/automation/scraping/SNOS-411.mp4"
+        with open(self.scraping_video, "wb") as f:
+            f.write(b"video-data" * 100)
+
         # Pre-seed historical completed outputs to test false positive prevention
-        self.old_video = f"{self.tmpdir}/automation/scraping/SNOS-411.mp4"
-        with open(self.old_video, "wb") as f:
-            f.write(b"old-video-data" * 100)
-        self.old_sub = f"{self.tmpdir}/automation/subtitles/SNOS-411.srt"
-        with open(self.old_sub, "w") as f:
+        self.sub_file = f"{self.tmpdir}/automation/subtitles/SNOS-411.srt"
+        with open(self.sub_file, "w") as f:
             f.write("1\n00:00:01,000 --> 00:00:03,000\n旧字幕条目\n")
+
+        self.repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.hook_script = os.path.join(self.repo_root, "scripts", "torrent_complete.py")
 
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def run_agent_verification_script(self):
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        hook_script = os.path.join(repo_root, "scripts", "torrent_complete.py")
+    def run_extracted_tutorial(self, doc_type):
+        if doc_type == "agent":
+            doc_path = os.path.join(self.repo_root, "docs", "deployment", "agent-deployment.md")
+            raw_script = extract_tutorial_bash_script(
+                doc_path, "4. **端到端真实处理完整性验证指引", "### Phase 8"
+            )
+            # Map parameters to test environment
+            script = raw_script.replace('"${HOME}/Development/scripts/torrent_complete.py"', f'"{self.hook_script}"')
+            script = script.replace("{{HOST_PORT}}", str(self.port))
+            script = script.replace("{{MEDIA_ROOT}}", self.tmpdir)
+        elif doc_type == "macos":
+            doc_path = os.path.join(self.repo_root, "docs", "deployment", "macos-deployment.md")
+            raw_script = extract_tutorial_bash_script(
+                doc_path, "### 级别 2：端到端真实媒体全链路验证"
+            )
+            # Map parameters to test environment
+            script = raw_script.replace("/Users/your-username/Development/scripts/torrent_complete.py", self.hook_script)
+            script = script.replace("4444", str(self.port))
+            script = script.replace("/Volumes/External", self.tmpdir)
+        else:
+            raise ValueError(f"Unknown doc_type: {doc_type}")
 
-        bash_script = f"""
-        set -e
+        # Prepend fast sleep and environment mappings so test loop executes in milliseconds
+        wrapper = f"""
+        sleep() {{ builtin sleep 0.01; }}
         export MUSE_URL="http://127.0.0.1:{self.port}"
         export HOST_INPUT_PATH="{self.tmpdir}"
         export CONTAINER_INPUT_PATH="/data"
 
-        OUTPUT=$(python3 "{hook_script}" \
-          "SNOS-411" "whisparr" "real-hash-001" "{self.sample_file}" 2>&1)
-        EXIT_CODE=$?
-        if [ ${{EXIT_CODE}} -ne 0 ]; then
-          echo "❌ Webhook 投递执行失败 (退出码 ${{EXIT_CODE}}): ${{OUTPUT}}" >&2
-          exit 1
-        fi
-
-        SUBMISSION_ID=$(echo "${{OUTPUT}}" | grep -o 'submission_id=[^ ]*' | head -n 1 | cut -d= -f2)
-        if [ -z "${{SUBMISSION_ID}}" ]; then
-          echo "❌ 无法从 Webhook 输出中解析 submission_id: ${{OUTPUT}}" >&2
-          exit 1
-        fi
-
-        JOB_ID=""
-        for i in $(seq 1 10); do
-          if ! SUB_RESP=$(curl -fsS "http://127.0.0.1:{self.port}/api/v1/tasks/submission/${{SUBMISSION_ID}}" 2>/dev/null); then
-            echo "❌ 查询 Submission 失败: 无法访问接口" >&2
-            exit 1
-          fi
-
-          SUB_STATUS=$(echo "${{SUB_RESP}}" | jq -r '.status // empty')
-          SUB_ERROR=$(echo "${{SUB_RESP}}" | jq -r '.error // empty')
-          JOB_ID=$(echo "${{SUB_RESP}}" | jq -r '.canonical_task.id // empty')
-
-          if [ "${{SUB_STATUS}}" = "failed" ] || [ "${{SUB_STATUS}}" = "ignored" ] || [ "${{SUB_STATUS}}" = "interrupted" ]; then
-            echo "❌ Submission 准备阶段异常终止: 状态=${{SUB_STATUS}}, 错误=${{SUB_ERROR}}" >&2
-            exit 1
-          fi
-
-          if [ -n "${{JOB_ID}}" ]; then
-            break
-          fi
-
-          sleep 0.05
-        done
-
-        if [ -z "${{JOB_ID}}" ]; then
-          echo "❌ 超时未解析出关联 Job ID (canonical_task 为空)，终止验证" >&2
-          exit 1
-        fi
-
-        STATUS=""
-        for i in $(seq 1 10); do
-          if ! TASK_JSON=$(curl -fsS "http://127.0.0.1:{self.port}/api/v1/tasks/job/${{JOB_ID}}" 2>/dev/null); then
-            echo "❌ 查询关联 Job 失败 (Job ID: ${{JOB_ID}})" >&2
-            exit 1
-          fi
-
-          STATUS=$(echo "${{TASK_JSON}}" | jq -r '.status // empty')
-          STAGE=$(echo "${{TASK_JSON}}" | jq -r '.stage // empty')
-          ERROR=$(echo "${{TASK_JSON}}" | jq -r '.error // empty')
-
-          if [ "${{STATUS}}" = "failed" ] || [ "${{STATUS}}" = "interrupted" ]; then
-            echo "❌ 关联 Job 执行失败: 状态=${{STATUS}}, 阶段=${{STAGE}}, 错误=${{ERROR}}" >&2
-            exit 1
-          fi
-
-          if [ "${{STATUS}}" = "completed" ]; then
-            break
-          fi
-
-          sleep 0.05
-        done
-
-        if [ "${{STATUS}}" != "completed" ]; then
-          echo "❌ 关联 Job 未能在超时时间内达到 completed 状态 (当前状态: ${{STATUS}})" >&2
-          exit 1
-        fi
-
-        if [ ! -s "{self.tmpdir}/automation/scraping/SNOS-411.mp4" ]; then
-          echo "❌ 待刮削视频文件缺失或为空" >&2
-          exit 1
-        fi
-
-        if [ ! -s "{self.tmpdir}/automation/subtitles/SNOS-411.srt" ]; then
-          echo "❌ 中文字幕文件缺失或为空" >&2
-          exit 1
-        fi
-
-        echo "✅ 端到端部署全链路验证通过: Submission=${{SUBMISSION_ID}}, Job=${{JOB_ID}}"
-        exit 0
+        {script}
         """
 
         return subprocess.run(
-            ["bash", "-c", bash_script],
+            ["bash", "-c", wrapper],
             capture_output=True,
             text=True,
             timeout=10
         )
 
-    def test_success_path_correlates_job_and_verifies_artifacts(self):
+    # ──────────────────────────────────────────────────────────────────────────
+    # Tests directly executing extracted commands from docs/deployment/agent-deployment.md
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def test_agent_tutorial_success_path(self):
         MockMuseDeploymentHandler.scenario = "success"
-        proc = self.run_agent_verification_script()
+        proc = self.run_extracted_tutorial("agent")
         self.assertEqual(proc.returncode, 0, f"Expected success, got stderr: {proc.stderr}")
         self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
-        self.assertIn("端到端部署全链路验证通过", proc.stdout)
+        self.assertIn("端到端全链路（ASR 转录与 LLM 翻译）部署验证通过", proc.stdout)
 
-    def test_preparation_failure_terminates_and_never_reads_historical_job(self):
+    def test_agent_tutorial_light_bypass_with_residual_sub_fails_asr_verification(self):
+        """When existing subtitles trigger is_light bypass, residual subtitles must not cause false positive."""
+        MockMuseDeploymentHandler.scenario = "light_bypass"
+        proc = self.run_extracted_tutorial("agent")
+        self.assertEqual(proc.returncode, 1, "Must fail ASR/LLM verification on light bypass")
+        self.assertIn("未触发 ASR 转录与 LLM 翻译流水线", proc.stdout + proc.stderr)
+
+    def test_agent_tutorial_preparation_failure(self):
         MockMuseDeploymentHandler.scenario = "prep_failed"
-        proc = self.run_agent_verification_script()
+        proc = self.run_extracted_tutorial("agent")
         self.assertEqual(proc.returncode, 1)
-        self.assertFalse(MockMuseDeploymentHandler.history_job_accessed, "Must not access historical SNOS-411 job")
+        self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
         self.assertIn("Submission 准备阶段异常终止: 状态=failed", proc.stderr)
 
-    def test_interrupted_submission_terminates_explicitly(self):
+    def test_agent_tutorial_interrupted_submission(self):
         MockMuseDeploymentHandler.scenario = "interrupted"
-        proc = self.run_agent_verification_script()
+        proc = self.run_extracted_tutorial("agent")
         self.assertEqual(proc.returncode, 1)
         self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
         self.assertIn("Submission 准备阶段异常终止: 状态=interrupted", proc.stderr)
 
-    def test_ignored_submission_terminates_explicitly(self):
+    def test_agent_tutorial_ignored_submission(self):
         MockMuseDeploymentHandler.scenario = "ignored"
-        proc = self.run_agent_verification_script()
+        proc = self.run_extracted_tutorial("agent")
         self.assertEqual(proc.returncode, 1)
         self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
         self.assertIn("Submission 准备阶段异常终止: 状态=ignored", proc.stderr)
 
-    def test_unlinked_submission_timeouts_and_fails(self):
+    def test_agent_tutorial_unlinked_submission_timeout(self):
         MockMuseDeploymentHandler.scenario = "unlinked"
-        proc = self.run_agent_verification_script()
+        proc = self.run_extracted_tutorial("agent")
         self.assertEqual(proc.returncode, 1)
         self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
         self.assertIn("超时未解析出关联 Job ID", proc.stderr)
 
-    def test_submission_query_failure_terminates_explicitly(self):
+    def test_agent_tutorial_query_500_failure(self):
         MockMuseDeploymentHandler.scenario = "query_500"
-        proc = self.run_agent_verification_script()
+        proc = self.run_extracted_tutorial("agent")
         self.assertEqual(proc.returncode, 1)
         self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
         self.assertIn("查询 Submission 失败", proc.stderr)
 
-    def test_job_execution_failure_terminates_explicitly(self):
+    def test_agent_tutorial_job_execution_failure(self):
         MockMuseDeploymentHandler.scenario = "job_failed"
-        proc = self.run_agent_verification_script()
+        proc = self.run_extracted_tutorial("agent")
         self.assertEqual(proc.returncode, 1)
         self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
         self.assertIn("关联 Job 执行失败: 状态=failed", proc.stderr)
 
-    def test_missing_artifacts_causes_failure(self):
+    def test_agent_tutorial_missing_translated_file(self):
         MockMuseDeploymentHandler.scenario = "artifacts_missing"
-        os.remove(self.old_sub)
-        proc = self.run_agent_verification_script()
+        os.remove(self.sub_file)
+        proc = self.run_extracted_tutorial("agent")
         self.assertEqual(proc.returncode, 1)
         self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
-        self.assertIn("中文字幕文件缺失或为空", proc.stderr)
+        self.assertIn("本次生成的字幕文件不存在或为空", proc.stderr)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Tests directly executing extracted commands from docs/deployment/macos-deployment.md
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def test_macos_tutorial_success_path(self):
+        MockMuseDeploymentHandler.scenario = "success"
+        proc = self.run_extracted_tutorial("macos")
+        self.assertEqual(proc.returncode, 0, f"Expected success, got stderr: {proc.stderr}")
+        self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
+        self.assertIn("端到端全链路（ASR 转录与 LLM 翻译）部署验证通过", proc.stdout)
+
+    def test_macos_tutorial_light_bypass_with_residual_sub_fails_asr_verification(self):
+        MockMuseDeploymentHandler.scenario = "light_bypass"
+        proc = self.run_extracted_tutorial("macos")
+        self.assertEqual(proc.returncode, 1, "Must fail ASR/LLM verification on light bypass")
+        self.assertIn("未触发 ASR 转录与 LLM 翻译流水线", proc.stdout + proc.stderr)
+
+    def test_macos_tutorial_preparation_failure(self):
+        MockMuseDeploymentHandler.scenario = "prep_failed"
+        proc = self.run_extracted_tutorial("macos")
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
+        self.assertIn("Submission 准备阶段异常终止: 状态=failed", proc.stderr)
+
+    def test_macos_tutorial_interrupted_submission(self):
+        MockMuseDeploymentHandler.scenario = "interrupted"
+        proc = self.run_extracted_tutorial("macos")
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
+        self.assertIn("Submission 准备阶段异常终止: 状态=interrupted", proc.stderr)
+
+    def test_macos_tutorial_ignored_submission(self):
+        MockMuseDeploymentHandler.scenario = "ignored"
+        proc = self.run_extracted_tutorial("macos")
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
+        self.assertIn("Submission 准备阶段异常终止: 状态=ignored", proc.stderr)
+
+    def test_macos_tutorial_unlinked_submission_timeout(self):
+        MockMuseDeploymentHandler.scenario = "unlinked"
+        proc = self.run_extracted_tutorial("macos")
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
+        self.assertIn("超时未解析出关联 Job ID", proc.stderr)
+
+    def test_macos_tutorial_query_500_failure(self):
+        MockMuseDeploymentHandler.scenario = "query_500"
+        proc = self.run_extracted_tutorial("macos")
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
+        self.assertIn("查询 Submission 接口失败", proc.stderr)
+
+    def test_macos_tutorial_job_execution_failure(self):
+        MockMuseDeploymentHandler.scenario = "job_failed"
+        proc = self.run_extracted_tutorial("macos")
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
+        self.assertIn("关联 Job 执行失败: 状态=failed", proc.stderr)
+
+    def test_macos_tutorial_missing_translated_file(self):
+        MockMuseDeploymentHandler.scenario = "artifacts_missing"
+        os.remove(self.sub_file)
+        proc = self.run_extracted_tutorial("macos")
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse(MockMuseDeploymentHandler.history_job_accessed)
+        self.assertIn("本次生成的字幕文件不存在或为空", proc.stderr)
 
 
 if __name__ == "__main__":
