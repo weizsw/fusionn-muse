@@ -1,33 +1,46 @@
 services:
   fusionn-muse:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/weizsw/fusionn-muse:latest
+    # 如需本地构建镜像，可取消下方 build 注释：
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
     container_name: fusionn-muse
     restart: unless-stopped
+    stop_grace_period: 45s
     ports:
-      - "8080:8080"
+      # 宿主机端口:容器端口（默认 8080，如与宿主机其他服务冲突可改为 4444:8080 等）
+      - "4444:8080"
     volumes:
-      # Config (required)
+      # 配置文件（必选，只读挂载）
       - ./config/config.yaml:/app/config/config.yaml:ro
 
-      # ─── Required mounts ───
-      - /path/to/downloads:/data/input:ro # Torrent downloads (read-only)
-      - /path/to/finished:/data/finished # Processed videos
-      - /path/to/subtitles:/data/subtitles # Translated subtitles
+      # ─── 推荐挂载方案：挂载统一媒体根目录至 /data ───
+      # 映射后容器内自动对应规范目录结构：
+      #   /data/torrents              - qBittorrent 下载输出目录（输入源）
+      #   /data/automation/staging    - 队列排队暂存目录
+      #   /data/automation/processing - 当前处理中工作目录
+      #   /data/automation/scraping   - 完成处理输出目录（下游 mdc-ng 监控此目录）
+      #   /data/automation/finished   - 最终整理归档目录（mdc-ng 刮削整理后目标）
+      #   /data/automation/subtitles  - 中文字幕库目录
+      #   /data/automation/transcriptions - 原始语言转录字幕存档（供二次翻译）
+      #   /data/automation/meta       - SQLite 任务状态持久化数据库
+      #   /data/automation/failed     - 失败任务文件归档（供排查）
+      - /path/to/media_root:/data
 
-      # ─── Optional: persist queue across restarts ───
-      # Without these, queued jobs are lost on container restart
-      # - ./data/staging:/data/staging
-      # - ./data/processing:/data/processing
-
-      # ─── Optional: access failed jobs for debugging ───
-      # - ./data/failed:/data/failed
+      # ─── 备选挂载方案：分别挂载下载目录与自动化工作目录 ───
+      # - /path/to/downloads:/data/torrents:ro
+      # - /path/to/automation:/data/automation
     environment:
       - ENV=production
-      - TZ=Asia/Singapore
-    # Bounded container logs: 20 MiB per file, current file plus five backups.
-    # This takes effect when the container is recreated, not on the running one.
+      - TZ=Asia/Shanghai
+      - PUID=1000
+      - PGID=1000
+      - LOG_LEVEL=info
+    extra_hosts:
+      # 允许容器通过 host.docker.internal 访问宿主机服务（如 macOS 宿主机上的 ASR 服务）
+      - "host.docker.internal:host-gateway"
+    # 限制容器日志体量：单文件最大 20MB，保留 5 份轮转备份
     logging:
       driver: json-file
       options:

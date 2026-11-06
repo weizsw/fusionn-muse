@@ -16,6 +16,8 @@ resubmit a missed completion by hand.
 Optional environment variables (the defaults are the constants below):
 
     MUSE_URL    fusionn-muse base URL
+    HOST_INPUT_PATH  host download mount path; the default is /Volumes/External
+    CONTAINER_INPUT_PATH  container download mount path; the default is /data
     LOG_FILE    file that the log lines are appended to
     LOG_LEVEL   DEBUG, INFO, WARN or ERROR; the default is INFO
     TZ          time zone of the log timestamps; the default is Asia/Shanghai
@@ -39,15 +41,15 @@ import urllib.request
 import uuid
 import zoneinfo
 
-MUSE_URL = os.environ.get("MUSE_URL", "http://192.168.50.135:4444")
+MUSE_URL = os.environ.get("MUSE_URL", "http://127.0.0.1:4444")
 LOG_FILE = os.environ.get("LOG_FILE", "/tmp/torrent-complete.log")
 
 # Only this category is sent to fusionn-muse.
 MUSE_CATEGORY = "whisparr"
 
 # The host download mount, and the path that fusionn-muse sees for it.
-HOST_INPUT_PATH = "/Volumes/External"
-CONTAINER_INPUT_PATH = "/data"
+HOST_INPUT_PATH = os.environ.get("HOST_INPUT_PATH", "/Volumes/External")
+CONTAINER_INPUT_PATH = os.environ.get("CONTAINER_INPUT_PATH", "/data")
 
 REQUEST_TIMEOUT_SECONDS = 15
 # The acknowledgement is small; reading stops at this size.

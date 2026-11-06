@@ -71,7 +71,7 @@ translate:
   # Examples:
   #   - "Preserve Japanese honorifics like -san, -kun, -chan"
   #   - "Technical terms: API=接口, server=服务器"
-  #   - "Use formal language style"
+  #   - Adult media translation example: see docs/deployment/macos-deployment.md
   instruction: ""
 
 # PySubtrans wrapper settings.
@@ -184,17 +184,13 @@ apprise:
 # API ENDPOINTS
 # ════════════════════════════════════════════════════════════════════════════
 #
-# POST /api/v1/webhook/torrent     - qBittorrent completion callback
-# GET  /api/v1/queue               - List all jobs
-# GET  /api/v1/queue/stats         - Queue statistics
-# GET  /api/v1/queue/:id           - Get job details
-# POST /api/v1/jobs/:id/retry      - Retry a failed job
-# POST /api/v1/jobs/:id/resume     - Resume an interrupted job
-# POST /api/v1/jobs/:id/retranslate - Translate again from the persisted source subtitle
-# POST /api/v1/retry/staging       - Re-queue all staging files
-# POST /api/v1/retry/failed        - Re-queue all failed files
-# POST /api/v1/retry/failed/:name  - Re-queue specific failed file
-# GET  /api/v1/files/staging       - List staging files
-# GET  /api/v1/files/failed        - List failed files
+# POST /api/v1/webhook/torrent        - qBittorrent completion callback (returns 202)
+# GET  /api/v1/tasks                  - List tasks (filter with ?status=failed / ?kind=job)
+# GET  /api/v1/tasks/stats            - Aggregated task statistics
+# GET  /api/v1/tasks/:kind/:id        - Detail, available actions and history
+# POST /api/v1/tasks/:kind/:id/actions - Retry, resume or retranslate
+# POST /api/v1/tasks/actions          - Bulk retry/resume failed or interrupted tasks
+# GET  /api/v1/health                 - Service liveness check
+# GET  /api/v1/version                - Version and build information
 #
 # ════════════════════════════════════════════════════════════════════════════

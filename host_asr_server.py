@@ -16,7 +16,8 @@ SERVICE = "host-asr"
 log = configure(service=SERVICE, component=SERVICE)
 
 import uvicorn  # noqa: E402
-from fastapi import FastAPI, JSONResponse, Request, Response  # noqa: E402
+from fastapi import FastAPI, Request, Response  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 
