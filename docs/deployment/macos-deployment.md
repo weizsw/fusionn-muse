@@ -331,7 +331,7 @@ services:
 此阶段仅验证 qBittorrent 脚本、网络连通性与 SQLite 入库：
 
 ```bash
-# 执行回调脚本测试投递
+# 执行回调脚本测试投递（脚本日志输出至 stderr）
 python3 /Users/your-username/Development/scripts/torrent_complete.py \
   "SNOS-411" \
   "whisparr" \
@@ -339,13 +339,13 @@ python3 /Users/your-username/Development/scripts/torrent_complete.py \
   "/Volumes/External/torrents/whisparr/SNOS-411.mp4"
 ```
 
-1. **终端输出**：应显示 `Accepted submission: <submission_id>`。
+1. **终端输出（stderr）**：应输出退出码为 0 的结构化日志，包含 `event=webhook_sent submission_id=<submission_id> msg="Webhook accepted"`。
 2. **查询 Submission 入库状态**：
    ```bash
-   curl -s http://127.0.0.1:4444/api/v1/tasks/submission/<submission_id> | jq .
+   curl -s http://127.0.0.1:4444/api/v1/tasks/submission/<submission_id> | jq '{id: .id, status: .status, stage: .stage, canonical_task: .canonical_task}'
    ```
-   确认返回包含正确的 `submission_id`。
-   > **注意**：如果该路径下的物理文件并不存在，Submission 提交后后台准备阶段会将其判定为文件不存在而终止。**此测试仅证明 Webhook 接收通道通畅，不能证明 ASR 转录与 LLM 翻译正常。**
+   确认返回包含正确的 `id`。
+   > **注意**：如果该路径下的物理文件并不存在，Submission 提交后后台准备阶段会将其判定为文件不存在而终止。**此测试仅证明 Webhook 接收通道通畅与数据库写入正常，不能证明 ASR 转录与 LLM 翻译正常。**
 
 ### 级别 2：端到端真实媒体全链路验证
 
@@ -363,18 +363,23 @@ python3 /Users/your-username/Development/scripts/torrent_complete.py \
      "/Volumes/External/torrents/whisparr/SNOS-411.mp4"
    ```
 3. **轮询观察任务流水线状态**：
-   通过番号代码查询任务详情与阶段：
+   通过番号代码查询任务详情、执行阶段与最终产物路径（`status`、`stage` 位于顶层）：
    ```bash
-   curl -s http://127.0.0.1:4444/api/v1/tasks/job/SNOS-411 | jq '{status: .task.status, stage: .task.stage}'
+   curl -s http://127.0.0.1:4444/api/v1/tasks/job/SNOS-411 | jq '{status: .status, stage: .stage, error: .error, translated_path: .job.translated_path}'
    ```
    流水线将依次经历：`stage: "transcribing"`（宿主机 MLX ASR 转录）➔ `stage: "translating"`（PySubtrans LLM 翻译）➔ 最终状态变为 `status: "completed"`。
 4. **验证物理交付产物**：
-   检查输出目录 `/Volumes/External/automation/scraping/`：
-   ```bash
-   ls -la /Volumes/External/automation/scraping/
-   ```
-   **判定成功标准**：
-   - 存在规范命名的视频文件（如 `SNOS-411.mp4`）。
-   - 存在对应的同名中文字幕文件（如 `SNOS-411.zh-CN.srt` 或 `SNOS-411.srt`）。
-   - 字幕文件内容非空，且包含时间戳和由 LLM 翻译的地道中文内容。
-   只有完成上述检查，才证明整套转录与翻译流水线已完全具备生产交付能力！
+   Muse 在处理完成后，会将视频与字幕分别交付至对应目录：
+   - **视频交付目录**：`/Volumes/External/automation/scraping/`
+     ```bash
+     ls -la /Volumes/External/automation/scraping/SNOS-411.mp4
+     ```
+     确认视频文件已成功移动至待刮削目录（供 mdc-ng 监听整理）。
+   - **中文字幕交付目录**：`/Volumes/External/automation/subtitles/`
+     ```bash
+     # 默认未配置 subtitle.language_suffix 时生成 SNOS-411.srt
+     ls -la /Volumes/External/automation/subtitles/SNOS-411.srt
+     head -n 20 /Volumes/External/automation/subtitles/SNOS-411.srt
+     ```
+     确认字幕文件非空，且包含时间戳和由 LLM 翻译的地道中文内容（对应任务返回的 `.job.translated_path`）。
+   只有视频已就位且字幕文件生成完整，才证明整套转录与翻译流水线具备生产交付能力！

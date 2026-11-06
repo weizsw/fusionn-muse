@@ -256,35 +256,65 @@ Agent 必须在终端运行并验证以下全部检查项，明确区分接口�
 
 3. **Webhook 接口投递与持久化校验 (Ingress Check)**：
    ```bash
-   # 执行投递并提取返回的 submission_id
-   OUTPUT=$(python3 ${HOME}/Development/scripts/torrent_complete.py \
+   # 必须通过 2>&1 捕获 stderr 输出（torrent_complete 采用统一结构化日志输出至 stderr）
+   OUTPUT=$(python3 "${HOME}/Development/scripts/torrent_complete.py" \
      "Test-Verification" \
      "whisparr" \
      "test-probe-001" \
-     "{{MEDIA_ROOT}}/torrents/whisparr/test.mp4")
+     "{{MEDIA_ROOT}}/torrents/whisparr/test.mp4" 2>&1)
+   EXIT_CODE=$?
    echo "${OUTPUT}"
-   # 提取并验证 Submission 记录入库状态：
-   SUBMISSION_ID=$(echo "${OUTPUT}" | grep -o 'Accepted submission: [^ ]*' | awk '{print $3}')
-   if [ -n "${SUBMISSION_ID}" ]; then
-     curl -s "http://127.0.0.1:{{HOST_PORT}}/api/v1/tasks/submission/${SUBMISSION_ID}" | grep -q "${SUBMISSION_ID}"
-     echo "Webhook 通道与持久化验证通过 (Submission ID: ${SUBMISSION_ID})"
+
+   if [ ${EXIT_CODE} -ne 0 ]; then
+     echo "❌ Webhook 脚本执行失败 (退出码 ${EXIT_CODE})" >&2
+     exit 1
+   fi
+
+   # 从 logfmt 格式日志中提取 submission_id
+   SUBMISSION_ID=$(echo "${OUTPUT}" | grep -o 'submission_id=[^ ]*' | head -n 1 | cut -d= -f2)
+   if [ -z "${SUBMISSION_ID}" ]; then
+     echo "❌ 无法从 Webhook 输出中解析 submission_id" >&2
+     exit 1
+   fi
+
+   # 校验该 Submission 是否已成功持久化存入任务中心
+   TASK_RESP=$(curl -fsS "http://127.0.0.1:{{HOST_PORT}}/api/v1/tasks/submission/${SUBMISSION_ID}")
+   RECORDED_ID=$(echo "${TASK_RESP}" | jq -r '.id // empty')
+   if [ "${RECORDED_ID}" = "${SUBMISSION_ID}" ]; then
+     echo "✅ Webhook 接口投递与持久化校验通过 (Submission ID: ${SUBMISSION_ID})"
+   else
+     echo "❌ 未能在任务中心查询到该 Submission 记录" >&2
+     exit 1
    fi
    ```
-   > **注意**：由于上述测试未提供真实视频文件，后台扫描阶段会将其标记为文件不存在，**该测试仅能证明 Webhook 接收与 SQLite 入库正常，不能证明 ASR 转录和 LLM 翻译正常**。
+   > **注意**：由于上述测试未提供真实存在的媒体文件，后台准备阶段在检测文件缺失后会终止处理。**此步骤仅证明 Webhook 请求通道通畅与数据库入库正常，不能证明 ASR 转录和 LLM 翻译正常。**
 
 4. **端到端真实处理完整性验证指引 (End-to-End Real Sample Verification)**：
-   Agent 应向用户说明完整的端到端验证标准：
-   - 用户或 Agent 在 `{{MEDIA_ROOT}}/torrents/whisparr/` 下放入一个真实存在的番号视频样本（例如 `SNOS-411.mp4`，文件大小必须 >200MB 以免被广告过滤规则跳过）。
+   Agent 应向用户说明端到端全链路的真实验证标准与步骤：
+   - 用户或 Agent 在 `{{MEDIA_ROOT}}/torrents/whisparr/` 下放入一个真实存在的番号视频样本（例如 `SNOS-411.mp4`，文件大小必须大于 200MB 以免被广告过滤规则跳过）。
    - 执行 Webhook 投递：
      ```bash
-     python3 ${HOME}/Development/scripts/torrent_complete.py \
-       "SNOS-411" "whisparr" "real-hash" "{{MEDIA_ROOT}}/torrents/whisparr/SNOS-411.mp4"
+     OUTPUT=$(python3 "${HOME}/Development/scripts/torrent_complete.py" \
+       "SNOS-411" "whisparr" "real-hash-001" "{{MEDIA_ROOT}}/torrents/whisparr/SNOS-411.mp4" 2>&1)
+     SUBMISSION_ID=$(echo "${OUTPUT}" | grep -o 'submission_id=[^ ]*' | head -n 1 | cut -d= -f2)
      ```
-   - 轮询等待任务状态变为 `completed`：
+   - 轮询跟踪任务状态（读取顶层 `.status` 与 `.stage`，区分完成、失败与中断）：
      ```bash
-     curl -s "http://127.0.0.1:{{HOST_PORT}}/api/v1/tasks/job/SNOS-411" | grep -q '"status":"completed"'
+     TASK_JSON=$(curl -fsS "http://127.0.0.1:{{HOST_PORT}}/api/v1/tasks/job/SNOS-411")
+     STATUS=$(echo "${TASK_JSON}" | jq -r '.status // empty')
+     STAGE=$(echo "${TASK_JSON}" | jq -r '.stage // empty')
+     ERROR=$(echo "${TASK_JSON}" | jq -r '.error // empty')
+     TRANSLATED_PATH=$(echo "${TASK_JSON}" | jq -r '.job.translated_path // empty')
+
+     if [ "${STATUS}" = "failed" ] || [ "${STATUS}" = "interrupted" ]; then
+       echo "❌ 任务执行异常: 状态=${STATUS}, 阶段=${STAGE}, 错误=${ERROR}" >&2
+       exit 1
+     fi
      ```
-   - 核对最终物理交付物：确认 `{{MEDIA_ROOT}}/automation/scraping/` 目录下同时生成了视频文件和非空的 `.zh-CN.srt` 中文字幕文件。只有产物全部就绪，才代表端到端处理完全成功。
+   - 核对物理交付产物（视频与字幕发布至不同目录）：
+     - **视频文件**：检查 `{{MEDIA_ROOT}}/automation/scraping/SNOS-411.mp4` 确认已移入待刮削目录。
+     - **中文字幕**：检查 `{{MEDIA_ROOT}}/automation/subtitles/SNOS-411.srt`（默认无后缀时生成 `.srt`，对应任务返回的 `.job.translated_path`），确认文件非空且包含翻译后的中文字幕条目。
+     只有当任务顶层状态达到 `"completed"` 且两个目录下的产物均已就绪时，才判定端到端部署全链路成功。
 
 ---
 
