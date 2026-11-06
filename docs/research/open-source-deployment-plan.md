@@ -8,7 +8,7 @@
 
 1. **主服务两平台都用 Docker 运行，差别只在转写。** `config.Folders()` 把工作目录写死为 `/data/automation/*`，翻译脚本路径写死为 `/app/scripts/...`，所以主服务离开镜像无法直接运行。macOS 保留"宿主机 MLX + 容器主服务"；Linux 改为"转写服务也进容器"。
 2. **Linux 转写建议沿用现有 `/transcribe` 路径协议，由 Muse 提供一个 Linux ASR 容器。** 这样 Muse 的 Go 代码不用改，macOS 链路原样保留。容器内放两种引擎：NVIDIA 用 Qwen3-ASR（`qwen-asr`，PyTorch/CUDA），与 macOS 同一模型；CPU 默认用 faster-whisper。faster-whisper 有公开的 CPU 基准，Qwen3-ASR 没有任何公开的 CPU 速度数据。用户已确认当初换成 MLX 主要是为了用上 Mac 的 GPU，并非对 faster-whisper 的质量不满，所以 CPU 默认用 faster-whisper 没有已知障碍。用户目前没有 Linux 测试机，因此 Linux 两条路线首发都标为"实验"（见第 7 节）。
-3. **mdc-ng 与 Muse 之间没有代码集成，衔接靠文件系统。** Muse 把视频交付到 `/data/automation/scraping/`，把字幕交付到 `/data/automation/subtitles/`，这是两个不同目录。mdc-ng 应该怎样监控、怎样匹配字幕，要以用户现在的实际设置为准（见第 7 节问题）。
+3. **mdc-ng 与 Muse 之间没有代码集成，衔接靠文件系统；用户现场的完整链路已按截图核对（第 4 节）。** Muse 只把视频交付到 `scraping/`、字幕交付到 `subtitles/`，**代码从不写 `finished/`**。用户看到的"最终到 finished"是 mdc-ng 的整理结果：mdc-ng 监控 `scraping`，从 `subtitles` 字幕库取字幕，把视频整理到 `finished`，把元数据整理到用户的本地 Emby 目录；之后 MoviePilot 的 115strm 插件上传 `finished` 到 115 网盘，并在 Emby 目录生成 STRM。开源文档里 Muse 的职责到 `scraping/` 和 `subtitles/` 为止，mdc-ng、MoviePilot、Emby 都写成可选的外部集成示例，不改 Muse 的输出目录。
 4. **陌生用户照现有文档部署会失败。** 有三处硬伤：
    - `host_asr_server.py` 在任何真实 FastAPI 版本下都无法启动（已实测）。
    - 示例配置默认的 `openai` 翻译地址会得到 404（已实测）。
@@ -75,7 +75,7 @@ Muse 对转写端的要求来自 `internal/executor/host_asr.go` 和处理流程
 - 输入一个容器内视频路径，返回一个 Muse 能读到的 SRT 路径。
 - 单个视频可能长达 1–3 小时；HTTP 超时由 `mlx_qwen3_asr.timeout_minutes` 控制（默认 180 分钟）。
 - 输出必须带**句级时间轴**，因为后续翻译和交付都基于 SRT。
-- 语种以日语为主（从番号识别逻辑和 `whisparr` 分类推断，**未经用户确认**）。
+- 语种以日语为主（用户当前配置 `mlx_qwen3_asr.language: ja`）。
 
 ### 3.2 候选方案与证据
 
@@ -129,22 +129,78 @@ Muse 对转写端的要求来自 `internal/executor/host_asr.go` 和处理流程
 - 镜像构建和不需要 GPU 的部分可以在 GitHub Actions 的 Linux 环境里验证：镜像能构建、服务能启动、`/health` 正常、用几秒钟的短样片能走通 `/transcribe` 并产出 SRT（CPU 引擎，小模型）。这能证明"能跑通"，不能证明速度和日语质量。
 - 速度和质量基准留到有机器时再做：可以是作者以后的机器、按小时租用的云 GPU，或社区用户反馈。届时按上面的判定规则决定是否调整默认引擎，并去掉"实验"标记。
 
-## 4. mdc-ng 衔接
+## 4. mdc-ng、MoviePilot 与 Emby 衔接（按用户现场设置核对）
 
-**已核实：** Muse 代码里没有任何 mdc-ng 相关内容。Muse 的产出是：
+### 4.1 Muse 自己负责到哪里（已核实，按代码）
+
+Muse 代码里没有任何 mdc-ng、MoviePilot 或 Emby 相关内容。Muse 的全部产出是：
 
 - 视频：`/data/automation/scraping/<CODE>.<ext>`（文件名已清洗为番号）
 - 字幕：`/data/automation/subtitles/<CODE>[.<subtitle.language_suffix>].srt`；轻任务直接沿用外挂字幕的原扩展名（例如 `.ass`）
-- 字幕先于视频出现，视频文件名一次性出现（见第 1 节）
+- 字幕先于视频发布；视频文件名一次性出现，不会被监控程序看到写了一半的文件（见第 1 节）
 
-**有文档依据[9]：** mdc-ng 提供目录监控（"性能模式"实时监听，"兼容模式"定时扫描）、五种整理模式（硬链接、复制、移动、软链接、原地整理），能"自动整理视频自带字幕文件，支持本地字幕库匹配"。它以 Docker 部署，有 `PUID/PGID`，`/config` 存配置，`/media` 可映射多个媒体目录。mdc-ng 仓库只公开 README 和图标，看不到源码，所以**字幕库的命名规则、是否保留语言后缀，都无法从源码确认**。README 没有提到触发刮削的 HTTP 接口。
+**当前代码从不写 `finished/`，也不创建 `finished/` 或 `pending/`。** 代码创建的只有 `staging`、`processing`、`scraping`、`subtitles`、`transcriptions`、`meta`、`failed`。git 历史显示，早期版本（v0.1.0 前后）用过 `/data/finished` 作为输出，后来改名为 `scraping`（提交 ffab294，"replace 'Finished' with 'Scraping'"）；历史里从来没有出现过 `automation/pending`。
 
-**推断的衔接方式（需要用户确认）：** mdc-ng 监控 `scraping/`，选"移动"或"硬链接"模式整理到媒体库，把 `subtitles/` 设为本地字幕库。文档要写清楚：
+### 4.2 用户提供的证据与解读
 
-1. mdc-ng 容器和 Muse 挂载同一个宿主父目录。用硬链接模式时，源目录和目标目录也要在同一个挂载点内。
-2. `subtitle.language_suffix` 怎么设（例如 `zh-CN` 或 `chs`），才能在 mdc-ng 整理后被 Emby/Jellyfin 识别为中文字幕。这需要实测。
-3. 文件权限：Muse 以 root 写文件，mdc-ng 以 1000:1000 运行时能否移动这些文件。
-4. 如果 mdc-ng 用"移动"模式，`scraping/` 会被清空，这不影响 Muse 的重新翻译。重新翻译只需要 `transcriptions/` 里的源字幕，不需要视频还在（README 已有说明）。但新的翻译结果只会写到 `subtitles/`，**不会自动进入 mdc-ng 已经整理好的媒体库**。教程要说明重新翻译之后怎样同步到媒体库。
+| 来源 | 内容 | 解读 |
+|---|---|---|
+| 用户贴出的 Muse 配置（密钥已去除） | `host_prefix=/Volumes/External`，`container_prefix=/data` | 宿主 ASR 把容器里的 `/data/...` 换成 `/Volumes/External/...` 去读文件。这与设计文档记录的单一挂载 `/Volumes/External:/data` 一致。由此推断，Muse 的 `/data/automation/*` 就是宿主机的 `/Volumes/External/automation/*`。Muse 容器本身的挂载参数不在所贴内容里，所以这一条是**由配置推断**，不是直接证据 |
+| 用户提供的宿主目录 | `/Volumes/External/automation` 下有 failed、finished、meta、pending、processing、scraping、staging、subtitles、transcriptions | 其中 7 个由 Muse 创建。`finished` 是 mdc-ng 的整理目录（见下一行）。`pending` 的来源没有证据 |
+| mdc-ng 截图：整理设置 | 整理目录 `/external/automation/finished`（"必填，刮削整理结果的存放目录"）；元数据目录 `/external/strm/adults`（"可选，视频以外的文件整理到另外的目录"）；有一个"刮削出错时删除元数据目录"开关 | mdc-ng 把**视频**整理到 `finished`，把**视频以外的文件**（NFO、海报等）整理到 `strm/adults`。开关是开是关，本次没能从截图可靠判读 |
+| mdc-ng 截图：监控设置 | 监控模式选的是"兼容模式"（截图说明：每 30 秒检查一次文件树变动）；监控目录 `/external/automation/scraping` | mdc-ng 每 30 秒轮询 Muse 的视频交付目录。Muse 先发布字幕、后发布视频，视频文件名一次性出现，所以轮询不会读到半个文件，也不会出现视频到了字幕还没到的情况 |
+| mdc-ng 截图：字幕设置 | 本地字幕库目录 `/external/automation/subtitles`；"刮削时会从此目录中检索复制对应字幕文件"；"支持分层目录，字幕文件命名格式为 ABC-123.xxx" | mdc-ng 刮削时，按番号从 Muse 的字幕交付目录复制字幕 |
+| 三张截图的标签栏 | 整理、监控、下载、命名、水印、网络、元数据、NFO、演员、系统、**Webhook** | mdc-ng 有 Webhook 设置页，但截图没有展示其内容。不能确认它是"对外发通知"还是"接收触发"，所以不据此设计"Muse 主动通知 mdc-ng"的衔接 |
+| 用户原话 | "元数据放到的/external/strm/adults 这个目录其实就是我的本地的emby目录" | `/external/strm/adults` 不只是元数据存放处，还是 Emby 媒体库读取的目录（路径按用户原样记录） |
+| 用户原话 | "muse把翻译完的视频文件最后会放到finished里, 然后moviepilot的115strm网盘助手插件会监控这个目录上传到115网盘"；"115strm 插件会把上传上去的视频根据目录创建对应的strm" | MoviePilot 的 115strm 插件监控 `finished`，把视频上传到 115 网盘，并按目录结构生成指向云端视频的 STRM 文件 |
+| 用户原话（直接确认） | "Muse 输出到 scraping, mdcng的监控目录是scraping" | 与代码和监控设置截图一致。"Muse → scraping → mdc-ng"这一段已由用户直接确认，不再列为待核实 |
+
+**与用户早先描述的关系（已确认）：** 用户早先说"muse 把翻译完的视频最后放到 finished"，描述的是整条链路的最终结果。用户随后直接确认：Muse 输出到 `scraping`，mdc-ng 监控 `scraping`。按代码和截图，**把视频从 `scraping` 搬到 `finished` 的是 mdc-ng**（它的整理目录就是 `finished`）。所以方案**不**把 Muse 的输出目录改成 `finished`。如果改了，mdc-ng 就收不到视频，刮削和元数据这一步会被跳过。
+
+### 4.3 用户现场的完整链路
+
+```text
+qB 下载完成 → torrent_complete.py → Muse webhook
+Muse ── 转写 + 翻译 ──┬─ 字幕 → automation/subtitles/<CODE>[.后缀].srt   （mdc-ng 本地字幕库）
+                      └─ 视频 → automation/scraping/<CODE>.<ext>         （mdc-ng 监控目录，兼容模式 30 秒轮询）
+mdc-ng 刮削 ──┬─ 视频 → automation/finished/<按 mdc-ng 命名规则>          （整理目录）
+              ├─ NFO、海报等元数据 → strm/adults/<按命名规则>              （元数据目录 = 用户的本地 Emby 目录）
+              └─ 字幕 ← 从本地字幕库按番号复制，落点见 4.4 第 3 条
+MoviePilot 115strm 插件 ── 监控 finished ──┬─ 上传视频 → 115 网盘
+                                           └─ 按目录生成 .strm → 本地（与 Emby 目录的对应关系见 4.4 第 4 条）
+Emby ── 读取 strm/adults：元数据和字幕来自 mdc-ng，.strm 指向 115 上的视频
+```
+
+这条链路能用的关键是：**同一部片子的 `.strm`，必须和 mdc-ng 写出的 NFO、海报、字幕落在 Emby 目录的同一个文件夹里，并且主文件名一致**，Emby 才会把它们当成同一个条目。目前它们分别由两个程序生成，靠的是两者使用相同的目录结构：mdc-ng 对视频和元数据套用同一套命名规则，插件生成 STRM 时又按 `finished` 的目录结构来。
+
+### 4.4 截图仍不能证明、需要补证据的事项
+
+不猜配置，以下各项单列：
+
+1. **mdc-ng 的整理模式**（硬链接、复制、移动、软链接、原地）。截图里没有这一项。这决定 `scraping/` 里的视频会不会被移走、会不会多占一份空间。补证据：mdc-ng 整理设置里的"整理模式"截图。
+2. **mdc-ng 容器的挂载。** 截图里是 mdc-ng 容器内路径 `/external/...`，Muse 用的是 `/data/...`，宿主机是 `/Volumes/External/...`。没有 mdc-ng 的 compose 或 docker run 参数，就不能断言 `/external` 对应 `/Volumes/External`。同样不能断言 `/external/strm/adults` 在宿主机上的位置，也不能断言 Emby 容器怎么挂载它。补证据：mdc-ng 和 Emby 的挂载配置。
+3. **字幕最后落在哪里。** mdc-ng 说明里写元数据目录收的是"视频以外的文件"，字幕应该也在其中，那就会进 Emby 目录。但也可能和视频一起进 `finished`，再被插件上传到 115。补证据：随便找一部已完成的片子，列出它在 `finished` 和 `strm/adults` 两个目录下的文件清单。
+4. **115strm 插件的设置**：监控路径、STRM 输出根目录（是不是 `strm/adults` 或它的对应路径）、STRM 文件名规则，以及上传后 `finished` 里的本地视频会不会被删除。补证据：插件设置页截图，加上一部已完成片子在 Emby 目录下的文件清单（能同时看到 `.strm`、`.nfo`、字幕和海报最好）。
+5. **mdc-ng 的命名规则**（"命名"标签页）。它决定 `finished` 和 `strm/adults` 下的目录层级与文件名。补证据：命名设置截图。
+6. **`subtitle.language_suffix` 的实际值。** 所贴配置里没有出现 `subtitle` 段，**这不等于用户明确把它设为空**。代码默认值是空，此时字幕名是 `<CODE>.srt`，正好符合 mdc-ng 要求的 `ABC-123.xxx` 格式；如果设成例如 `zh-CN`，文件名会变成 `ABC-123.zh-CN.srt`，mdc-ng 能不能匹配上需要实测。核实办法（任选一个，都不涉及密钥）：
+   - 在完整的 `config.yaml` 里查找 `subtitle:` 段；
+   - 查看宿主机 `automation/subtitles/` 里的文件名有没有语言后缀；
+   - 查 Muse 任务详情：`GET /api/v1/tasks/job/<番号>`，返回的 `history[].settings_snapshot` 里 `Subtitle.LanguageSuffix` 就是当时实际使用的值。
+7. **`automation/pending` 是谁建的、做什么用。** 当前代码和全部 git 历史都没有这个目录，可能是别的工具留下的。它不影响方案，但写公开文档前应确认它不在链路里。
+8. **mdc-ng 的 Webhook 页面内容**，以及"刮削出错时删除元数据目录"开关的状态。刮削失败时视频会不会留在 `scraping`，目前也没有证据。
+
+### 4.5 写进公开文档时怎样区分"必需"和"可选集成"
+
+- **Muse 必需的部分**：qB 脚本、Muse 和转写服务的部署、`scraping/` 和 `subtitles/` 两个交付目录的含义和命名规则、交付顺序。所有用户都按这部分部署。
+- **可选集成 A：mdc-ng 本地媒体库**（通用做法）。mdc-ng 监控 `scraping`，本地字幕库设为 `subtitles`，整理到本地媒体库，Emby 或 Jellyfin 直接读取。
+- **可选集成 B：作者自己的做法**（mdc-ng + MoviePilot 115strm + Emby STRM）。整理目录设为一个单独的"待上传目录"（作者用的是 `automation/finished`），元数据目录设为 Emby 目录，115strm 插件监控待上传目录、上传到网盘并在 Emby 目录生成 STRM。文档里要写明上面那个关键条件（STRM 和元数据要在同一文件夹、主文件名一致），并说明这部分依赖第三方插件的行为，以插件文档为准。
+- 示例一律用可替换的占位值，例如 `<数据根>`、`http://<局域网地址>:8766`、`https://<你的 LLM 服务>/v1`、`<你的模型名>`。**用户现场的局域网地址、端口、模型组名、翻译指令和任何密钥都不写进公开文档或示例。**
+
+### 4.6 两个集成方式都要讲清的注意事项
+
+1. 用硬链接整理时，源目录和目标目录要在同一个挂载点内。
+2. 文件权限：Muse 以 root 写文件；如果 mdc-ng 以 1000:1000 运行，它能不能移动这些文件要实测。
+3. 重新翻译不会传到下游。mdc-ng 只在刮削时复制一次字幕，所以 Muse 重新翻译后，新字幕只会写到 `subtitles/`，**不会自动进入 Emby 目录或网盘**。教程要给出手动同步的做法（例如把新字幕复制到 Emby 目录对应文件夹，或在 mdc-ng 里重新刮削该番号）。重新翻译本身不受影响：它只需要 `transcriptions/` 里的源字幕，不需要视频还在。
 
 ## 5. 现有文档与配置的缺口
 
@@ -189,7 +245,7 @@ docs/
     linux.md                   Linux：Compose（Muse + ASR 容器），CPU 和 NVIDIA 两套配置
   integrations/
     qbittorrent.md             原生 qB 和 Docker qB 两种情况；分类、路径映射、手动重发
-    mdc-ng.md                  监控目录、字幕库、语言后缀、权限、重新翻译后的同步
+    mdc-ng.md                  可选集成：A 本地媒体库；B 网盘 + STRM（MoviePilot 115strm + Emby）；字幕库、语言后缀、权限、重新翻译后的同步
   configuration.md             配置项说明；环境变量覆盖；LLM 服务地址要带 /v1
   operations.md                任务查看、重试、恢复、重新翻译（从现有 README 迁出）
   troubleshooting.md           症状 → 原因 → 检查命令
@@ -217,7 +273,8 @@ README 只保留入口内容。现有 README 里的恢复、API、升级安全�
   <数据根>/                 → 所有容器都挂成 /data（mdc-ng 按自己的要求挂）
     downloads/              qB 保存位置
     automation/{staging,processing,scraping,subtitles,transcriptions,meta,failed}
-    library/                mdc-ng 整理后的媒体库（可选）
+    library/                mdc-ng 整理后的媒体库（可选，集成 A）
+    # 集成 B（网盘 + STRM）另加一个待上传目录和一个 Emby 目录，见第 4.5 节
   ```
 
 - **三层路径对照表**：qB 看到的路径 → Muse 容器路径 → 转写服务看到的路径。macOS 上第三层是 Mac 本地路径，Linux 上就是 `/data`。
@@ -227,7 +284,7 @@ README 只保留入口内容。现有 README 里的恢复、API、升级安全�
   3. 用 `dry_run: true` 走一遍文件流程，不调用 ASR 和 LLM；
   4. 手动执行一次 `torrent_complete.py`，看到 202 和 `submission_id`；
   5. `GET /api/v1/tasks/submission/<id>` 跟踪任务；
-  6. 确认 `subtitles/` 和 `scraping/` 出现产出，mdc-ng 完成整理。
+  6. 确认 `subtitles/` 和 `scraping/` 出现产出（到这里为止是 Muse 本身的验证）；用了可选集成的，再确认 mdc-ng 已整理、下游媒体库能看到条目和字幕。
 - **安全提示**：Muse API 没有鉴权，不要暴露到公网；密钥放在 `.env` 里并设权限 600。
 - **适用范围说明**：番号识别和"小于等于 200 MB 视为广告"等规则是为特定类型内容设计的。文档需要如实说明这一点，用词由用户决定（D8）。
 
@@ -245,7 +302,7 @@ README 只保留入口内容。现有 README 里的恢复、API、升级安全�
 | 是否允许 agent 通过 qB WebUI API 写入"完成时运行"设置（需要 WebUI 地址和账号） | qB 偏好里只有一个"完成时运行"程序位，可以通过 WebUI API 的 `autorun_enabled`、`autorun_program` 读写[12] |
 | LLM 服务的完整地址（含 `/v1`）、模型名、API key、目标语言 | 翻译 |
 | 转写模型（0.6B / 1.7B；whisper 模型名） | 资源占用 |
-| 是否用 mdc-ng，它的监控目录和字幕库路径 | 衔接 |
+| 是否用可选集成（无 / mdc-ng 本地媒体库 / mdc-ng + 网盘 STRM），及其各自的容器内路径和挂载。agent 只告诉用户在 mdc-ng 里填什么，不替用户改第三方程序的设置 | 衔接 |
 | 时区、对外端口、可选的 Apprise | 运行参数 |
 
 **二、部署前检查**（每项都给出可执行命令和判定标准）
@@ -278,7 +335,7 @@ README 只保留入口内容。现有 README 里的恢复、API、升级安全�
 | D1 | 文档主语言 | **已定（用户）：中英双份。** 组织方式见第 6.1 节 | 全部面向用户的文档 |
 | D2 | Linux CPU 的默认引擎 | **已定：faster-whisper。** 用户确认当初换成 MLX 主要是为了用 Mac 的 GPU，不是因为质量 | ASR 镜像内容 |
 | D3 | Linux 首发时的支持级别 | **已定：CPU 和 NVIDIA 都写进文档，都标为"实验"。** 用户暂时没有 Linux 测试机；CI 只验证能跑通，速度和质量基准以后再做（见第 3.4 节） | 首发范围和验证工单 |
-| D4 | mdc-ng 的实际设置 | 请用户提供：监控目录、整理模式、字幕库路径、媒体库路径、是否接 Emby、现在 `language_suffix` 的值 | mdc-ng 教程能否写准确 |
+| D4 | mdc-ng 及下游的实际设置 | **部分已提供。** 已有：监控目录、监控模式、字幕库、整理目录、元数据目录（即 Emby 目录）、MoviePilot 115strm 的角色。仍缺：第 4.4 节列出的证据。缺了这些不影响 Muse 必需部分的文档，只影响集成 B 能写多精确 | 可选集成教程的准确度 |
 | D5 | 发布方式 | Muse 继续用 `ghcr.io/weizsw/fusionn-muse`；Linux ASR 镜像分 CPU 和 CUDA 两个标签，同仓发布；以新的 minor 版本号首发 | CI 工作流 |
 | D6 | Agent 说明的形式 | 仓库内通用 Markdown；以后需要时再封装成特定 agent 的技能 | 维护成本 |
 | D7 | macOS 支持范围 | 只正式支持 Apple Silicon；Intel Mac 不作承诺 | 文档承诺 |
@@ -304,6 +361,7 @@ README 只保留入口内容。现有 README 里的恢复、API、升级安全�
   - GHCR 镜像可以匿名拉取，以及现有标签。
 - `make lint`：0 issues。`make test`：Go 测试全部通过；Python 132 个测试通过，跳过 11 个（需要镜像环境的测试）。
 - 未做：任何 Linux 实机转写、mdc-ng 实际联调、Docker 构建（本机 Docker 守护进程没有运行）。
+- 第 4 节的现场信息来自用户提供的配置摘要（密钥已去除）、宿主目录清单、用户原话，以及三张 mdc-ng 设置截图。截图里的文字是用 macOS Vision 文字识别读取的，开关类控件的开关状态没有读取。本机没有用户的 `/Volumes/External`，现场文件无法直接查看。
 
 ## 参考
 
