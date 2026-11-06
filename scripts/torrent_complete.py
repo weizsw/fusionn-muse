@@ -39,7 +39,7 @@ import urllib.request
 import uuid
 import zoneinfo
 
-MUSE_URL = os.environ.get("MUSE_URL", "http://192.168.50.135:4444")
+MUSE_URL = os.environ.get("MUSE_URL", "http://127.0.0.1:4444")
 LOG_FILE = os.environ.get("LOG_FILE", "/tmp/torrent-complete.log")
 
 # Only this category is sent to fusionn-muse.

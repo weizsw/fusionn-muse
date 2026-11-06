@@ -78,8 +78,24 @@ def install_stubs():
     uvicorn = types.ModuleType("uvicorn")
     uvicorn.run = lambda *args, **kwargs: None
 
+    pydantic = types.ModuleType("pydantic")
+
+    class BaseModel:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+        def model_dump(self):
+            return self.__dict__
+
+        def dict(self):
+            return self.__dict__
+
+    pydantic.BaseModel = BaseModel
+
     sys.modules["fastapi"] = fastapi
     sys.modules["uvicorn"] = uvicorn
+    sys.modules.setdefault("pydantic", pydantic)
     return fastapi
 
 

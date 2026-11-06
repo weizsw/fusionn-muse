@@ -1,412 +1,326 @@
 # Fusionn-Muse
 
-Automatic subtitle transcription and translation pipeline for qBittorrent. When a torrent completes, Fusionn-Muse durably accepts the media and processes it in the background. The recommended pipeline uses host MLX Qwen3 ASR and PySubtrans Custom Server translation.
+专为 **qBittorrent** 与家庭媒体中心（Emby / Jellyfin / Plex）设计的全自动音视频字幕转录、LLM 批量翻译与影视库联动处理流水线。
 
-## Features
+当 qBittorrent 下载完成时，Fusionn-Muse 接收 Webhook 触发，在后台可靠地完成媒体分析过滤、语音转录、LLM 地道中文字幕翻译，并交付至 `scraping` 监控目录，与 **mdc-ng** 刮削器、**115strm** 网盘软链接工具及 **Emby** 媒体服务器实现端到端自动化联动。
 
-- 🎤 **Host MLX Qwen3 ASR** - Transcription on an Apple Silicon host; no ASR models inside the container
-- 🌐 **PySubtrans Translation** - OpenAI-compatible endpoints with explicit timeout and bounded retries
-- 📥 **qBittorrent Integration** - Webhook triggers processing on torrent completion
-- 🔄 **Hot-Reload Config** - Change settings without restarting
-- 📁 **Smart File Detection** - Filters ads/samples by size and filename patterns
-- 🔔 **Notifications** - Apprise integration (Telegram, Discord, email, etc.)
+---
 
-## Quick Start
+## 核心特性
 
-### Docker (Recommended)
+- 🎤 **Apple Silicon MLX 宿主机硬件加速**：在搭载 M 系列芯片的 macOS 宿主机上原生运行 MLX Qwen3 ASR，直接调用 Metal GPU 与统一内存加速，不占 Docker 资源，无需在容器内下载巨大模型，转录极速且显存彻底释放。
+- 🌐 **PySubtrans + LLM 批量智能翻译**：原生支持 OpenAI 兼容 API（OpenAI, DeepSeek, SiliconCloud, Groq, OpenRouter 及自建端点），专为长文本优化分批重试机制；支持针对日本成人影片等专业领域的日中俚语、现代口语与专有名词 Prompt 指导词。
+- 📥 **qBittorrent Webhook 全自动触发**：通过轻量级无第三方依赖的 Python 脚本，仅针对指定分类（如 `whisparr`）自动发起请求，秒级响应并进入后台任务队列。
+- 🔍 **智能媒体与中文字幕检出**：自动剔除广告预告与样本文件（≤200MB）、精准提取番号与规范化媒体代码、支持多段分卷视频合并与 ISO 光盘镜像免挂载提取；智能识别文件名特征、同名外挂字幕、内嵌字幕轨，并内置 RapidOCR CPU 硬字幕检测，杜绝无谓重复转录。
+- 🎬 **下游 mdc-ng + 115strm + Emby 全流程无缝联动**：Muse 交付产物至 `scraping` 目录触发 mdc-ng 自动刮削元数据并整理；115strm 监听并上传原画至网盘，在 Emby 本地目录生成 `.strm` 流媒体软链接，实现“**本地刮削 + 本地中文字幕 + 云端原画秒开**”的终极观影体验！
+- 🛡️ **高可靠 SQLite 任务状态持久化**：基于 SQLite WAL 机制，断电或重启不丢任务；支持灵活的任务查询（支持番号代码直查如 `SNOS-411`）、单任务重试/恢复/二次翻译，以及批量恢复操作。
+- 🪵 **Logfmt 统一结构化日志**：严格遵循结构化单行日志规范，自动脱敏 API Key 与敏感凭据，支持动态日志级别与时区对齐。
 
-```bash
-docker run -d \
-  -p 8080:8080 \
-  -v /path/to/downloads:/data/torrents:ro \
-  -v /path/to/automation:/data/automation \
-  -v ./config.yaml:/app/config/config.yaml:ro \
-  ghcr.io/your-username/fusionn-muse:latest
+---
+
+## 端到端自动化架构全景
+
+```text
+┌─────────────────┐
+│  qBittorrent    │ 下载完成
+└────────┬────────┘
+         │ 调用外部脚本: python3 torrent_complete.py "%N" "%L" "%I" "%F"
+         ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│  Fusionn-Muse 核心流水线 (Docker 容器)                                  │
+│                                                                        │
+│  1. 接收 Webhook ──► SQLite WAL 持久化入库 (返回 HTTP 202)              │
+│  2. 媒体准备与分析 ──► 过滤广告样本 / 识别番号代码 / 多段合并 / ISO 提取   │
+│  3. 字幕智能检测 ──► 文件名/外挂/内嵌字幕检测 + RapidOCR 硬字幕检测     │
+│  4. 语音转录 (ASR) ──► 请求 macOS 宿主机 MLX Qwen3 ASR 服务 (Metal GPU) │
+│  5. LLM 字幕翻译 ──► PySubtrans 调用 OpenAI 兼容端点 (定制化日中口语Prompt)│
+│  6. 产物交付输出 ──► 输出视频与中文字幕至 scraping 目录                 │
+└────────┬───────────────────────────────────────────────────────────────┘
+         │
+         ▼ 交付至 /Volumes/External/automation/scraping
+┌─────────────────┐
+│     mdc-ng      │ 监控 scraping 目录 (采用“兼容监控模式”/轮询，避免跨卷漏检)
+└────────┬────────┘
+         ├─ 自动抓取海报、剧照、NFO 元数据 ──► 写入本地 Emby 媒体库目录 (/strm/adults/)
+         ├─ 提取整理中文字幕 ────────────────► 归档至中文字幕库 (/automation/subtitles/)
+         └─ 整理重命名视频文件 ──────────────► 移动至已完成目录 (/automation/finished/)
+                                                      │
+                                                      ▼ 监控 finished 目录
+                                            ┌─────────────────┐
+                                            │    115strm      │
+                                            └────────┬────────┘
+                                                     ├─ 自动将大视频上传至 115 网盘
+                                                     ├─ 在 Emby 库 (/strm/adults/) 生成对应 .strm 文件
+                                                     └─ 删除本地大视频文件 (释放本地磁盘存储)
+                                                              │
+                                                              ▼
+                                                    ┌─────────────────┐
+                                                    │  Emby / 播放器  │
+                                                    └─────────────────┘
+                                                    读取本地海报/NFO与本地中文字幕，
+                                                    通过 .strm 秒级原画播放网盘视频！
 ```
 
-### Docker Compose
+---
+
+## 跨服务存储与路径拓扑对照
+
+跨容器部署时，服务间通过宿主机目录进行文件流转。推荐将宿主机媒体存储根目录（例如 `/Volumes/External`）统一映射至各容器：
+
+| 业务环节 | 宿主机物理路径示例 | Muse 容器内映射 | mdc-ng 容器内映射 | Emby 容器内映射 | 职责与作用 |
+|:---|:---|:---|:---|:---|:---|
+| **媒体存储根目录** | `/Volumes/External` | `/data` | `/external` | `/data` | 统一数据卷挂载点 |
+| **qB 下载目录** | `/Volumes/External/torrents/whisparr` | `/data/torrents/whisparr` | - | - | 原始下载输入源（只读） |
+| **Muse 待处理区** | `/Volumes/External/automation/staging` | `/data/automation/staging` | - | - | Muse 内部队列暂存 |
+| **Muse 工作区** | `/Volumes/External/automation/processing` | `/data/automation/processing`| - | - | Muse 当前正在处理的工作区 |
+| **Muse 交付输出区** | `/Volumes/External/automation/scraping` | `/data/automation/scraping` | `/external/automation/scraping` | - | **Muse 输出 / mdc-ng 监控输入** |
+| **mdc-ng 整理归档区** | `/Volumes/External/automation/finished` | `/data/automation/finished` | `/external/automation/finished` | - | **mdc-ng 整理输出 / 115strm 监听上传** |
+| **中文字幕库** | `/Volumes/External/automation/subtitles` | `/data/automation/subtitles` | `/external/automation/subtitles` | - | 中文字幕集中归档库 |
+| **原始转录存档** | `/Volumes/External/automation/transcriptions` | `/data/automation/transcriptions` | - | - | 原始日文字幕存档（供二次翻译） |
+| **SQLite 数据库** | `/Volumes/External/automation/meta` | `/data/automation/meta` | - | - | 持久化任务与尝试状态数据库 |
+| **Emby 媒体库目录** | `/Volumes/External/strm/adults` | - | `/external/strm/adults` | `/data/adults` | **mdc-ng 输出元数据 / 115strm 输出 .strm** |
+
+---
+
+## 平台支持与架构方案 (macOS vs Linux)
+
+### 1. macOS (Apple Silicon M1/M2/M3/M4) —— 【实测推荐方案】
+- **运行拓扑**：Docker 运行 Muse 容器 + macOS 宿主机原生运行 `host_asr_server.py`。
+- **核心优势**：利用 macOS 原生 Apple MLX 机器学习框架，直接使用 M 系列芯片的统一内存与 Metal GPU 进行语音转录。单部电影（2小时）转录仅需几分钟，显存随转录结束立即释放，不占用 Docker 虚拟机内存。
+- **详尽步骤**：参见 [macOS 部署教程](docs/deployment/macos-deployment.md)。
+
+### 2. Linux —— 【架构说明与演进规划】
+- **当前运行状态**：Muse 核心容器、任务队列、媒体准备、中文字幕检测、RapidOCR（CPU ONNX）硬字幕检测与 LLM 翻译均**完全支持 Linux 原生运行**。
+- **语音转录说明**：因 Linux 不支持 Apple MLX 框架，官方目前正在进行独立的 Linux ASR 方案调研（评估容器化/宿主机部署 Faster-Whisper, Whisper.cpp, FunASR, vLLM 等路线）。在独立调查结果落地前，Linux 用户可直接使用 Muse 运行已有字幕检出过滤、硬字幕 OCR 提取翻译，或接入外部 OpenAI Whisper 兼容端点。
+- **详尽说明**：参见 [Linux 部署与架构说明](docs/deployment/linux-deployment.md)。
+
+---
+
+## 快速开始
+
+### 步骤一：创建宿主机目录
+
+```bash
+MEDIA_ROOT="/Volumes/External" # 替换为你的实际物理存储根路径
+
+mkdir -p "${MEDIA_ROOT}/torrents/whisparr"
+mkdir -p "${MEDIA_ROOT}/automation/"{staging,processing,scraping,finished,subtitles,transcriptions,meta,failed}
+mkdir -p "${MEDIA_ROOT}/strm/adults"
+```
+
+### 步骤二：编写 `docker-compose.yaml`
 
 ```yaml
 services:
   fusionn-muse:
-    image: ghcr.io/your-username/fusionn-muse:latest
+    image: ghcr.io/weizsw/fusionn-muse:latest
+    container_name: fusionn-muse
+    restart: unless-stopped
+    stop_grace_period: 45s
     ports:
-      - "8080:8080"
+      - "4444:8080"
     volumes:
-      - /path/to/downloads:/data/torrents:ro
-      - /path/to/automation:/data/automation
-      - ./config.yaml:/app/config/config.yaml:ro
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      - /Volumes/External:/data
     environment:
       - ENV=production
-    restart: unless-stopped
+      - TZ=Asia/Shanghai
+      - PUID=1000
+      - PGID=1000
+      - LOG_LEVEL=info
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "6"
 ```
 
-## Configuration
+### 步骤三：准备配置文件 `config/config.yaml`
 
-Copy the example config and customize the MLX host URL/path mapping and LLM settings (the example now selects `mlx_qwen3_asr`):
+复制示例配置并修改：
 
 ```bash
-cp config/config.example.yaml config.yaml
+cp config/config.example.yaml config/config.yaml
 ```
 
-### Key Settings
+关键配置示例：
 
 ```yaml
-pipeline:
-  provider: "mlx_qwen3_asr"    # Configure the required host service below
+server:
+  port: 8080
 
-translate:
-  provider: "openai"          # openai, deepseek, siliconcloud, groq, etc.
-  model: "gpt-4o-mini"
-  api_key: "sk-..."
-  target_lang: "Simplified Chinese"
-```
-
-### MLX Qwen3 ASR Pipeline
-
-To run ASR on an Apple Silicon host and translate in the container:
-
-```yaml
 pipeline:
   provider: "mlx_qwen3_asr"
 
+# 宿主机 ASR 转录服务配置
 mlx_qwen3_asr:
   server_url: "http://host.docker.internal:8766"
-  host_prefix: "/path/on/mac/that/maps-to-data"
+  host_prefix: "/Volumes/External"
   container_prefix: "/data"
   model: "Qwen/Qwen3-ASR-1.7B"
-  language: ""
+  language: "ja"
   timeout_minutes: 180
 
+# 翻译服务设置（支持 openai, deepseek, siliconcloud, groq, custom 等）
 translate:
-  provider: "custom"
-  custom_server: "http://192.168.50.135:8317/v1"
-  model: "gpt-5.4-mini"
-  api_key: "sk-..."
+  provider: "openai"              # 或 "custom" / "deepseek"
+  model: "gpt-4o-mini"
+  api_key: "sk-your-api-key"
   target_lang: "Simplified Chinese"
-  instruction: "Optional PySubtrans --instruction text"
-```
+  # custom_server: "http://your-server-ip:port/v1" # 仅当 provider 为 custom 时填写
 
-Run `host_asr_server.py` on macOS with `mlx-qwen3-asr` installed. The container calls its `/transcribe` endpoint; the host process maps `/data/...` to `host_prefix` and runs the MLX CLI locally.
+  # 示例：针对日本成人影片定制的地道翻译指导词
+  instruction: |
+    你是一个经验丰富的日中翻译专家，专门处理日本成人影片的字幕翻译。精通日语俚语、成人行业术语与现代中文自然表达。
+    保持忠实原意，语言口语化，成人常见用语（おっぱい→奶子/胸部，中出し→内射，マンコ→小穴/骚逼，チンポ→鸡巴/大屌等）准确传达，保留时间戳与字幕结构。
 
-This pipeline translates through PySubtrans's **Custom Server** client using the OpenAI-compatible `/chat/completions` endpoint. Keep `translate.custom_server` as the API base URL, including `/v1` or any reverse-proxy prefix. Requests are non-streaming, with a **180-second HTTP timeout and one retry by default**; there are no OpenAI SDK retries. The HTTP timeout measures inactivity, not total request duration. `llm_subtrans.timeout_minutes` remains the separate whole-file deadline. Python logs stream once at their original levels; translation failures report a short reason rather than replaying accumulated stderr, and deadlines/cancellation are distinguished from process failures.
-
-`llm_subtrans.request_timeout_seconds` controls the HTTP timeout in seconds for each batch translation request (connect, read, write). It defaults to `180`; only positive integers are supported (PySubtrans 1.7.3 treats `0` as 300, so Muse rejects it). This is an HTTP socket/inactivity timeout per request; `llm_subtrans.timeout_minutes` remains the separate whole-file wall clock deadline.
-
-`llm_subtrans.max_retries` controls retries after the initial request for a subtitle batch when it times out, cannot connect, or receives HTTP 5xx. It defaults to `1`; `5` allows up to six HTTP attempts per request, with PySubtrans's exponential backoff. Only positive integers are supported: PySubtrans 1.7.3 treats `0` as three retries, so Muse rejects it. Batch validation/retranslation can make additional requests; this setting is not a total request budget for a batch. `queue.max_retries` separately controls total whole-file Translation Attempts. The whole-file deadline remains in effect.
-
-`llm_subtrans.retry_backoff_seconds` sets the base delay in seconds for batch retries. PySubtrans doubles this delay on each attempt (`delay * 2^retry`, starting at 3.0s, 6.0s, 12.0s...). Setting it to `0` disables waiting between retries (immediate retry), which is useful when the upstream LLM gateway or proxy manages its own fallback chain. It defaults to `3.0`; only finite non-negative numbers are allowed.
-
-`llm_subtrans.min_batch_size` and `llm_subtrans.max_batch_size` configure the subtitle line bounds per translation batch (default `10` and `100`). Both must be positive integers, and `max_batch_size` must be greater than or equal to `min_batch_size`. Increasing these bounds reduces total HTTP requests and accelerates translation for models with large context windows.
-
-```yaml
 llm_subtrans:
   timeout_minutes: 180
+  rate_limit: 0
+  max_retries: 10
   request_timeout_seconds: 300
-  max_retries: 5
   retry_backoff_seconds: 0
-  min_batch_size: 20
-  max_batch_size: 100
+  min_batch_size: 25
+  max_batch_size: 60
+
+# 启用 CPU OCR 检测压制硬字幕（检出后直接跳过无谓转录）
+hard_sub_ocr:
+  enabled: true
+
+queue:
+  db_path: "/data/automation/meta/fusionn-muse.db"
+  max_retries: 3
+  retry_delay_ms: 10000
 ```
 
-Timeouts, retry counts, backoff, and batch size settings follow the Attempt's settings snapshot. Old snapshots without these options keep 180 seconds, one retry, 3.0 seconds backoff, and 10/100 batch bounds. To apply a new value to a failed execution, use `{"action":"retry","use_current_settings":true}`; completed Jobs use `retranslate` instead.
+### 步骤四：在 macOS 宿主机启动 MLX ASR 服务
 
-Optional `llm_subtrans.rate_limit` exposes PySubtrans's `--ratelimit` in **requests/minute (RPM)**. It accepts finite non-negative numbers; omitted or `0` preserves unpaced execution. For example:
+在宿主机终端中准备 Python 虚拟环境并运行：
 
-```yaml
-llm_subtrans:
-  timeout_minutes: 180
-  rate_limit: 80
-```
-
-This uses the actual Custom Server client: at 80 RPM each successful translation request takes at least 0.75 seconds, including its response time; slower requests need no extra wait. It is batch pacing, **not a strict global API quota**: HTTP retries inside a request and other proxy clients are not separately limited. It does not change `llm_subtrans.request_timeout_seconds` or resolve a stalled upstream response. The 1.7.3 Custom Server ignores a top-level `init_options(rate_limit=...)`; Muse passes it through the explicit provider/client settings instead.
-
-Rate limits follow the Attempt's settings snapshot. Old snapshots without this option remain unpaced. To adopt a newly configured limit for a failed execution, explicitly select current settings with `{"action":"retry","use_current_settings":true}`; completed Jobs use `retranslate` instead.
-
-### Container dependencies and retired pipeline
-
-The image contains only the MLX host client, PySubtrans Custom Server translation, CPU OCR, and media preparation tools. It does not include VideoCaptioner, FasterWhisper, OpenAI SDK, GUI, or local ASR models. Translation/OCR dependencies are pinned in `requirements.txt`; update them deliberately and run the offline protocol tests before upgrading. Docker uses Go/pip build caches, and `.dockerignore` excludes configuration secrets, databases, models and local caches from the build context.
-
-`pipeline.provider: videocaptioner` and the historical empty-provider fallback are **no longer executable**. Old configuration snapshots remain readable and are not silently switched to MLX. To recover an old task, configure `mlx_qwen3_asr` and explicitly select current settings in the unified action API; existing stage checkpoints remain intact. `whisper.*` and `translate.use_reflect`, `translate.threads`, `translate.batch_size` remain only as snapshot data and have no active consumer. Upgrading an installation/backup that still relies on VideoCaptioner requires this explicit migration; retaining an old image is the rollback option.
-
-Build with `docker build --build-arg VERSION=<version> -t fusionn-muse:<version> .`. Rebuilding Go/scripts does not reinstall Python dependencies; changing `requirements.txt` does. No models or existing mounted data are deleted by the image change.
-
-Verify the built image offline (the test scripts are mounted, not shipped):
 ```bash
-docker run --rm --network none -e MUSE_IMAGE_TEST=1 \
-  -e PYTHONPATH=/tests --entrypoint python3 -v "$PWD/scripts:/tests:ro" \
-  fusionn-muse:<version> -m unittest -v test_logfmt test_llm_subtrans_translate \
-  test_llm_subtrans_integration test_detect_hard_sub test_docker_runtime
+python3 -m venv ~/Development/mlx-asr-venv
+source ~/Development/mlx-asr-venv/bin/activate
+pip install fastapi uvicorn pydantic mlx-qwen3-asr
+
+# 启动宿主机转录服务端（监听 8766 端口）
+python3 host_asr_server.py
+```
+> 如需开机后台自启，请参见 [macOS 部署教程中的 launchd 配置](docs/deployment/macos-deployment.md)。
+
+### 步骤五：启动 Muse 核心容器
+
+```bash
+docker compose up -d
 ```
 
-See [config.example.yaml](config/config.example.yaml) for full documentation.
+### 步骤六：配置 qBittorrent 完成调用
 
-## Logging
-
-Every application event is one physical line of plain text on the program's standard output stream — the Go service writes to stdout, the Python and script programs to stderr:
-
-```text
-2026-07-01T14:20:03.456 WARN component=processor event=translation_retry job_id=abc retry=1 retry_after_ms=2000 error="provider timeout" msg="Translation will retry"
-```
-
-Fields appear in this order: `component event`, then `job_id submission_id attempt_id request_id parent_job_id stage tool stream` when they apply, then the remaining fields sorted by name, and `msg` last. Timestamps show milliseconds and no time zone offset. The `TZ` environment variable sets their time zone; the compose file sets it, and the default is `Asia/Shanghai`. An unknown `TZ` logs a `config_invalid` warning and uses `Asia/Shanghai`. Host programs such as `torrent_complete.py` follow the same rule, so set `TZ` on the host if it is not in UTC+8. The complete rules are in [docs/design/unified-logging.md](docs/design/unified-logging.md).
-
-`LOG_LEVEL` selects the level and defaults to `INFO`. In the Go service, the config key `log_level` overrides it without a restart: the service applies a change within 10 seconds of saving the file and logs one `log_level_changed` event. An empty `log_level` returns to `LOG_LEVEL`, and an invalid one keeps the current level. The Python scripts that the service starts keep using `LOG_LEVEL`. `ALIGN_LOG_LEVEL` is a Python and script compatibility alias, read by those programs only when `LOG_LEVEL` is unset; the Go service does not read it. An unknown value logs a visible `config_invalid` warning and falls back to `INFO`. Credentials are redacted at every level, and content excerpts appear only at `DEBUG`, in a `preview` field of at most 512 characters. The one exception is `detail`: when an external tool such as ffmpeg fails, the failure line (`job_failed`, `translation_retry`, `submission_failed` or `hard_sub_detection_failed`) carries up to three lines of the tool's standard error that look like error messages, capped at 300 characters.
-
-### Where the logs go
-
-- The container writes to stdout and stderr. Docker keeps them with `max-size: 20m` and `max-file: 6`, about 120 MiB per container, evicting the oldest data first. Read them with `docker compose logs -f` or the OrbStack container page. These options take effect when the container is recreated.
-- Host-only programs are not part of the container log. `host_asr_server.py` and `host_server.py` write to stderr, and `scripts/torrent_complete.py` appends the same lines to `$LOG_FILE` (`/tmp/torrent-complete.log` by default). Redirect them to a file or your own collector when you need retention; this project does not rotate those files.
-- Each run of `scripts/torrent_complete.py` sends an `X-Request-ID` header and writes the same `request_id` on all of its lines. When Muse accepts the request, the script also writes the returned `submission_id`. Search the container log for either value to find the Muse lines for that run.
-- A panic while a Submission or Job is processed does not stop the service. That Submission or attempt fails through the normal failure path, and its `submission_failed`, `translation_retry` or `job_failed` line includes the stack.
-- If the queue database fails, each worker loop logs one `claim_failed` WARN per attempt with `retry_after_ms`, and waits 1, 2, 4 and up to 30 seconds before it tries again. An outage therefore leaves a few lines per minute and does not push older lines out of the 120 MiB log.
-
-## qBittorrent Setup
-
-1. Copy `scripts/torrent_complete.py` to the qBittorrent host. It needs only Python 3.9 or later and its standard library. Set the constants at the top of the file for your deployment: `MUSE_URL`, `MUSE_CATEGORY` (the only category that is sent), and `HOST_INPUT_PATH` and `CONTAINER_INPUT_PATH` (the download mount, and the path that Muse sees for it). You can also set `MUSE_URL`, `LOG_FILE` and `LOG_LEVEL` as environment variables.
-
-2. Go to **Options → Downloads → Run external program on torrent completion** and add the command:
-
+1. 将 `scripts/torrent_complete.py` 保存至宿主机（例如 `/Users/username/Development/scripts/torrent_complete.py`）。
+2. 打开 qBittorrent：**设置 → 下载 → 勾选“torrent 完成时运行外部程序”**，填入：
    ```bash
-   python3 /path/to/torrent_complete.py "%N" "%L" "%I" "%F"
+   python3 /Users/username/Development/scripts/torrent_complete.py "%N" "%L" "%I" "%F"
    ```
+3. 该脚本仅对分类为 `whisparr` 的任务发起 HTTP 202 请求，其他分类自动跳过，保障下载客户端稳定性。
 
-   The script sends one request, does not follow redirects, and stops waiting after 15 seconds. Only **HTTP 202** with a `submission_id` counts as success. A torrent in another category is only logged. A path outside the download mount, a failed request or a missing acknowledgement is logged as `webhook_failed`, and the script exits with status 1.
+### 步骤七：配置下游 mdc-ng 刮削服务
 
-A `202` receipt includes `submission_id` and means the input and pending preparation have committed to SQLite—not that media preparation or subtitle processing succeeded. Scanning, ISO extraction and multipart conversion run in the background with a three-hour preparation deadline. Poll the Submission detail for its outcome and linked Job.
+在 mdc-ng Web 管理页面（`http://<IP>:9208`）中配置关键路径：
+- **监控目录**：`/external/automation/scraping`
+- **监控模式**：**必须选择“兼容监控模式” (watcher_kind: 1)**（通过轮询确保 Docker 卷文件移动不会漏掉）
+- **整理目录**：`/external/automation/finished`
+- **元数据目录**：`/external/strm/adults`（此目录直接作为本地 Emby 媒体库目录）
+- **字幕库目录**：`/external/automation/subtitles`
 
-When Muse is unavailable or cannot persist the request, the script logs failure and exits nonzero. It does not automatically resend: resubmit missed completions manually. If the response was lost after commit, resubmission may create another Submission receipt, but resolving the same Media item still links to one Job without restarting its work.
+详细说明参见 [mdc-ng 刮削与 115strm 联动指南](docs/deployment/mdc-ng-integration.md)。
 
-## Folder Structure
+---
 
-```
-/data/
-├── torrents/              # Input: torrent download folder (read-only)
-└── automation/
-    ├── staging/           # Queue: waiting for processing
-    ├── processing/        # Active: currently being processed
-    ├── scraping/          # Output: videos ready for media server
-    ├── subtitles/         # Output: translated .srt files
-    ├── transcriptions/    # Durable source subtitles for retranslation
-    ├── meta/fusionn-muse.db # Durable SQLite job state
-    └── failed/            # Failed jobs (manual inspection)
-```
+## AI Agent 一键部署说明
 
-## API Endpoints
+如果你正在使用 AI 编程助手（如 **Claude Code**, **Pi**, **Cursor**, **OpenCode**, **TDS Agent** 等），可以直接将以下指引交给 Agent，由 Agent 全自动完成环境检测、目录创建、服务搭建与全链路冒烟自测：
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/webhook/torrent` | Persist a Submission and return HTTP 202 before preparation |
-| GET | `/api/v1/tasks` | Lightweight cursor-paginated observation of all work |
-| GET | `/api/v1/tasks/stats` | SQL aggregation using the same observation/filter rules |
-| GET | `/api/v1/tasks/:kind/:id` | Current detail, available actions and a bounded history page |
-| POST | `/api/v1/tasks/:kind/:id/actions` | Explicit retry, resume or retranslation |
-| POST | `/api/v1/tasks/actions` | Retry all failed tasks or resume all interrupted tasks |
-| GET | `/api/v1/health` | Liveness check |
-| GET | `/api/v1/version` | Version info |
+👉 **[AI Agent 一键部署使用说明书 (Playbook)](docs/deployment/agent-deployment.md)**
 
-**Breaking change:** `/queue`, `/jobs` (including events), `/submissions`, `/files` and `/retry` routes under `/api/v1` are removed, not redirected. Their data is retained. Change clients to the routes above; submit untracked files through the webhook rather than a folder-wide retry. The webhook returns `submission_id` and a `Location` under `/tasks/submission/`.
+该文档包含 Agent 标准化执行的 8 步全自动化规程以及必须由用户提供的凭据清单，能够实现真正意义上的“一键全自动部署”。
 
-### Unified list, statistics and detail
+---
 
-```text
-GET /api/v1/tasks?limit=50&status=failed
-GET /api/v1/tasks/stats
-GET /api/v1/tasks/job/SNOS-411?limit=50
-GET /api/v1/tasks/job/<job-id>?limit=50
-GET /api/v1/tasks/submission/<submission-id>?limit=50
-```
+## 完整部署教程列表
 
-For `job` detail and actions, the path reference accepts either the Job ID or a normalized **Video code** such as `SNOS-411` (case-insensitive). You do not need to list Jobs to find an ID:
+- 📖 **[macOS (Apple Silicon) 部署指南](docs/deployment/macos-deployment.md)**：包含 MLX ASR 搭建、launchd 常驻服务、Docker Compose 及联调步骤。
+- 📖 **[Linux 部署与架构说明](docs/deployment/linux-deployment.md)**：包含 Linux 原生运行支持、硬字幕检测工作流及 Linux ASR 后续演进规划。
+- 📖 **[mdc-ng 刮削、115strm 与 Emby 联动指南](docs/deployment/mdc-ng-integration.md)**：包含路径映射矩阵、mdc-ng 兼容监控模式配置、115strm 生成 strm 与 Emby 零本地空间占用串流方案。
+- 🤖 **[AI Agent 一键部署使用说明书](docs/deployment/agent-deployment.md)**：专为 AI Agent 编写的标准化全自动部署工作手册。
+
+---
+
+## API 接口与运维管理
+
+Fusionn-Muse 提供了强大的任务生命周期管理 API，支持通过番号代码（如 `SNOS-411`）或全局任务 ID 直接定位和操作任务：
+
+| 请求方法 | 端点路径 | 功能描述 |
+|:---|:---|:---|
+| `POST` | `/api/v1/webhook/torrent` | qBittorrent 完成事件接收（立即持久化并返回 HTTP 202） |
+| `GET` | `/api/v1/tasks` | 分页查询所有任务列表（支持 `status` 与 `kind` 过滤） |
+| `GET` | `/api/v1/tasks/stats` | 获取当前队列与任务状态统计（pending, processing, failed 等） |
+| `GET` | `/api/v1/tasks/:kind/:id` | 查询任务详情（`:id` 可直接使用番号代码如 `SNOS-411`） |
+| `POST`| `/api/v1/tasks/:kind/:id/actions`| 单任务显式恢复动作（支持 `retry`, `resume`, `retranslate`） |
+| `POST`| `/api/v1/tasks/actions` | 批量恢复动作（一键重试全部失败任务或恢复中断任务） |
+| `GET` | `/api/v1/health` | 服务健康检查 |
+| `GET` | `/api/v1/version` | 获取版本与构建信息 |
+
+### 常用运维操作命令
 
 ```bash
-curl 'http://localhost:4444/api/v1/tasks/job/SNOS-411'
+# 1. 检查服务健康状态
+curl -s http://localhost:4444/api/v1/health
+
+# 2. 查询当前正在处理与失败的任务
+curl -s 'http://localhost:4444/api/v1/tasks?status=processing' | jq .
+curl -s 'http://localhost:4444/api/v1/tasks?status=failed' | jq .
+
+# 3. 通过番号代码查询任务详情与可用动作
+curl -s 'http://localhost:4444/api/v1/tasks/job/SNOS-411' | jq .
+
+# 4. 对指定任务重新翻译（利用已持久化的高质量原始转录字幕）
 curl -X POST 'http://localhost:4444/api/v1/tasks/job/SNOS-411/actions' \
-  -H 'Content-Type: application/json' -d '{"action":"retranslate"}'
-```
-
-Check `allowed_actions` first: use `retry` for failure, `resume` for interruption, or `retranslate` with an eligible persisted source subtitle. Code lookup uses the original media's normalized source key, so an explicit output-name repair does not change its code. A missing code returns 404; multiple Jobs sharing one code return **409** with `code: ambiguous_job_reference`, `reference`, and lightweight `candidates` containing `kind`, `id`, `name`, `source_path`, and latest `status`. Choose a candidate ID; no ambiguous action starts an execution. IDs, media identity and stored history are unchanged, and unparsed Submissions still require their Submission ID. Successful detail/action responses retain the canonical Job ID; an accepted action's `Location` uses that ID. History cursors work across code and ID references to the same Job. This adds no routes or list/search filters and does not change the database schema.
-
-The list returns `tasks` and optional `next_cursor`; its default limit is 50, maximum 200. Pass the cursor with the same `kind` (`job` or `submission`) and `status` filters. Ordering is newest creation first, with deterministic tie-breaks. Pagination is a live view, not a frozen export: refresh to observe work that resolves or changes status during traversal. Lists never include settings snapshots or history.
-
-An unresolved Submission occupies one row. Once resolved, its Job replaces it: multiple notifications for one Media item count as **one Job**, including legacy Jobs without a Submission. The original Submission ID still works for detail; a resolved receipt exposes `canonical_task` and the Job ID. Resolved receipt detail can show raw `resolved` state, but that receipt is not counted again in the list/statistics.
-
-| List `status` | Meaning |
-|---------------|---------|
-| `pending` | Waiting for a preparation or processing stage |
-| `processing` | Running preparation or processing; inspect `stage` |
-| `completed` | Latest execution completed |
-| `failed` | Latest execution failed; inspect `error` |
-| `interrupted` | Running work stopped; explicit resume required |
-| `ignored` | No eligible Media item; preparation reason recorded |
-
-### Bulk retry and resume
-
-`POST /api/v1/tasks/actions` applies one recovery action to all tasks in its matching latest execution state, including Jobs and unresolved Submissions:
-
-```bash
-# Resume all interrupted tasks with the current configuration.
-curl -X POST 'http://localhost:4444/api/v1/tasks/actions' \
   -H 'Content-Type: application/json' \
-  -d '{"action":"resume","use_current_settings":true}'
+  -d '{"action":"retranslate"}'
 
-# Retry all failed tasks with the current configuration.
+# 5. 一键使用当前最新配置重试全部失败任务
 curl -X POST 'http://localhost:4444/api/v1/tasks/actions' \
   -H 'Content-Type: application/json' \
   -d '{"action":"retry","use_current_settings":true}'
 ```
 
-Only `retry` and `resume` are supported. `retry` selects `failed`; `resume` selects `interrupted`. Failed/interrupted Retranslations are included while preserving the Job's completed result. `ignored`, completed, pending and processing tasks are excluded. Bulk actions do not support `output_name` or `retranslate`; use the individual action endpoint for those.
+---
 
-Without `use_current_settings`, each recovery keeps its prior execution's settings. With it, Muse reloads and validates configuration once, then uses one current settings snapshot for the entire batch. Invalid configuration returns HTTP 400 before any recovery is admitted.
+## 本地开发与构建
 
-Targets are captured before any recovery starts, without the list API's 200-row page limit. Each task is admitted independently using the single-task action rules. If another request has already replaced a selected execution, that item reports an error instead of recovering the newer execution. Tasks that become failed/interrupted after selection require another bulk call. A failure on one item does not roll back successful admissions or prevent the other items from being attempted.
-
-HTTP 202 reports admission results, not completed processing:
-
-```json
-{
-  "action": "resume",
-  "matched": 2,
-  "accepted": 1,
-  "failed": 1,
-  "results": [
-    {"kind": "job", "id": "job-id", "execution_id": 208},
-    {"kind": "submission", "id": "submission-id", "error": "recovery error"}
-  ]
-}
-```
-
-`failed` counts items that could not be admitted; inspect their `error`. No matching tasks returns HTTP 202 with zero counts and an empty `results` array. Queue/storage failure before admission returns HTTP 503. Query `/api/v1/tasks?status=pending`, `/api/v1/tasks?status=processing` or `/api/v1/tasks/stats` to follow execution after admission.
-
-`status` describes the **latest execution**. `job_status` describes the retained Job outcome: failed/interrupted retranslation can have `job_status: completed`, since the previous result remains valid. Failed and interrupted are counted separately. Statistics return `total` and `statuses` using exactly the same row/status rules; optional `kind`/`status` filters work in both. Separate HTTP calls can naturally differ while work changes.
-
-Detail returns `allowed_actions`, `can_change_output_name`, `history`, and optional `next_history_cursor`. Use `history_cursor` to continue; default history limit is 50, maximum 200. Job history combines its Attempts and linked Preparation runs, including each run's immutable input and non-secret snapshot. Action history records requested configuration selection and any output-name change. Database read failures return 503, not empty lists, zero statistics or fake 404s.
-
-### Explicit recovery actions
-
-```json
-{"action":"retry"}
-```
-
-- `retry`: failed/ignored preparation or a failed Job execution, including failed retranslation.
-- `resume`: interrupted preparation or Job execution, including interrupted retranslation.
-- `retranslate`: an eligible terminal Job with a valid persisted source subtitle. It does not require a completed video's continued presence.
-
-Default configuration comes from **the execution being retried/resumed**, not the first-ever submission. `retranslate` likewise retains the latest recorded configuration unless selected otherwise. Add `"use_current_settings":true` to reload, validate and snapshot current non-secret configuration; credentials always come from current runtime values. Invalid current configuration creates no new execution. A changed profile bypasses prior translation reuse. Identical action/profile requests reuse an active execution; conflicting actions/profiles return 409 rather than silently applying a different action.
-
-The action body is required and has only `action`, optional `use_current_settings`, and optional `output_name`. Success returns HTTP 202 with the existing task identity and its Attempt/Preparation run. Invalid JSON/fields/actions return 400, missing identity 404, incompatible state or artifact conflict 409, and storage/service unavailability 503. Conflict responses include available actions when detail can be read. Correct a Submission's wrong path/name by submitting new input, never editing its history; use its canonical Job for post-resolution actions.
-
-### Manual repair of naming conflicts
-
-For a failed/interrupted Job **before a complete Transcription exists**, append a safe new basename with the same video extension:
-
-```text
-POST /api/v1/tasks/job/<job-id-or-code>/actions
-```
-```json
-{"action":"retry","output_name":"SNOS-411-alt.mp4"}
-```
-
-For an interruption use `resume` instead. This reserves the new output paths, records the prior name and restarts preparation under the same Job ID and Media identity. Existing/ambiguous ownership still blocks the new name; media must be present and match its signature. It does not relocate completed source subtitles or remove another Job's claims. Existing old claims are retained conservatively. Do not delete files or alter SQLite to release ownership: resubmitting the same media still resolves to its original Job. Repair missing input at a recorded/known recovery location before retry; arbitrary manual file renaming is not an identity recovery mechanism.
-
-Queued work continues after restart; running work becomes interrupted and requires explicit recovery. Preparation caches are isolated by Submission/run and never delete submitted downloads. Undelivered qB notifications require manual resubmission; there is no Redis/outbox. Only one Muse instance may use the database.
-
-The default database is `/data/automation/meta/fusionn-muse.db`, matching the other automation directories (`/Volumes/External/automation/meta/fusionn-muse.db` for `/Volumes/External:/data`). Explicit `queue.db_path` values remain supported. **Path-change safety:** this is a default, not automatic relocation or merging. Before upgrading an installation that omitted `db_path` and used the former `/data/meta` default, explicitly set its existing path or stop Muse and migrate a consistent backup. If both paths contain databases, preserve both histories and resolve identity/path conflicts before switching; simply changing the setting can expose an old or empty database. A database path change requires restarting Muse.
-
-**Upgrade safety:** schema version is now **5**, retaining version-2/3/4 records and adding Attempt action/receipt metadata. Stop Muse before copying SQLite files (including WAL), or use a consistent SQLite backup. Older binaries reject the upgraded database; rollback requires compatible code or restoring the pre-upgrade backup while stopped.
-
-### Stage recovery safety
-
-- Checkpoint, lane-handoff and final-outcome commits retry without redoing finished external work. A live `persistence_error` identifies blocked storage writes; shutdown interrupts the Attempt for explicit recovery.
-- Recovery checks media identity in recorded and known automation locations. Missing/empty files, directories, symlinks and conflicting output ownership fail explicitly, without automatic model retries or silent retranscription.
-- Canonical paths belong to a Job. Another Media item with the same output name is blocked, not renamed automatically or overwritten. Historical ambiguous ownership also blocks reuse. Deleting a file alone does not release another Job's ownership claim.
-- Only a complete Translation becomes a durable Attempt receipt. Resume reuses it when its saved source matches the editable SRT; source edits require a new Translation. Failed Retranslation preserves the completed Job's canonical subtitle and result path, even when its video has been consumed downstream.
-- A strong kill before an external response is durably saved may require another request on recovery. The service does not promise exactly-once ASR/LLM execution or survival of disk loss/corruption. Keep database and media backups; the storage backend must honor synchronization.
-
-## Video File Filtering
-
-When processing a folder, Fusionn-Muse automatically filters out ads and samples:
-
-- **Size filter**: Files ≤200MB are skipped
-- **Code detection**: Hyphenated and compact filenames are supported
-- **Fallback detection**: If a filename has no usable code, the folder name is checked next, then the torrent name
-- **Selection**: Largest valid file is selected when no ordered multipart set is present
-
-Fusionn-Muse detects codes from both hyphenated and compact filenames:
-
-- `SSNI-083.mp4` -> `SSNI-083`
-- `ssni00083hhb.mp4` -> `SSNI-083`
-- `pppd176A.FHD.wmv` -> `PPPD-176`
-
-Ordered multipart videos such as `ABC-001A.wmv`, `ABC-001B.wmv`, or `abc00001hhb1.wmv`, `abc00001hhb2.wmv` are assembled into one staged video before processing, preferring `.mkv` and falling back to `.mp4` when transcode is needed. Playable disc/archive image sources such as `.iso`, `.nrg`, `.img`, `.mdf`, and `.bin` are extracted without Docker loop mounts and remuxed to `.mkv` when possible.
-
-### Chinese Subtitle Detection
-
-Files are skipped when Fusionn-Muse finds existing Chinese subtitles:
-
-- Filename indicators: `-C`, `_C`, `.C`, `zh`, `chs`, `cht`, `chi`, `cn`, `gb`, `big5`, `sc`, `tc`, `中文`, `简中`, `繁中`, `软中`, `硬中`, `字幕`, `内嵌`, `内封`, `中字`, `国语`, `双语`
-- Sidecar subtitles: `.srt`, `.ass`, `.ssa`, `.vtt` matched by same basename or video code, with Chinese filename/content hints
-- Embedded subtitle streams: `ffprobe` subtitle metadata with Chinese language/title hints
-- Hard subtitles: optional RapidOCR check for sufficient Chinese subtitle coverage; it samples long videos after minute 30 and short videos from their midpoint, requiring CJK hits across multiple time regions and excluding text lines containing Japanese kana
-
-## LLM Providers
-
-All providers use OpenAI-compatible API:
-
-| Provider | Base URL | Models |
-|----------|----------|--------|
-| `openai` | api.openai.com | gpt-4o, gpt-4o-mini |
-| `deepseek` | api.deepseek.com | deepseek-chat, deepseek-reasoner |
-| `siliconcloud` | api.siliconflow.cn | Qwen, Yi, DeepSeek |
-| `groq` | api.groq.com | llama, mixtral |
-| `openrouter` | openrouter.ai | Many models |
-| `together` | api.together.xyz | Various |
-| `fireworks` | api.fireworks.ai | Various |
-| `custom` | Your endpoint | Any OpenAI-compatible |
-
-## Development
-
-### Prerequisites
-
+### 环境要求
 - Go 1.23+
-- Python 3.11+ (for transcription/translation scripts)
-- Docker (for building images)
+- Python 3.10+
+- Docker
 
-### Build
-
+### 命令速查
 ```bash
-# Build binary
+# 编译二进制程序
 make build
 
-# Run locally
-make run
+# 运行代码规范检查
+make lint
 
-# Run tests
+# 运行单元测试
 make test
 
-# Build Docker image
+# 构建 Docker 镜像
 make docker
 ```
 
-### Project Structure
+---
 
-```
-fusionn-muse/
-├── cmd/fusionn-muse/       # Entry point
-├── internal/
-│   ├── config/             # Configuration management
-│   ├── handler/            # HTTP handlers (Gin)
-│   ├── service/processor/  # Processing pipeline
-│   ├── executor/           # Host ASR / PySubtrans adapters
-│   ├── queue/              # Job queue
-│   ├── fileops/            # File operations
-│   └── client/apprise/     # Notification client
-├── pkg/logger/             # Logging utilities
-├── scripts/                # Python scripts
-│   ├── llm_subtrans_translate.py # PySubtrans CLI
-│   ├── detect_hard_sub.py  # CPU OCR detection
-│   └── test_*.py           # Protocol, OCR, image and webhook tests
-└── config/
-    └── config.example.yaml # Example configuration
-```
+## 开源协议
+
+本项目采用 [MIT License](LICENSE) 许可证开源。
