@@ -116,6 +116,40 @@ class TorrentCompleteTests(unittest.TestCase):
             self.assertIn(escaped, log)
         self.assertEqual(log, result.stderr, "LOG_FILE gets the same lines as stderr")
 
+    def test_optional_json_receipt_preserves_default_hook_contract(self):
+        url, requests = self.serve(202)
+        result, log = self.invoke(url, ["--receipt-json", "movie", "whisparr", "abc123", MOUNTED], level="ERROR")
+        receipt = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(receipt["schema_version"], 1)
+        self.assertEqual(receipt["result"], "accepted")
+        self.assertEqual(receipt["submission_id"], "sub-123")
+        self.assertEqual(receipt["http_status"], 202)
+        self.assertEqual(receipt["request_id"], requests[0]["request_id"])
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(log, "", "receipt must not depend on log level")
+
+    def test_json_receipt_distinguishes_skip_rejection_and_unknown(self):
+        url, requests = self.serve(202, b"invalid receipt")
+        for values, code, outcome in (
+            (["movie", "radarr", "abc123", MOUNTED], 0, "skipped"),
+            (["movie", "whisparr", "abc123", "/outside/movie.mp4"], 1, "rejected"),
+            (["movie", "whisparr", "abc123"], 1, "rejected"),
+            (["movie", "whisparr", "abc123", MOUNTED], 1, "unknown"),
+        ):
+            with self.subTest(outcome=outcome, values=values):
+                result, _ = self.invoke(url, ["--receipt-json", *values])
+                self.assertEqual(result.returncode, code)
+                self.assertEqual(json.loads(result.stdout)["result"], outcome)
+        self.assertEqual(len(requests), 1)
+
+    def test_oversized_acknowledgement_is_not_accepted(self):
+        url, requests = self.serve(202, ACK + b" " * 65536)
+        result, _ = self.invoke(url, ["--receipt-json", "movie", "whisparr", "abc123", MOUNTED])
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout)["reason"], "invalid_acknowledgement")
+        self.assertEqual(len(requests), 1)
+
     def test_other_categories_are_only_logged(self):
         url, requests = self.serve(202)
         result, log = self.invoke(url, ["movie", "radarr", "abc123", MOUNTED])

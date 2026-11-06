@@ -16,9 +16,17 @@ resubmit a missed completion by hand.
 Optional environment variables (the defaults are the constants below):
 
     MUSE_URL    fusionn-muse base URL
+    MUSE_REQUEST_ID  optional correlation ID (otherwise generated)
+    MUSE_REQUEST_TIMEOUT  request timeout in seconds (default 15)
+    HOST_INPUT_PATH  host download mount path; the default is /Volumes/External
+    CONTAINER_INPUT_PATH  container download mount path; the default is /data
     LOG_FILE    file that the log lines are appended to
     LOG_LEVEL   DEBUG, INFO, WARN or ERROR; the default is INFO
     TZ          time zone of the log timestamps; the default is Asia/Shanghai
+
+Optional first argument --receipt-json writes exactly one versioned JSON receipt
+on stdout, including skipped or unsuccessful submissions. The original four
+positional arguments and default empty stdout are unchanged.
 
 The log lines use the unified format of docs/design/unified-logging.md. They go
 to stderr and are appended to LOG_FILE; stdout stays empty. Every line of a run
@@ -31,6 +39,7 @@ standard library, so it can be copied to the qBittorrent host on its own.
 import datetime
 import http.client
 import json
+import math
 import os
 import re
 import sys
@@ -39,15 +48,15 @@ import urllib.request
 import uuid
 import zoneinfo
 
-MUSE_URL = os.environ.get("MUSE_URL", "http://192.168.50.135:4444")
+MUSE_URL = os.environ.get("MUSE_URL", "http://127.0.0.1:4444")
 LOG_FILE = os.environ.get("LOG_FILE", "/tmp/torrent-complete.log")
 
 # Only this category is sent to fusionn-muse.
 MUSE_CATEGORY = "whisparr"
 
 # The host download mount, and the path that fusionn-muse sees for it.
-HOST_INPUT_PATH = "/Volumes/External"
-CONTAINER_INPUT_PATH = "/data"
+HOST_INPUT_PATH = os.environ.get("HOST_INPUT_PATH", "/Volumes/External")
+CONTAINER_INPUT_PATH = os.environ.get("CONTAINER_INPUT_PATH", "/data")
 
 REQUEST_TIMEOUT_SECONDS = 15
 # The acknowledgement is small; reading stops at this size.
@@ -271,7 +280,7 @@ def _submission_id(body):
     return None
 
 
-def submit(log, request_id, path, name, category):
+def submit(log, request_id, path, name, category, receipt, timeout):
     """Send the webhook request once and return the exit code.
 
     Only the status, the body size and fixed reasons are logged: the response
@@ -286,11 +295,13 @@ def submit(log, request_id, path, name, category):
     )
     try:
         opener = urllib.request.build_opener(_NoRedirect)
-        with opener.open(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with opener.open(request, timeout=timeout) as response:
             status = response.status
-            body = response.read(MAX_RESPONSE_BYTES)
+            receipt["http_status"] = status
+            body = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
         error.close()
+        receipt.update(result="rejected", reason="http_rejected", http_status=error.code)
         log.error("webhook_failed", "Webhook request failed", error="rejected by the API", http_status=error.code)
         return 1
     except (OSError, http.client.HTTPException, ValueError) as error:
@@ -302,6 +313,7 @@ def submit(log, request_id, path, name, category):
         )
         return 1
     if status != 202:
+        receipt.update(result="rejected", reason="http_rejected")
         log.error(
             "webhook_failed",
             "Webhook request failed",
@@ -310,8 +322,9 @@ def submit(log, request_id, path, name, category):
             response_bytes=len(body),
         )
         return 1
-    submission_id = _submission_id(body)
+    submission_id = _submission_id(body) if len(body) <= MAX_RESPONSE_BYTES else None
     if submission_id is None:
+        receipt.update(result="unknown", reason="invalid_acknowledgement")
         log.error(
             "webhook_failed",
             "Webhook acknowledgement is invalid",
@@ -321,18 +334,40 @@ def submit(log, request_id, path, name, category):
         )
         return 1
     # The Submission ID links this run to the fusionn-muse Submission and Job.
+    receipt.update(result="accepted", reason="accepted", submission_id=submission_id)
     log.ids["submission_id"] = submission_id
     log.info("webhook_sent", "Webhook accepted", container_path=path, http_status=status, response_bytes=len(body))
     return 0
 
 
 def main(argv):
+    receipt_json = len(argv) > 1 and argv[1] == "--receipt-json"
+    if receipt_json:
+        argv = [argv[0], *argv[2:]]
+    receipt = {"schema_version": 1, "result": "unknown", "reason": "transport_error"}
+
+    def finish(code):
+        if receipt_json:
+            print(json.dumps(receipt))
+        return code
+
     level, invalid_level = resolve_level()
     log = Log(level, LOG_FILE)
     # One request ID marks every line of this run and is sent in the X-Request-ID
     # header. fusionn-muse reuses it, so both logs show the same value.
-    request_id = "tc-" + uuid.uuid4().hex
+    request_id = os.environ.get("MUSE_REQUEST_ID", "tc-" + uuid.uuid4().hex)
+    if not _ID.fullmatch(request_id):
+        receipt.update(result="rejected", reason="invalid_request_id")
+        return finish(1)
+    receipt["request_id"] = request_id
     log.ids["request_id"] = request_id
+    try:
+        timeout = float(os.environ.get("MUSE_REQUEST_TIMEOUT", REQUEST_TIMEOUT_SECONDS))
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError
+    except ValueError:
+        receipt.update(result="rejected", reason="invalid_timeout")
+        return finish(1)
     if invalid_level is not None:
         log.warn("config_invalid", "Invalid LOG_LEVEL, using INFO", log_level=invalid_level)
     _, invalid_tz = resolve_zone()
@@ -345,13 +380,15 @@ def main(argv):
             "Usage: torrent_complete.py <name> <category> <info_hash> <path>",
             arguments=len(argv) - 1,
         )
-        return 1
+        receipt.update(result="rejected", reason="invalid_arguments")
+        return finish(1)
     name, category, info_hash, path = argv[1:5]
     log.info("torrent_completed", "Torrent completed", category=category, info_hash=info_hash, name=name, path=path)
 
     if category != MUSE_CATEGORY:
         log.info("torrent_skipped", "Category is not sent to fusionn-muse", category=category)
-        return 0
+        receipt.update(result="skipped", reason="category_skipped")
+        return finish(0)
     mapped = container_path(path)
     if mapped is None:
         log.error(
@@ -361,8 +398,9 @@ def main(argv):
             host_input_path=HOST_INPUT_PATH,
             path=path,
         )
-        return 1
-    return submit(log, request_id, mapped, name, category)
+        receipt.update(result="rejected", reason="path_outside_mount")
+        return finish(1)
+    return finish(submit(log, request_id, mapped, name, category, receipt, timeout))
 
 
 if __name__ == "__main__":

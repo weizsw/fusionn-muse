@@ -1,8 +1,8 @@
 # 教程与测试共用的部署验证方案
 
-状态：**设计提案，等待用户确认；命令和输出格式尚未实现。**
+状态：**用户已选择“按最小方案实现”；共用命令已实现，真实部署验收尚未执行。**
 
-本轮只新增本文。保留已有 README、教程、agent 说明、部署配置、脚本与报告；未运行部署、投递媒体、修改或重启现网。以下所有命令示例都是拟议接口，不能当作已经可用的功能。
+设计阶段只新增本文；用户确认后承接了资料分支，并实现共用命令、契约测试与教程迁移。未向现网投递媒体、修改或重启现网。第 2、11 节保留设计阶段的来源和检查记录，第 12 节记录后续实现；实际用法见[部署检查命令](../deployment/verification.md)。
 
 ## 1. 推荐结论与待确认范围
 
@@ -12,7 +12,7 @@
 
 这不是降低验收要求，而是把目前 API 能回答的事实与需要外部证据的事实分别写清楚。**若用户要求单个命令直接、自动证明“本次实际调用了 ASR 和 LLM”，首版范围就必须包含服务端执行凭证，不能继续靠客户端猜测。** 第 10 节给出该替代方案的成本。
 
-待确认的唯一范围选择：
+设计时提交的范围选择（用户已确认第一项）：
 
 - **推荐：先做共用命令，不改 Muse API。** 命令自动核对投递和产物；真实模型与三种硬件的验收另有明确证据要求。保留未实测标记，允许文档与 Linux 适配各自推进。
 - **扩展：先补服务端调用凭证，再做自动模型验收。** 增加持久化模型调用与复用原因、Attempt 归属和产物来源的设计及实现；工期和回归面扩大。
@@ -30,7 +30,7 @@ Basis：用户选择“教程和测试共用的部署检查命令方案，先确
 | 本设计工作树 `82b4d0d` | 读取真实 handler、queue、processor、HostASR、回调脚本、配置及领域文档；与 `64bab27` 比较，`internal/`、`cmd/`、`Makefile` 无差异 |
 | 用户提供的四轮失败模式 | 用于确定必须防止的误报；不重新启动旧补丁审查 |
 
-未合并资料的固定版本入口：[教程与代码树](https://github.com/weizsw/fusionn-muse/tree/64bab27)、[原验证报告](https://github.com/weizsw/fusionn-muse/blob/64bab27/docs/deployment/verification-report.md)、[原部署测试](https://github.com/weizsw/fusionn-muse/blob/64bab27/scripts/test_deployment_verification.py)。本任务不复制这些资料。
+未合并资料的固定版本入口：[教程与代码树](https://github.com/weizsw/fusionn-muse/tree/64bab27)、[原验证报告](https://github.com/weizsw/fusionn-muse/blob/64bab27/docs/deployment/verification-report.md)、[原部署测试](https://github.com/weizsw/fusionn-muse/blob/64bab27/scripts/test_deployment_verification.py)。设计阶段未复制这些资料；确认后的实现阶段已承接它们。
 
 已从源码核实的前提：
 
@@ -38,7 +38,7 @@ Basis：用户选择“教程和测试共用的部署检查命令方案，先确
 2. 该测试仍使用自建 HTTP 模拟应答、预置文件；它证明的是命令在这些应答下的行为，不是实际 Muse、模型、Docker 或 Linux 部署通过。本轮没有重跑这套旧分支测试，也不给旧补丁审查结论。
 3. 原报告中的“首次全链路”“已全部闭环”不作为本文的已证事实；以可重现的证据层级为准。
 4. `is_light=true` 不保证 `translated_path` 为空：外挂中文字幕放行时，处理器会把已有字幕复制到最终字幕路径。报告中把放行路径概括为空的前提应以真实代码修正。
-5. 当前工作树没有这些待合并教程；后续实现需先承接该资料分支，再迁移验证章节，不能只在默认分支上重写教程。
+5. 设计阶段的工作树没有这些待合并教程；实现阶段已先承接该资料分支，再迁移验证章节，保留其余资料。
 
 ### 2.2 代码依据索引
 
@@ -52,7 +52,7 @@ Basis：用户选择“教程和测试共用的部署检查命令方案，先确
 - [提交与准备](../../internal/queue/submission_worker.go)、[重复媒体关联](../../internal/queue/submission_store.go)、[Job/Attempt 字段与媒体身份](../../internal/queue/job.go)。
 - [处理与最终交付](../../internal/service/processor/processor.go)、[翻译回执复用](../../internal/service/processor/translation_receipt.go)。
 - [HostASR 文件路径协议](../../internal/executor/host_asr.go)、[配置与目录](../../internal/config/config.go)、[媒体大小门槛](../../internal/mediaintake/media.go)。
-- 回调以资料分支版本为准：[torrent_complete.py](https://github.com/weizsw/fusionn-muse/blob/64bab27/scripts/torrent_complete.py)。其环境变量覆盖修订尚未出现在本设计工作树。
+- 回调以资料分支版本为准：[torrent_complete.py](https://github.com/weizsw/fusionn-muse/blob/64bab27/scripts/torrent_complete.py)。实现阶段已承接其环境变量覆盖修订，并增加可选 JSON 回执。
 
 ## 3. 真实 API 能证明什么
 
@@ -292,7 +292,7 @@ Muse 的自动交付检查止于 scraping 视频与字幕目录。mdc-ng 消费�
 
 ## 8. 实际改动与依赖关系
 
-所有后续动作以用户确认本方案为前提；此表不意味着已批准实现或部署。
+用户已确认最小方案的实现（下表 1–5）；真实部署验收与 Linux 实现仍按下表各自的前提推进，本次不改动现网。
 
 | 次序 | 交付位置 | 实际工作与完成条件 | 依赖 |
 | --- | --- | --- | --- |
@@ -345,4 +345,20 @@ Basis：改动次序来自用户“保留资料、先设计确认”及原文档
 - `make test`：首次使用系统 Python 时，Go 测试通过，Python 因缺少 `pydantic` 导入失败。随后仅在 `/tmp/muse-deployment-design-venv` 创建临时虚拟环境并安装 Pydantic 2.14.3；以 `PATH="/tmp/muse-deployment-design-venv/bin:$PATH" make test` 重跑，Go race 测试全部通过，Python 共运行 132 项、跳过 11 项，最终为 `OK (skipped=11)`。跳过项需要 Docker 镜像环境，不计为实测通过。未修改仓库依赖声明或现网 Python 环境。
 - 本地 Markdown 链接、代码围栏配对和 `git diff --check`：通过。
 
-这些结果用于确认本轮文档变更所在工作树的常规检查状态，不代表尚未实现的命令已通过测试，也不包含资料分支独有的旧部署测试。
+这些结果属于设计阶段，不代表当时尚未实现的命令已通过测试，也不包含资料分支独有的旧部署测试。
+
+## 12. 已确认的最小方案实现记录
+
+用户随后选择“按最小方案实现（推荐）”，替代原先仅交设计的限制。实现保持不修改 Muse 生产 API、数据库和现网的范围。
+
+- 从 `64bab27` 承接既有 README、部署教程、配置与脚本；安装资料保留，原验证报告标记为历史记录。没有重做整套开源资料。
+- `scripts/torrent_complete.py` 增加可选首参数 `--receipt-json`，原四个位置参数、默认空 stdout 与 stderr 日志保持兼容。支持调用方提供 request ID 和请求超时，以便 POST 结果未知时仍可定位，不自动重发。
+- `scripts/verify_deployment.py` 实现 health/run/observe 与 accepted/delivered/subtitles。严格跟踪准备执行、关联 Job 和初次 Attempt，校验动态产物路径与 SRT，并回读执行状态。实际模型调用 claims 始终为 `not_proven`。
+- 首版落实了文中的保守限制：旧 Job、多个关联准备记录、非初次 Attempt、执行变化、无足够历史或配置证据均不能判定本次样本处理通过。人工恢复与自动重试不由检查器执行。
+- `scripts/test_deployment_verification.py` 改为直接运行交付 CLI/回调的故障矩阵，教程测试只提取标记的短调用并传环境参数。旧长 Bash 状态机已移除。
+- `internal/handler/deployment_test.go` 使用真实 Gin handler、queue、临时 SQLite 与同一 Python CLI；仅媒体准备和处理使用确定性替身。覆盖正常产物、外挂字幕放行、重复关联、准备失败，以及 Job 保留 completed 而最新重翻译 failed。
+- macOS、agent 与 Linux 说明调用同一入口，公共参数和证据边界集中于 `docs/deployment/verification.md`。
+
+实现验证：`make lint` 通过（0 issues）；`PATH="/tmp/muse-deployment-design-venv/bin:$PATH" make test` 通过，Go race 测试全部通过，Python 共运行 162 项，最终 `OK (skipped=11)`。其中包含 26 个共用命令测试方法（多项故障用 subTest 展开）与三份教程短示例的实际执行；11 个跳过项依赖 Docker 镜像环境，不计为部署实测通过。测试使用设计阶段创建的临时 Python 虚拟环境，以满足既有 HostASR 测试需要的 Pydantic；新检查命令本身仅用标准库。
+
+未执行真实模型、macOS 运行部署、Linux NVIDIA/CPU、qBittorrent 自动事件或下游联动验收。测试使用的媒体和产物是 fixture，不能作为这些项目通过的证据。
