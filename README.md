@@ -18,35 +18,31 @@ Automatic subtitle transcription and translation pipeline for qBittorrent. When 
 ```bash
 docker run -d \
   -p 8080:8080 \
-  -v /path/to/downloads:/data/torrents:ro \
-  -v /path/to/automation:/data/automation \
-  -v ./config.yaml:/app/config/config.yaml:ro \
-  ghcr.io/your-username/fusionn-muse:latest
+  -v /path/to/data:/data \
+  -v ./config/config.yaml:/app/config/config.yaml:ro \
+  ghcr.io/weizsw/fusionn-muse:latest
 ```
+
+The host directory mounted at `/data` holds both the qBittorrent download folder and
+the `automation` output tree, so staging and the download share one filesystem and
+the SQLite queue state survives a container rebuild.
 
 ### Docker Compose
 
-```yaml
-services:
-  fusionn-muse:
-    image: ghcr.io/your-username/fusionn-muse:latest
-    ports:
-      - "8080:8080"
-    volumes:
-      - /path/to/downloads:/data/torrents:ro
-      - /path/to/automation:/data/automation
-      - ./config.yaml:/app/config/config.yaml:ro
-    environment:
-      - ENV=production
-    restart: unless-stopped
+Copy `docker-compose.yaml`, set `DATA_ROOT` to that host directory (and `MUSE_PORT`,
+`CONFIG_FILE` or `TZ` if the defaults do not fit), then start it:
+
+```bash
+mkdir -p config && cp config/config.example.yaml config/config.yaml
+docker compose up -d
 ```
 
 ## Configuration
 
-Copy the example config and customize the MLX host URL/path mapping and LLM settings (the example now selects `mlx_qwen3_asr`):
+Copy the example config to `config/config.yaml` (where `docker-compose.yaml` mounts it) and customize the MLX host URL/path mapping and LLM settings (the example selects `mlx_qwen3_asr`):
 
 ```bash
-cp config/config.example.yaml config.yaml
+cp config/config.example.yaml config/config.yaml
 ```
 
 ### Key Settings
@@ -80,8 +76,8 @@ mlx_qwen3_asr:
 
 translate:
   provider: "custom"
-  custom_server: "http://192.168.50.135:8317/v1"
-  model: "gpt-5.4-mini"
+  custom_server: "http://llm-gateway:8080/v1"
+  model: "gpt-4o-mini"
   api_key: "sk-..."
   target_lang: "Simplified Chinese"
   instruction: "Optional PySubtrans --instruction text"
@@ -163,13 +159,24 @@ Fields appear in this order: `component event`, then `job_id submission_id attem
 
 ## qBittorrent Setup
 
-1. Copy `scripts/torrent_complete.py` to the qBittorrent host. It needs only Python 3.9 or later and its standard library. Set the constants at the top of the file for your deployment: `MUSE_URL`, `MUSE_CATEGORY` (the only category that is sent), and `HOST_INPUT_PATH` and `CONTAINER_INPUT_PATH` (the download mount, and the path that Muse sees for it). You can also set `MUSE_URL`, `LOG_FILE` and `LOG_LEVEL` as environment variables.
+1. Copy `scripts/torrent_complete.py` to the qBittorrent host. It needs only Python 3.9 or later and its standard library. qBittorrent runs the command directly rather than through a shell, so environment assignments cannot be prefixed to it: pass the settings as options instead, or set the environment variables in the environment qBittorrent itself inherits.
 
-2. Go to **Options → Downloads → Run external program on torrent completion** and add the command:
+   | Option | Environment variable | Meaning |
+   |--------|----------------------|---------|
+   | `--muse-url` | `MUSE_URL` | Muse base URL; default `http://127.0.0.1:8080` |
+   | `--category` | `MUSE_CATEGORY` | The only category that is sent; default `whisparr`, an empty value sends the uncategorized torrents only |
+   | `--host-input` | `HOST_INPUT_PATH` | The download mount as qBittorrent sees it; required |
+   | `--container-input` | `CONTAINER_INPUT_PATH` | The same mount as Muse sees it; default `/data` |
+
+   An option wins over its environment variable. `LOG_FILE`, `LOG_LEVEL` and `TZ` are environment-only.
+
+2. Go to **Options → Downloads → Run external program on torrent completion** and add the command as one line, with the options before the placeholders:
 
    ```bash
-   python3 /path/to/torrent_complete.py "%N" "%L" "%I" "%F"
+   python3 /path/to/torrent_complete.py --muse-url http://muse-host:8080 --category whisparr --host-input /path/to/data --container-input /data "%N" "%L" "%I" "%F"
    ```
+
+   Use `http://host.docker.internal:8080` or the host's LAN address when qBittorrent runs in a container and Muse on the host. A run without `--host-input` fails with `config_invalid` and sends nothing.
 
    The script sends one request, does not follow redirects, and stops waiting after 15 seconds. Only **HTTP 202** with a `submission_id` counts as success. A torrent in another category is only logged. A path outside the download mount, a failed request or a missing acknowledgement is logged as `webhook_failed`, and the script exits with status 1.
 
@@ -180,8 +187,8 @@ When Muse is unavailable or cannot persist the request, the script logs failure 
 ## Folder Structure
 
 ```
-/data/
-├── torrents/              # Input: torrent download folder (read-only)
+<data root>/
+├── <download folder>/     # The torrent download folder, as qBittorrent sees it
 └── automation/
     ├── staging/           # Queue: waiting for processing
     ├── processing/        # Active: currently being processed
@@ -220,8 +227,8 @@ GET /api/v1/tasks/submission/<submission-id>?limit=50
 For `job` detail and actions, the path reference accepts either the Job ID or a normalized **Video code** such as `SNOS-411` (case-insensitive). You do not need to list Jobs to find an ID:
 
 ```bash
-curl 'http://localhost:4444/api/v1/tasks/job/SNOS-411'
-curl -X POST 'http://localhost:4444/api/v1/tasks/job/SNOS-411/actions' \
+curl 'http://localhost:8080/api/v1/tasks/job/SNOS-411'
+curl -X POST 'http://localhost:8080/api/v1/tasks/job/SNOS-411/actions' \
   -H 'Content-Type: application/json' -d '{"action":"retranslate"}'
 ```
 
@@ -246,12 +253,12 @@ An unresolved Submission occupies one row. Once resolved, its Job replaces it: m
 
 ```bash
 # Resume all interrupted tasks with the current configuration.
-curl -X POST 'http://localhost:4444/api/v1/tasks/actions' \
+curl -X POST 'http://localhost:8080/api/v1/tasks/actions' \
   -H 'Content-Type: application/json' \
   -d '{"action":"resume","use_current_settings":true}'
 
 # Retry all failed tasks with the current configuration.
-curl -X POST 'http://localhost:4444/api/v1/tasks/actions' \
+curl -X POST 'http://localhost:8080/api/v1/tasks/actions' \
   -H 'Content-Type: application/json' \
   -d '{"action":"retry","use_current_settings":true}'
 ```
@@ -364,6 +371,8 @@ All providers use OpenAI-compatible API:
 | `together` | api.together.xyz | Various |
 | `fireworks` | api.fireworks.ai | Various |
 | `custom` | Your endpoint | Any OpenAI-compatible |
+
+The built-in addresses already include the version prefix the provider serves its API under (`api.openai.com/v1`, `api.groq.com/openai/v1`, `openrouter.ai/api/v1`, ...): PySubtrans appends only `/chat/completions` to the base URL. A `custom_server` address has to include its own prefix the same way; without it the request goes to a path the server does not serve and fails with HTTP 404.
 
 ## Development
 

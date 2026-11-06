@@ -31,6 +31,7 @@ LINE_RE = re.compile(
 )
 
 ACK = b'{"message":"webhook accepted","status":"pending","submission_id":"sub-123"}'
+HOST_MOUNT = "/Volumes/External"
 MOUNTED = "/Volumes/External/downloads/movie.mp4"
 
 
@@ -64,12 +65,34 @@ class TorrentCompleteTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return "http://127.0.0.1:%d" % server.server_port, requests
 
-    def invoke(self, url, values, python=sys.executable, level=None, log_file=None, tz=None):
+    def hook_environment(self, url, log, **overrides):
+        """The environment every run starts from: one host mount, mapped."""
+        environment = {**os.environ}
+        for name in (
+            "MUSE_URL",
+            "MUSE_CATEGORY",
+            "HOST_INPUT_PATH",
+            "CONTAINER_INPUT_PATH",
+            "LOG_LEVEL",
+            "ALIGN_LOG_LEVEL",
+        ):
+            environment.pop(name, None)
+        environment.update(
+            {
+                "MUSE_URL": url,
+                "LOG_FILE": str(log),
+                "MUSE_CATEGORY": "whisparr",
+                "HOST_INPUT_PATH": HOST_MOUNT,
+                "CONTAINER_INPUT_PATH": "/data",
+            }
+        )
+        environment.update(overrides)
+        return environment
+
+    def invoke(self, url, values, python=sys.executable, level=None, log_file=None, tz=None, mount=None):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(log_file) if log_file else Path(directory) / "hook.log"
-            environment = {**os.environ, "MUSE_URL": url, "LOG_FILE": str(log)}
-            for name in ("LOG_LEVEL", "ALIGN_LOG_LEVEL"):
-                environment.pop(name, None)
+            environment = self.hook_environment(url, log, **(mount or {}))
             if level is not None:
                 environment["LOG_LEVEL"] = level
             if tz is not None:
@@ -185,6 +208,69 @@ class TorrentCompleteTests(unittest.TestCase):
         self.assertIn("ERROR component=torrent-complete event=arguments_invalid", log)
         self.assertIn("arguments=3", log)
 
+    def test_options_configure_what_the_environment_cannot(self):
+        """qBittorrent runs the command without a shell, so the settings are options."""
+        url, requests = self.serve(202)
+        result, log = self.invoke(
+            "http://127.0.0.1:9",
+            [
+                "--muse-url", url,
+                "--category", "sonarr",
+                "--host-input", "/srv/media/",
+                "--container-input", "/media",
+                "movie", "sonarr", "abc123", "/srv/media/downloads/movie.mp4",
+            ],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_unified_lines(log)
+        self.assertEqual(len(requests), 1, "the option overrides MUSE_URL")
+        self.assertEqual(
+            requests[0]["body"],
+            {"path": "/media/downloads/movie.mp4", "name": "movie", "category": "sonarr"},
+            "the options override the category and map the path",
+        )
+
+    def test_an_empty_category_sends_the_uncategorized_torrents(self):
+        url, requests = self.serve(202)
+        result, _ = self.invoke(url, ["--category", "", "movie", "", "abc123", MOUNTED])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["body"]["category"], "")
+
+    def test_an_unconfigured_mount_fails_without_a_request(self):
+        url, requests = self.serve(202)
+        result, log = self.invoke(url, ["movie", "whisparr", "abc123", MOUNTED], mount={"HOST_INPUT_PATH": ""})
+        self.assertEqual(result.returncode, 1)
+        self.assert_unified_lines(log)
+        self.assertIn("ERROR component=torrent-complete event=config_invalid", log)
+        self.assertIn('error="download mount is not configured"', log)
+        self.assertIn('option="--host-input"', log)
+        self.assertEqual(requests, [])
+
+    def test_an_option_is_only_recognized_before_the_arguments(self):
+        url, requests = self.serve(202)
+        result, log = self.invoke(url, ["movie", "whisparr", "abc123", MOUNTED, "--category", "sonarr"])
+        self.assertEqual(result.returncode, 1)
+        self.assert_unified_lines(log)
+        self.assertIn("ERROR component=torrent-complete event=arguments_invalid", log)
+        self.assertIn("arguments=6", log)
+        self.assertEqual(requests, [], "a trailing option must not be half-applied")
+
+    def test_an_unknown_or_valueless_option_fails(self):
+        url, requests = self.serve(202)
+        for values, error, option in (
+            (["--cateogry", "whisparr", "movie", "whisparr", "abc123", MOUNTED], "unknown option", "--cateogry"),
+            (["--category"], "option needs a value", "--category"),
+        ):
+            with self.subTest(option=option, error=error):
+                result, log = self.invoke(url, values)
+                self.assertEqual(result.returncode, 1)
+                self.assert_unified_lines(log)
+                self.assertIn("ERROR component=torrent-complete event=arguments_invalid", log)
+                self.assertIn('error="%s"' % error, log)
+                self.assertIn('option="%s"' % option, log)
+        self.assertEqual(requests, [])
+
     def test_fields_are_ordered_and_msg_is_last(self):
         url, _ = self.serve(202)
         _, log = self.invoke(url, ["movie", "whisparr", "abc123", MOUNTED])
@@ -240,9 +326,7 @@ class TorrentCompleteTests(unittest.TestCase):
         url, requests = self.serve(202)
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "hook.log"
-            environment = {**os.environ, "MUSE_URL": url, "LOG_FILE": str(log)}
-            for name in ("LOG_LEVEL", "ALIGN_LOG_LEVEL"):
-                environment.pop(name, None)
+            environment = self.hook_environment(url, log)
             # "2>&-" closes file descriptor 2 before Python starts.
             command = ["/bin/sh", "-c", 'exec "$0" "$@" 2>&-', sys.executable, str(SCRIPT), "movie", "whisparr", "abc123", MOUNTED]
             result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=30)
@@ -296,7 +380,13 @@ class HookRenderingTest(unittest.TestCase):
         }
         for path, want in cases.items():
             with self.subTest(path=path):
-                self.assertEqual(self.hook.container_path(path), want)
+                self.assertEqual(self.hook.container_path(path, "/Volumes/External", "/data"), want)
+
+    def test_path_mapping_ignores_a_trailing_slash(self):
+        self.assertEqual(self.hook.container_path("/data/movie.mkv", "/data/", "/data/"), "/data/movie.mkv")
+        self.assertEqual(self.hook.container_path("/data", "/data/", "/data/"), "/data")
+        self.assertEqual(self.hook.container_path("/data/movie.mkv", "/data", ""), "/movie.mkv")
+        self.assertIsNone(self.hook.container_path("/data/movie.mkv", "", "/data"))
 
 
 if __name__ == "__main__":

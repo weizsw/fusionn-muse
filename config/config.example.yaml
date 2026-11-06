@@ -62,8 +62,10 @@ translate:
   #          "Korean", "French", "German", "Spanish", "Russian", etc.
   target_lang: "Simplified Chinese"
 
-  # ─── Custom endpoint (only for provider: "custom") ───
-  # Server URL (e.g., "http://localhost:1234"; PySubtrans endpoints usually include /v1)
+  # ─── Custom endpoint (overrides the provider's built-in URL) ───
+  # Leave empty to use the provider's built-in URL. PySubtrans appends
+  # "/chat/completions" to it, so a custom address must include the version
+  # prefix the server needs, e.g. "http://host:8080/v1".
   custom_server: ""
 
   # Custom instruction/prompt for translation (optional)
@@ -153,48 +155,64 @@ apprise:
 #
 # docker run -d \
 #   -p 8080:8080 \
-#   -v /path/to/downloads:/data/torrents:ro \
-#   -v /path/to/automation:/data/automation \
-#   -v ./config.yaml:/app/config/config.yaml:ro \
-#   fusionn-muse
+#   -v /path/to/data:/data \
+#   -v ./config/config.yaml:/app/config/config.yaml:ro \
+#   ghcr.io/weizsw/fusionn-muse:latest
 #
-# Folder structure:
-#   /data/torrents              - Input: torrent download folder (read-only)
-#   /data/automation/staging    - Internal: queue before processing
-#   /data/automation/processing - Internal: active processing
-#   /data/automation/scraping   - Output: videos ready for scraping
-#   /data/automation/subtitles  - Output: translated subtitles
-#   /data/automation/transcriptions - Durable source subtitles for retranslation
-#   /data/automation/meta/fusionn-muse.db - Durable job and attempt state
-#   /data/automation/failed     - Failed jobs (for manual inspection)
+# Or copy docker-compose.yaml and set DATA_ROOT to /path/to/data. One data
+# root means the service and the host see the same tree, which is what the
+# host_prefix/container_prefix mapping above and the qBittorrent path mapping
+# below describe.
+#
+# Folder structure under the mounted root:
+#   <download folder>           - the torrent download folder, as qBittorrent sees it
+#   automation/staging          - Internal: queue before processing
+#   automation/processing       - Internal: active processing
+#   automation/scraping         - Output: videos ready for scraping
+#   automation/subtitles        - Output: translated subtitles
+#   automation/transcriptions   - Durable source subtitles for retranslation
+#   automation/meta/fusionn-muse.db - Durable job and attempt state
+#   automation/failed           - Failed jobs (for manual inspection)
 #
 # ════════════════════════════════════════════════════════════════════════════
 # QBITTORRENT SETUP
 # ════════════════════════════════════════════════════════════════════════════
 #
-# Options → Downloads → Run external program on completion:
-#   python3 /path/to/torrent_complete.py "%N" "%L" "%I" "%F"
+# Options → Downloads → Run external program on completion. qBittorrent runs
+# the command directly rather than through a shell, so environment assignments
+# cannot be prefixed to it; pass the settings as options. The field takes one
+# line; it is wrapped here for readability:
 #
-# scripts/torrent_complete.py sends each whisparr torrent once:
-#   POST <MUSE_URL>/api/v1/webhook/torrent
+#   python3 /path/to/torrent_complete.py \
+#       --muse-url http://muse-host:8080 \
+#       --category whisparr \
+#       --host-input /path/to/data \
+#       --container-input /data \
+#       "%N" "%L" "%I" "%F"
+#
+# scripts/torrent_complete.py sends each torrent of that category once:
+#   POST <muse-url>/api/v1/webhook/torrent
 #   {"path": "<container path>", "name": "<name>", "category": "<category>"}
-# Set MUSE_URL and the path mapping at the top of the script.
+# The equivalent environment variables are MUSE_URL, MUSE_CATEGORY,
+# HOST_INPUT_PATH and CONTAINER_INPUT_PATH; the option wins over the variable.
+# --host-input is required; it is the folder that is mounted at
+# --container-input (/data by default). Use http://host.docker.internal:8080 as
+# the Muse URL when qBittorrent runs in a container and Muse on the host.
 #
 # ════════════════════════════════════════════════════════════════════════════
 # API ENDPOINTS
 # ════════════════════════════════════════════════════════════════════════════
 #
 # POST /api/v1/webhook/torrent     - qBittorrent completion callback
-# GET  /api/v1/queue               - List all jobs
-# GET  /api/v1/queue/stats         - Queue statistics
-# GET  /api/v1/queue/:id           - Get job details
-# POST /api/v1/jobs/:id/retry      - Retry a failed job
-# POST /api/v1/jobs/:id/resume     - Resume an interrupted job
-# POST /api/v1/jobs/:id/retranslate - Translate again from the persisted source subtitle
-# POST /api/v1/retry/staging       - Re-queue all staging files
-# POST /api/v1/retry/failed        - Re-queue all failed files
-# POST /api/v1/retry/failed/:name  - Re-queue specific failed file
-# GET  /api/v1/files/staging       - List staging files
-# GET  /api/v1/files/failed        - List failed files
+# GET  /api/v1/tasks               - Cursor-paginated view of all work
+# GET  /api/v1/tasks/stats         - Aggregated counts
+# GET  /api/v1/tasks/:kind/:id     - Detail, available actions and history
+# POST /api/v1/tasks/:kind/:id/actions - retry, resume or retranslate
+# POST /api/v1/tasks/actions       - Bulk retry of failed or resume of interrupted tasks
+# GET  /api/v1/health              - Liveness check
+# GET  /api/v1/version             - Version info
+#
+# The retired /queue, /jobs, /submissions, /files and /retry routes are removed,
+# not redirected; the README lists the current API.
 #
 # ════════════════════════════════════════════════════════════════════════════

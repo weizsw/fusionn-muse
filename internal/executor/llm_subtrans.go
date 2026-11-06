@@ -259,16 +259,18 @@ func (t *LLMSubtrans) getLangCode() string {
 }
 
 // getBaseURL returns the OpenAI-compatible API base URL for the provider.
+// The translation script appends "/chat/completions" to this value, so every
+// URL must end with the version prefix the provider serves its API under.
 func getBaseURL(provider, customServer string) string {
 	provider = strings.ToLower(provider)
 
 	baseURLs := map[string]string{
-		"openai":       "https://api.openai.com",
+		"openai":       "https://api.openai.com/v1",
 		"deepseek":     "https://api.deepseek.com",
-		"openrouter":   "https://openrouter.ai/api",
-		"groq":         "https://api.groq.com/openai",
-		"together":     "https://api.together.xyz",
-		"fireworks":    "https://api.fireworks.ai/inference",
+		"openrouter":   "https://openrouter.ai/api/v1",
+		"groq":         "https://api.groq.com/openai/v1",
+		"together":     "https://api.together.xyz/v1",
+		"fireworks":    "https://api.fireworks.ai/inference/v1",
 		"siliconcloud": "https://api.siliconflow.cn/v1",
 		"siliconflow":  "https://api.siliconflow.cn/v1",
 	}
@@ -281,5 +283,5 @@ func getBaseURL(provider, customServer string) string {
 		return url
 	}
 
-	return "https://api.openai.com"
+	return "https://api.openai.com/v1"
 }

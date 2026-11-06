@@ -147,16 +147,16 @@ func TestLLMSubtransEndpointAndLanguageCodesSurviveLegacyRemoval(t *testing.T) {
 	for _, tc := range []struct {
 		provider, custom, want string
 	}{
-		{"OPENAI", "", "https://api.openai.com"},
+		{"OPENAI", "", "https://api.openai.com/v1"},
 		{"deepseek", "", "https://api.deepseek.com"},
 		{"siliconcloud", "", "https://api.siliconflow.cn/v1"},
 		{"siliconflow", "", "https://api.siliconflow.cn/v1"},
-		{"openrouter", "", "https://openrouter.ai/api"},
-		{"groq", "", "https://api.groq.com/openai"},
-		{"together", "", "https://api.together.xyz"},
-		{"fireworks", "", "https://api.fireworks.ai/inference"},
+		{"openrouter", "", "https://openrouter.ai/api/v1"},
+		{"groq", "", "https://api.groq.com/openai/v1"},
+		{"together", "", "https://api.together.xyz/v1"},
+		{"fireworks", "", "https://api.fireworks.ai/inference/v1"},
 		{"openai", "https://proxy.example/path/v1", "https://proxy.example/path/v1"},
-		{"unknown", "", "https://api.openai.com"},
+		{"unknown", "", "https://api.openai.com/v1"},
 	} {
 		if got := getBaseURL(tc.provider, tc.custom); got != tc.want {
 			t.Fatalf("provider=%q custom=%q URL=%q want=%q", tc.provider, tc.custom, got, tc.want)

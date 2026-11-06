@@ -25,7 +25,8 @@ log = configure(service=SERVICE, component=SERVICE)
 
 import torch  # noqa: E402
 import uvicorn  # noqa: E402
-from fastapi import FastAPI, JSONResponse, Request  # noqa: E402
+from fastapi import FastAPI, Request  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 from sentence_transformers import SentenceTransformer  # noqa: E402
 

@@ -71,14 +71,19 @@ def install_stubs():
             return self._route("POST", path)
 
     fastapi.FastAPI = FastAPI
-    fastapi.JSONResponse = JSONResponse
     fastapi.Request = Request
     fastapi.Response = Response
+
+    # JSONResponse lives in fastapi.responses; the top-level fastapi package does
+    # not export it, so the stub must not either.
+    responses = types.ModuleType("fastapi.responses")
+    responses.JSONResponse = JSONResponse
 
     uvicorn = types.ModuleType("uvicorn")
     uvicorn.run = lambda *args, **kwargs: None
 
     sys.modules["fastapi"] = fastapi
+    sys.modules["fastapi.responses"] = responses
     sys.modules["uvicorn"] = uvicorn
     return fastapi
 

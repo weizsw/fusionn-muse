@@ -1,31 +1,39 @@
 services:
   fusionn-muse:
+    # The published image is pulled by default; `docker compose build` (or
+    # `up --build`) builds this checkout instead and tags it the same way.
+    image: ghcr.io/weizsw/fusionn-muse:${MUSE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
     container_name: fusionn-muse
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${MUSE_PORT:-8080}:8080"
     volumes:
-      # Config (required)
-      - ./config/config.yaml:/app/config/config.yaml:ro
+      # One data root, mounted as-is for both the service and the host. This is
+      # the tree the mlx_qwen3_asr host_prefix/container_prefix mapping and the
+      # qBittorrent hook path mapping describe:
+      #
+      #   <DATA_ROOT>/                          host view of /data
+      #     automation/staging                  internal: accepted, not yet started
+      #     automation/processing               internal: a run is active
+      #     automation/scraping                 output: translated videos
+      #     automation/subtitles                output: translated subtitles
+      #     automation/transcriptions           output: source-language subtitles
+      #     automation/meta/fusionn-muse.db     durable queue and attempt state
+      #     automation/failed                   jobs that gave up, for inspection
+      #
+      # Keeping the database and the media under one mount is what makes queue
+      # state, subtitles and outputs survive a container rebuild.
+      - "${DATA_ROOT:-./data}:/data"
 
-      # ─── Required mounts ───
-      - /path/to/downloads:/data/input:ro # Torrent downloads (read-only)
-      - /path/to/finished:/data/finished # Processed videos
-      - /path/to/subtitles:/data/subtitles # Translated subtitles
-
-      # ─── Optional: persist queue across restarts ───
-      # Without these, queued jobs are lost on container restart
-      # - ./data/staging:/data/staging
-      # - ./data/processing:/data/processing
-
-      # ─── Optional: access failed jobs for debugging ───
-      # - ./data/failed:/data/failed
+      # Config (required). Create it first:
+      #   cp config/config.example.yaml config/config.yaml
+      - "${CONFIG_FILE:-./config/config.yaml}:/app/config/config.yaml:ro"
     environment:
       - ENV=production
-      - TZ=Asia/Singapore
+      - TZ=${TZ:-Asia/Shanghai}
     # Bounded container logs: 20 MiB per file, current file plus five backups.
     # This takes effect when the container is recreated, not on the running one.
     logging:

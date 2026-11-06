@@ -1,21 +1,44 @@
 #!/usr/bin/env python3
-"""qBittorrent completion hook: send finished whisparr torrents to fusionn-muse.
+"""qBittorrent completion hook: send finished torrents to fusionn-muse.
 
 qBittorrent setup (Options -> Downloads -> Run external program on torrent
-completion):
+completion). qBittorrent runs this command directly rather than through a
+shell, so environment assignments cannot be prefixed to it; pass the settings as
+options, or set the variables in the environment qBittorrent itself inherits.
+The field takes one line; the command is wrapped here for readability:
 
-    python3 /path/to/torrent_complete.py "%N" "%L" "%I" "%F"
+    python3 /path/to/torrent_complete.py \\
+        --muse-url http://muse-host:8080 \\
+        --category whisparr \\
+        --host-input /path/to/downloads \\
+        --container-input /data \\
+        "%N" "%L" "%I" "%F"
 
 %N is the torrent name, %L the category, %I the info hash and %F the content
-path. Only the whisparr category is sent. The content path is mapped from the
+path. The options must come before them; a name or path may start with a dash.
+Only the configured category is sent, and the content path is mapped from the
 host download mount to the path that fusionn-muse sees. The script makes one
 request and does not resend. It exits 1 when the path is outside the mount, the
 request fails, or fusionn-muse does not answer HTTP 202 with a submission_id;
 resubmit a missed completion by hand.
 
-Optional environment variables (the defaults are the constants below):
+Settings (the option wins over the environment variable; the default is used
+when neither is set):
 
-    MUSE_URL    fusionn-muse base URL
+    --muse-url (MUSE_URL)                fusionn-muse base URL; default
+                                         http://127.0.0.1:8080, which qBittorrent
+                                         in a container cannot use
+    --category (MUSE_CATEGORY)           the only category that is sent; default
+                                         whisparr, an empty value sends the
+                                         uncategorized torrents only
+    --host-input (HOST_INPUT_PATH)       the download mount as qBittorrent sees
+                                         it; required
+    --container-input (CONTAINER_INPUT_PATH)
+                                         the same mount as fusionn-muse sees it;
+                                         default /data
+
+Environment only (no option):
+
     LOG_FILE    file that the log lines are appended to
     LOG_LEVEL   DEBUG, INFO, WARN or ERROR; the default is INFO
     TZ          time zone of the log timestamps; the default is Asia/Shanghai
@@ -39,15 +62,22 @@ import urllib.request
 import uuid
 import zoneinfo
 
-MUSE_URL = os.environ.get("MUSE_URL", "http://192.168.50.135:4444")
+MUSE_URL_DEFAULT = "http://127.0.0.1:8080"
 LOG_FILE = os.environ.get("LOG_FILE", "/tmp/torrent-complete.log")
 
-# Only this category is sent to fusionn-muse.
-MUSE_CATEGORY = "whisparr"
+# The settings of this hook: name -> (option, environment variable, default).
+# An empty default means the value has to be configured; the default category is
+# the one the qBittorrent setup in the example config and the README uses, and an
+# empty category sends the uncategorized torrents only.
+SETTINGS = {
+    "muse_url": ("--muse-url", "MUSE_URL", MUSE_URL_DEFAULT),
+    "category": ("--category", "MUSE_CATEGORY", "whisparr"),
+    "host_input": ("--host-input", "HOST_INPUT_PATH", ""),
+    "container_input": ("--container-input", "CONTAINER_INPUT_PATH", "/data"),
+}
+_OPTION_NAMES = {option: name for name, (option, _, _) in SETTINGS.items()}
 
-# The host download mount, and the path that fusionn-muse sees for it.
-HOST_INPUT_PATH = "/Volumes/External"
-CONTAINER_INPUT_PATH = "/data"
+USAGE = "Usage: torrent_complete.py [options] <name> <category> <info_hash> <path>"
 
 REQUEST_TIMEOUT_SECONDS = 15
 # The acknowledgement is small; reading stops at this size.
@@ -245,10 +275,52 @@ class Log:
         self.emit(ERROR, event, msg, **fields)
 
 
-def container_path(path):
-    """Map a path under HOST_INPUT_PATH to the container path, else return None."""
-    if path == HOST_INPUT_PATH or path.startswith(HOST_INPUT_PATH + "/"):
-        return CONTAINER_INPUT_PATH + path[len(HOST_INPUT_PATH):]
+class UsageError(ValueError):
+    """A command line that cannot be used, naming the option that broke it."""
+
+    def __init__(self, reason, option):
+        super().__init__(reason)
+        self.reason = reason
+        self.option = option
+
+
+def parse_options(argv):
+    """Split the leading options from the four qBittorrent arguments.
+
+    Parsing stops at the first argument that is not an option, so a torrent name
+    or path that starts with a dash cannot be read as one.
+    """
+    options = {}
+    position = 0
+    while position < len(argv) and argv[position].startswith("--"):
+        option = argv[position]
+        if option not in _OPTION_NAMES:
+            raise UsageError("unknown option", option)
+        if position + 1 >= len(argv):
+            raise UsageError("option needs a value", option)
+        options[_OPTION_NAMES[option]] = argv[position + 1]
+        position += 2
+    return options, argv[position:]
+
+
+def setting(name, options):
+    """Return a setting: the option, else its environment variable, else the default."""
+    _, variable, default = SETTINGS[name]
+    if name in options:
+        return options[name]
+    return os.environ.get(variable) or default
+
+
+def container_path(path, host_input, container_input):
+    """Map a path under the host download mount to the path fusionn-muse sees."""
+    host_input = host_input.rstrip("/")
+    container_prefix = container_input.rstrip("/")
+    if not host_input:
+        return None
+    if path == host_input:
+        return container_prefix or "/"
+    if path.startswith(host_input + "/"):
+        return container_prefix + path[len(host_input):]
     return None
 
 
@@ -271,7 +343,7 @@ def _submission_id(body):
     return None
 
 
-def submit(log, request_id, path, name, category):
+def submit(log, request_id, muse_url, path, name, category):
     """Send the webhook request once and return the exit code.
 
     Only the status, the body size and fixed reasons are logged: the response
@@ -279,7 +351,7 @@ def submit(log, request_id, path, name, category):
     """
     payload = json.dumps({"path": path, "name": name, "category": category}, ensure_ascii=False)
     request = urllib.request.Request(
-        MUSE_URL.rstrip("/") + "/api/v1/webhook/torrent",
+        muse_url.rstrip("/") + "/api/v1/webhook/torrent",
         # surrogateescape sends undecodable argument bytes back as they came.
         data=payload.encode("utf-8", "surrogateescape"),
         headers={"Content-Type": "application/json", "X-Request-ID": request_id},
@@ -339,30 +411,46 @@ def main(argv):
     if invalid_tz is not None:
         log.warn("config_invalid", "Unknown TZ, using Asia/Shanghai for log timestamps", tz=invalid_tz)
 
-    if len(argv) < 5:
-        log.error(
-            "arguments_invalid",
-            "Usage: torrent_complete.py <name> <category> <info_hash> <path>",
-            arguments=len(argv) - 1,
-        )
+    try:
+        options, arguments = parse_options(argv[1:])
+    except UsageError as error:
+        log.error("arguments_invalid", USAGE, error=error.reason, option=error.option)
         return 1
-    name, category, info_hash, path = argv[1:5]
+    if len(arguments) != 4:
+        log.error("arguments_invalid", USAGE, arguments=len(arguments))
+        return 1
+
+    muse_url = setting("muse_url", options)
+    wanted_category = setting("category", options)
+    host_input = setting("host_input", options)
+    container_input = setting("container_input", options)
+
+    name, category, info_hash, path = arguments
     log.info("torrent_completed", "Torrent completed", category=category, info_hash=info_hash, name=name, path=path)
 
-    if category != MUSE_CATEGORY:
+    if category != wanted_category:
         log.info("torrent_skipped", "Category is not sent to fusionn-muse", category=category)
         return 0
-    mapped = container_path(path)
+    if not host_input:
+        log.error(
+            "config_invalid",
+            "The download mount as qBittorrent sees it is not configured",
+            error="download mount is not configured",
+            option=SETTINGS["host_input"][0],
+            variable=SETTINGS["host_input"][1],
+        )
+        return 1
+    mapped = container_path(path, host_input, container_input)
     if mapped is None:
         log.error(
             "webhook_failed",
             "Path is outside the download mount",
             error="path is outside the download mount",
-            host_input_path=HOST_INPUT_PATH,
+            host_input_path=host_input,
             path=path,
         )
         return 1
-    return submit(log, request_id, mapped, name, category)
+    return submit(log, request_id, muse_url, mapped, name, category)
 
 
 if __name__ == "__main__":

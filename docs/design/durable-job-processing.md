@@ -160,7 +160,7 @@ Submission persistence, Artifact claims and action/receipt metadata migrate the 
 
 The first SQLite deployment starts with empty Job history and must happen while no work is in flight. Do not infer historical Jobs from existing folders or subtitle outputs.
 
-The active deployment bind-mounts `/Volumes/External:/data`. Add `/data/automation/transcriptions` and `/data/automation/meta`. The repository's current `docker-compose.yaml` paths are stale and must not be treated as the active deployment layout.
+The active deployment bind-mounts `/Volumes/External:/data`. Add `/data/automation/transcriptions` and `/data/automation/meta`. `docker-compose.yaml` is an example for that layout with `DATA_ROOT=/Volumes/External`; its defaults are not the active deployment's values.
 
 ## Deprecated pipeline compatibility
 
